@@ -11,7 +11,6 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 BOT_TOKEN = "8712603440:AAGc7SV7cAuHYVYZbVv0dSpxUKtmKlDehqM"
 DB_PATH = "bot.db"
 
-# ID кастомных эмодзи
 E_SUPPORT = '<tg-emoji emoji-id="5391112412445288650">🥸</tg-emoji>'
 E_DENIED = '<tg-emoji emoji-id="5210952531676504517">❌</tg-emoji>'
 E_MAIL = '<tg-emoji emoji-id="5253742260054409879">✉️</tg-emoji>'
@@ -31,7 +30,6 @@ router = Router()
 
 
 def apply_kb() -> InlineKeyboardMarkup:
-    # style="success" -> зелёная кнопка (Bot API 9.4+, aiogram 3.25+)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -93,7 +91,7 @@ async def on_apply(call: CallbackQuery) -> None:
 
     await add_application(user.id, user.username)
     await call.answer()
-    await call.message.edit_text(TEXT_SUBMITTED, reply_markup=apply_kb())
+    await call.message.edit_text(TEXT_SUBMITTED, reply_markup=None)
 
 
 async def main() -> None:
