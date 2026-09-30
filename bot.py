@@ -19,7 +19,7 @@ E_WAIT = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
 
 TEXT_START = (
     f"{E_DENIED} <b>ДОСТУП ОГРАНИЧЕН</b>\n\n"
-    "Для начала работы сначала подайте заявку."
+    "<i>Для начала работы сначала подайте заявку.</i>"
 )
 TEXT_SUBMITTED = (
     f"{E_MAIL} <b>ЗАЯВКА ПОДАНА, ОЖИДАЙТЕ РАССМОТРЕНИЯ</b>\n\n"
@@ -39,6 +39,7 @@ def apply_kb() -> InlineKeyboardMarkup:
                     text="Подать заявку",
                     callback_data="apply",
                     style="success",
+                    icon_custom_emoji_id="5210952531676504517",
                 )
             ]
         ]
@@ -75,6 +76,9 @@ async def add_application(user_id: int, username: str | None) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    if await has_application(message.from_user.id):
+        await message.answer(TEXT_ALREADY)
+        return
     await message.answer(TEXT_START, reply_markup=apply_kb())
 
 
