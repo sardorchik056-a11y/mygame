@@ -8,7 +8,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-BOT_TOKEN = "8712603440:AAGc7SV7cAuHYVYZbVv0dSpxUKtmKlDehqM"
+BOT_TOKEN = "8651720497:AAG_fEJKDwIl-SeTPFi_TSRPVnaDGtv96bw"
 DB_PATH = "bot.db"
 
 E_SUPPORT = '<tg-emoji emoji-id="5391112412445288650">🥸</tg-emoji>'
