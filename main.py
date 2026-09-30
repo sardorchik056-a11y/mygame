@@ -15,12 +15,28 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="Меню", style=ButtonStyle.PRIMARY),      # синяя
-                KeyboardButton(text="Арена", style=ButtonStyle.DANGER),      # красная
-                KeyboardButton(text="Рынок", style=ButtonStyle.PRIMARY),     # синяя
+                KeyboardButton(
+                    text="Меню",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="5257965174979042426",
+                ),
+                KeyboardButton(
+                    text="Арена",
+                    style=ButtonStyle.DANGER,
+                    icon_custom_emoji_id="5454014806950429357",
+                ),
+                KeyboardButton(
+                    text="Рынок",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="6010183144450299916",
+                ),
             ],
             [
-                KeyboardButton(text="Настройки", style=ButtonStyle.PRIMARY), # синяя
+                KeyboardButton(
+                    text="Настройки",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="5341715473882955310",
+                ),
             ],
         ],
         resize_keyboard=True,
