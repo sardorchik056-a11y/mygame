@@ -21,33 +21,53 @@ dp = Dispatcher()
 # user_id -> pet_key. Для постоянного хранения замени на SQLite.
 user_pets: dict[int, str] = {}
 
+STAT_LABELS = {
+    "hp": "Здоровье",
+    "atk": "Атака",
+    "def": "Защита",
+    "spd": "Скорость",
+    "luck": "Удача",
+}
+
 PETS = {
     "flame": {
         "name": "Пиро",
         "element": "Огонь",
+        "rarity": "Эпический",
         "story": (
             "Пиро родился в жерле потухшего вулкана, где до сих пор тлеют угли. "
             "Он вспыльчив, но предан хозяину до последнего вздоха. "
             "Говорят, его пламя не гаснет даже под проливным дождём."
         ),
+        "stats": {"hp": 6, "atk": 10, "def": 4, "spd": 7, "luck": 5},
+        "skill": "Огненная ярость",
+        "skill_desc": "Чем меньше здоровья, тем сильнее удары.",
     },
     "aqua": {
         "name": "Аква",
         "element": "Вода",
+        "rarity": "Эпический",
         "story": (
             "Аква вышла из глубин подземного озера, куда не проникает солнечный свет. "
             "Она спокойна, рассудительна и умеет ждать нужного момента. "
             "Её чешуя мерцает, как звёзды в ночной воде."
         ),
+        "stats": {"hp": 7, "atk": 6, "def": 6, "spd": 7, "luck": 6},
+        "skill": "Приливная волна",
+        "skill_desc": "Замедляет противника в начале боя.",
     },
     "terra": {
         "name": "Терра",
         "element": "Земля",
+        "rarity": "Эпический",
         "story": (
             "Терра проснулась среди древних скал, которые старше любого города. "
             "Она неторопливая и выносливая, её очень трудно сдвинуть с места. "
             "Каждый её шаг оставляет на камне цветущий след."
         ),
+        "stats": {"hp": 10, "atk": 5, "def": 10, "spd": 3, "luck": 4},
+        "skill": "Каменная кожа",
+        "skill_desc": "Поглощает часть входящего урона.",
     },
 }
 
@@ -136,15 +156,41 @@ def pet_card_kb(pet_key: str) -> InlineKeyboardMarkup:
 
 # ---------- Тексты ----------
 
-PETS_LIST_TEXT = "<b>Выбери своего питомца</b>\n\nНажми на питомца, чтобы узнать о нём больше."
+WELCOME_TEXT = (
+    "<b>Добро пожаловать</b>\n\n"
+    "<i>Тебя ждёт мир, где рядом с тобой будет верный питомец. "
+    "Вместе вы сможете сражаться на арене, торговать на рынке "
+    "и становиться сильнее.</i>\n\n"
+    "<i>Но сначала нужно найти себе спутника.</i>"
+)
+
+PETS_LIST_TEXT = (
+    "<b>Выбор питомца</b>\n\n"
+    "<i>Три существа ждут своего хозяина. "
+    "Нажми на любого, чтобы узнать его историю и силу.</i>"
+)
+
+
+def stat_bar(value: int, max_value: int = 10) -> str:
+    return "▰" * value + "▱" * (max_value - value)
 
 
 def pet_card_text(pet_key: str) -> str:
     pet = PETS[pet_key]
+
+    stats_lines = "\n".join(
+        f"{STAT_LABELS[key]:<9}{stat_bar(val)} {val:>2}/10"
+        for key, val in pet["stats"].items()
+    )
+
     return (
-        f"<b>{pet['name']}</b>\n"
-        f"Стихия: <b>{pet['element']}</b>\n\n"
-        f"<i>{pet['story']}</i>"
+        f"<b>{pet['name'].upper()}</b>\n"
+        f"<i>Стихия: {pet['element']}  ·  Редкость: {pet['rarity']}</i>\n\n"
+        f"<blockquote><i>{pet['story']}</i></blockquote>\n"
+        f"<b>Характеристики</b>\n"
+        f"<pre>{stats_lines}</pre>\n"
+        f"<b>Способность: {pet['skill']}</b>\n"
+        f"<i>{pet['skill_desc']}</i>"
     )
 
 
@@ -154,17 +200,10 @@ def pet_card_text(pet_key: str) -> str:
 async def cmd_start(message: Message):
     # Если питомец уже выбран, сразу меню
     if message.from_user.id in user_pets:
-        await message.answer("С возвращением!", reply_markup=main_menu())
+        await message.answer("<b>С возвращением</b>", reply_markup=main_menu())
         return
 
-    await message.answer(
-        "<b>Добро пожаловать!</b>\n\n"
-        "Тебя ждёт мир, где рядом с тобой будет верный питомец. "
-        "Вместе вы сможете сражаться на арене, торговать на рынке "
-        "и становиться сильнее.\n\n"
-        "Но сначала нужно найти себе спутника.",
-        reply_markup=continue_kb(),
-    )
+    await message.answer(WELCOME_TEXT, reply_markup=continue_kb())
 
 
 @dp.callback_query(F.data == "intro:continue")
@@ -211,38 +250,40 @@ async def on_pet_pick(callback: CallbackQuery):
 
     # Фиксируем выбор, кнопки убираются
     await callback.message.edit_text(
-        f"Ты выбрал: <b>{pet['name']}</b> (стихия: {pet['element']})"
+        f"<b>Выбор сделан</b>\n\n"
+        f"<i>Твой спутник:</i> <b>{pet['name']}</b>\n"
+        f"<i>Стихия: {pet['element']}</i>"
     )
     await callback.answer()
 
     # 1) сначала пожелание удачи
     await callback.message.answer(
-        f"{pet['name']} теперь твой спутник. Удачи в приключениях, "
-        f"пусть ваш путь будет долгим и победным!"
+        f"<i>{pet['name']} теперь рядом с тобой. "
+        f"Удачи в приключениях, пусть ваш путь будет долгим и победным.</i>"
     )
 
     # 2) только потом меню
-    await callback.message.answer("Главное меню", reply_markup=main_menu())
+    await callback.message.answer("<b>Главное меню</b>", reply_markup=main_menu())
 
 
 @dp.message(F.text == "Меню")
 async def open_menu(message: Message):
-    await message.answer("Главное меню", reply_markup=main_menu())
+    await message.answer("<b>Главное меню</b>", reply_markup=main_menu())
 
 
 @dp.message(F.text == "Арена")
 async def open_arena(message: Message):
-    await message.answer("Арена")
+    await message.answer("<b>Арена</b>")
 
 
 @dp.message(F.text == "Рынок")
 async def open_market(message: Message):
-    await message.answer("Рынок")
+    await message.answer("<b>Рынок</b>")
 
 
 @dp.message(F.text == "Настройки")
 async def open_settings(message: Message):
-    await message.answer("Настройки")
+    await message.answer("<b>Настройки</b>")
 
 
 async def main():
