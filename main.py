@@ -15,12 +15,12 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="Меню"),
-                KeyboardButton(text="Арена", style=ButtonStyle.DANGER),  # красная
-                KeyboardButton(text="Рынок"),
+                KeyboardButton(text="Меню", style=ButtonStyle.PRIMARY),      # синяя
+                KeyboardButton(text="Арена", style=ButtonStyle.DANGER),      # красная
+                KeyboardButton(text="Рынок", style=ButtonStyle.PRIMARY),     # синяя
             ],
             [
-                KeyboardButton(text="Настройки"),
+                KeyboardButton(text="Настройки", style=ButtonStyle.PRIMARY), # синяя
             ],
         ],
         resize_keyboard=True,
