@@ -39,7 +39,7 @@ def apply_kb() -> InlineKeyboardMarkup:
                     text="Подать заявку",
                     callback_data="apply",
                     style="success",
-                    icon_custom_emoji_id="5210952531676504517",
+                    icon_custom_emoji_id="5253742260054409879",
                 )
             ]
         ]
