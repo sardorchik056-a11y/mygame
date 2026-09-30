@@ -2,7 +2,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ButtonStyle
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ButtonStyle, ParseMode
 from aiogram.filters import CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -17,8 +18,7 @@ BOT_TOKEN = "8712603440:AAGc7SV7cAuHYVYZbVv0dSpxUKtmKlDehqM"
 
 dp = Dispatcher()
 
-# Выбранные питомцы: user_id -> pet_key.
-# Для постоянного хранения замени на запись в SQLite.
+# user_id -> pet_key. Для постоянного хранения замени на SQLite.
 user_pets: dict[int, str] = {}
 
 PETS = {
@@ -51,6 +51,8 @@ PETS = {
     },
 }
 
+
+# ---------- Клавиатуры ----------
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -98,13 +100,13 @@ def continue_kb() -> InlineKeyboardMarkup:
     )
 
 
-def pets_kb() -> InlineKeyboardMarkup:
+def pets_list_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=f"{pet['name']} — {pet['element']}",
-                    callback_data=f"pet:{key}",
+                    callback_data=f"pet:view:{key}",
                     style=ButtonStyle.PRIMARY,
                 )
             ]
@@ -113,21 +115,44 @@ def pets_kb() -> InlineKeyboardMarkup:
     )
 
 
-def pets_text() -> str:
-    parts = ["<b>Выбери своего питомца</b>\n"]
-    for pet in PETS.values():
-        parts.append(
-            f"<b>{pet['name']}</b>\n"
-            f"Стихия: <b>{pet['element']}</b>\n"
-            f"{pet['story']}\n"
-        )
-    parts.append("Выбор нельзя будет изменить, так что подумай хорошенько.")
-    return "\n".join(parts)
+def pet_card_kb(pet_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Выбрать",
+                    callback_data=f"pet:pick:{pet_key}",
+                    style=ButtonStyle.SUCCESS,
+                ),
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="pet:back",
+                    style=ButtonStyle.DANGER,
+                ),
+            ]
+        ]
+    )
 
+
+# ---------- Тексты ----------
+
+PETS_LIST_TEXT = "<b>Выбери своего питомца</b>\n\nНажми на питомца, чтобы узнать о нём больше."
+
+
+def pet_card_text(pet_key: str) -> str:
+    pet = PETS[pet_key]
+    return (
+        f"<b>{pet['name']}</b>\n"
+        f"Стихия: <b>{pet['element']}</b>\n\n"
+        f"<i>{pet['story']}</i>"
+    )
+
+
+# ---------- Хендлеры ----------
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    # Если питомец уже выбран, сразу показываем меню
+    # Если питомец уже выбран, сразу меню
     if message.from_user.id in user_pets:
         await message.answer("С возвращением!", reply_markup=main_menu())
         return
@@ -139,29 +164,44 @@ async def cmd_start(message: Message):
         "и становиться сильнее.\n\n"
         "Но сначала нужно найти себе спутника.",
         reply_markup=continue_kb(),
-        parse_mode="HTML",
     )
 
 
 @dp.callback_query(F.data == "intro:continue")
 async def on_continue(callback: CallbackQuery):
+    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pet:view:"))
+async def on_pet_view(callback: CallbackQuery):
+    pet_key = callback.data.split(":")[2]
+    if pet_key not in PETS:
+        await callback.answer("Неизвестный питомец", show_alert=True)
+        return
+
     await callback.message.edit_text(
-        pets_text(),
-        reply_markup=pets_kb(),
-        parse_mode="HTML",
+        pet_card_text(pet_key),
+        reply_markup=pet_card_kb(pet_key),
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("pet:"))
-async def on_pet_chosen(callback: CallbackQuery):
+@dp.callback_query(F.data == "pet:back")
+async def on_pet_back(callback: CallbackQuery):
+    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pet:pick:"))
+async def on_pet_pick(callback: CallbackQuery):
     user_id = callback.from_user.id
 
     if user_id in user_pets:
         await callback.answer("Питомец уже выбран", show_alert=True)
         return
 
-    pet_key = callback.data.split(":", 1)[1]
+    pet_key = callback.data.split(":")[2]
     pet = PETS.get(pet_key)
     if pet is None:
         await callback.answer("Неизвестный питомец", show_alert=True)
@@ -169,10 +209,9 @@ async def on_pet_chosen(callback: CallbackQuery):
 
     user_pets[user_id] = pet_key
 
-    # Убираем кнопки выбора и фиксируем результат
+    # Фиксируем выбор, кнопки убираются
     await callback.message.edit_text(
-        f"Ты выбрал: <b>{pet['name']}</b> (стихия: {pet['element']})",
-        parse_mode="HTML",
+        f"Ты выбрал: <b>{pet['name']}</b> (стихия: {pet['element']})"
     )
     await callback.answer()
 
@@ -208,7 +247,10 @@ async def open_settings(message: Message):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     await dp.start_polling(bot)
 
 
