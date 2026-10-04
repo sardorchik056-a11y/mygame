@@ -473,6 +473,37 @@ async def send_pet_card(
     )
 
 
+# Куда админ может добавить фото: сообщения-экраны и карточки питомцев
+IMG_TARGETS: dict[str, str] = {
+    "welcome": "Приветствие (Керри)",
+    "pets_list": "Выбор питомцев",
+    **{key: pet["name"] for key, pet in PETS.items()},
+}
+
+
+async def send_screen(
+    bot: Bot,
+    chat_id: int,
+    key: str,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Обычное сообщение; если для экрана добавлено фото, текст идёт подписью к нему."""
+    file_id = pet_images.get(key)
+
+    if file_id:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id, photo=file_id, caption=text, reply_markup=reply_markup
+            )
+            return
+        except TelegramBadRequest as e:
+            # Например, file_id устарел или подпись слишком длинная (лимит 1024)
+            logging.warning("Не удалось отправить фото экрана %s: %s", key, e)
+
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+
 # ---------- Админка: /img ----------
 
 class ImgStates(StatesGroup):
@@ -485,8 +516,8 @@ admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 
 IMG_MENU_TEXT = (
     "<b>Изображения питомцев</b>\n\n"
-    "<i>Выбери питомца, чтобы добавить или заменить фото на его карточке. "
-    "Галочка значит, что фото уже есть.</i>"
+    "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
+    "выбора питомцев или на карточку питомца. Галочка значит, что фото уже есть.</i>"
 )
 
 
@@ -495,12 +526,12 @@ def img_pets_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"{'✅' if key in pet_images else '➕'} {pet['name']}",
+                    text=f"{'✅' if key in pet_images else '➕'} {title}",
                     callback_data=f"img:pet:{key}",
                     style=ButtonStyle.PRIMARY,
                 )
             ]
-            for key, pet in PETS.items()
+            for key, title in IMG_TARGETS.items()
         ]
     )
 
@@ -532,14 +563,14 @@ async def cmd_img(message: Message, state: FSMContext):
 @admin_router.callback_query(F.data.startswith("img:pet:"))
 async def img_choose_pet(callback: CallbackQuery, state: FSMContext):
     pet_key = callback.data.split(":")[2]
-    if pet_key not in PETS:
-        await callback.answer("Неизвестный питомец", show_alert=True)
+    if pet_key not in IMG_TARGETS:
+        await callback.answer("Неизвестная цель", show_alert=True)
         return
 
     await state.set_state(ImgStates.waiting_photo)
     await state.update_data(pet_key=pet_key)
     await callback.message.edit_text(
-        f"<b>{PETS[pet_key]['name']}</b>\n\n"
+        f"<b>{IMG_TARGETS[pet_key]}</b>\n\n"
         "<i>Отправь фото одним сообщением (как фото, не файлом).</i>",
         reply_markup=img_prompt_kb(pet_key),
     )
@@ -567,7 +598,7 @@ async def img_delete(callback: CallbackQuery, state: FSMContext):
 async def img_receive(message: Message, state: FSMContext):
     data = await state.get_data()
     pet_key = data.get("pet_key")
-    if pet_key not in PETS:
+    if pet_key not in IMG_TARGETS:
         await state.clear()
         return
 
@@ -576,9 +607,14 @@ async def img_receive(message: Message, state: FSMContext):
     save_images()
     await state.clear()
 
-    await message.answer(f"<b>Фото для {PETS[pet_key]['name']} сохранено</b>")
-    # Предпросмотр карточки (без кнопок выбора)
-    await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
+    await message.answer(f"<b>Фото для «{IMG_TARGETS[pet_key]}» сохранено</b>")
+    # Предпросмотр без кнопок
+    if pet_key in PETS:
+        await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
+    elif pet_key == "welcome":
+        await send_screen(message.bot, message.chat.id, "welcome", WELCOME_TEXT)
+    else:
+        await send_screen(message.bot, message.chat.id, "pets_list", PETS_LIST_TEXT)
     await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
 
 
@@ -599,13 +635,23 @@ async def cmd_start(message: Message):
         await message.answer("<b>С возвращением</b>", reply_markup=main_menu())
         return
 
-    await message.answer(WELCOME_TEXT, reply_markup=continue_kb())
+    await send_screen(
+        message.bot, message.chat.id, "welcome", WELCOME_TEXT, continue_kb()
+    )
 
 
 @dp.callback_query(F.data == "intro:continue")
 async def on_continue(callback: CallbackQuery):
-    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
     await callback.answer()
+    # Текст -> фото с подписью: надёжнее удалить и отправить новое
+    await callback.message.delete()
+    await send_screen(
+        callback.bot,
+        callback.message.chat.id,
+        "pets_list",
+        PETS_LIST_TEXT,
+        pets_list_kb(),
+    )
 
 
 @dp.callback_query(F.data.startswith("pet:view:"))
@@ -625,7 +671,13 @@ async def on_pet_view(callback: CallbackQuery):
 async def on_pet_back(callback: CallbackQuery):
     await callback.answer()
     await callback.message.delete()
-    await callback.message.answer(PETS_LIST_TEXT, reply_markup=pets_list_kb())
+    await send_screen(
+        callback.bot,
+        callback.message.chat.id,
+        "pets_list",
+        PETS_LIST_TEXT,
+        pets_list_kb(),
+    )
 
 
 @dp.callback_query(F.data.startswith("pet:pick:"))
