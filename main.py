@@ -1,16 +1,23 @@
 import asyncio
+import json
 import logging
 from html import escape
+from pathlib import Path
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ButtonStyle, ParseMode
-from aiogram.filters import CommandStart
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     InputRichMessage,
+    InputRichMessageMedia,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -18,7 +25,29 @@ from aiogram.types import (
 
 BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
 
+# Telegram ID админов (свой ID можно узнать у @userinfobot)
+ADMIN_IDS: set[int] = {8118184388}
+
 dp = Dispatcher()
+
+# Фото питомцев: pet_key -> file_id. Хранится в файле рядом с ботом.
+IMAGES_FILE = Path(__file__).with_name("pet_images.json")
+
+
+def load_images() -> dict[str, str]:
+    try:
+        return json.loads(IMAGES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_images() -> None:
+    IMAGES_FILE.write_text(
+        json.dumps(pet_images, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+pet_images: dict[str, str] = load_images()
 
 # user_id -> pet_key. Для постоянного хранения замени на SQLite.
 user_pets: dict[int, str] = {}
@@ -183,7 +212,7 @@ PETS_LIST_TEXT = (
 )
 
 
-def pet_card_html(pet_key: str) -> str:
+def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False) -> str:
     """Rich Message (Bot API 10.1+): весь текст жирным, история питомца курсивом."""
     pet = PETS[pet_key]
 
@@ -197,7 +226,19 @@ def pet_card_html(pet_key: str) -> str:
 
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
+    # Фото сверху (Bot API 10.2+: media передаётся отдельно, ссылка tg://photo?id=...)
+    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
+
+    # Кнопка прямо в теле сообщения (Bot API 10.3); в предпросмотре админа её нет
+    buttons = "" if preview else (
+        "<tg-button-row>"
+        f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
+        'style="success">Выбрать</tg-button>'
+        "</tg-button-row>"
+    )
+
     return (
+        f"{image}"
         # Имя и редкость, пустая строка, затем стихия (всё в одном абзаце через <br>)
         f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
         "<br>&nbsp;<br>"
@@ -213,11 +254,7 @@ def pet_card_html(pet_key: str) -> str:
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        # Кнопка прямо в теле сообщения (Bot API 10.3)
-        "<tg-button-row>"
-        f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
-        'style="success">Выбрать</tg-button>'
-        "</tg-button-row>"
+        f"{buttons}"
     )
 
 
@@ -237,12 +274,153 @@ def back_kb() -> InlineKeyboardMarkup:
     )
 
 
-async def send_pet_card(bot: Bot, chat_id: int, pet_key: str) -> None:
+async def send_pet_card(
+    bot: Bot, chat_id: int, pet_key: str, preview: bool = False
+) -> None:
+    file_id = pet_images.get(pet_key)
+    reply_markup = None if preview else back_kb()
+
+    if file_id:
+        try:
+            await bot.send_rich_message(
+                chat_id=chat_id,
+                rich_message=InputRichMessage(
+                    html=pet_card_html(pet_key, with_image=True, preview=preview),
+                    media=[
+                        InputRichMessageMedia(
+                            id="pet", media=InputMediaPhoto(media=file_id)
+                        )
+                    ],
+                ),
+                reply_markup=reply_markup,
+            )
+            return
+        except TelegramBadRequest as e:
+            # Например, file_id устарел — показываем карточку без фото
+            logging.warning("Не удалось отправить фото %s: %s", pet_key, e)
+
     await bot.send_rich_message(
         chat_id=chat_id,
-        rich_message=InputRichMessage(html=pet_card_html(pet_key)),
-        reply_markup=back_kb(),
+        rich_message=InputRichMessage(html=pet_card_html(pet_key, preview=preview)),
+        reply_markup=reply_markup,
     )
+
+
+# ---------- Админка: /img ----------
+
+class ImgStates(StatesGroup):
+    waiting_photo = State()
+
+
+admin_router = Router()
+admin_router.message.filter(F.from_user.id.in_(ADMIN_IDS))
+admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
+
+IMG_MENU_TEXT = (
+    "<b>Изображения питомцев</b>\n\n"
+    "<i>Выбери питомца, чтобы добавить или заменить фото на его карточке. "
+    "Галочка значит, что фото уже есть.</i>"
+)
+
+
+def img_pets_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{'✅' if key in pet_images else '➕'} {pet['name']}",
+                    callback_data=f"img:pet:{key}",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ]
+            for key, pet in PETS.items()
+        ]
+    )
+
+
+def img_prompt_kb(pet_key: str) -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            text="Отмена", callback_data="img:cancel", style=ButtonStyle.DANGER
+        )
+    ]
+    if pet_key in pet_images:
+        row.insert(
+            0,
+            InlineKeyboardButton(
+                text="Удалить фото",
+                callback_data=f"img:del:{pet_key}",
+                style=ButtonStyle.DANGER,
+            ),
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+@admin_router.message(Command("img"))
+async def cmd_img(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+
+
+@admin_router.callback_query(F.data.startswith("img:pet:"))
+async def img_choose_pet(callback: CallbackQuery, state: FSMContext):
+    pet_key = callback.data.split(":")[2]
+    if pet_key not in PETS:
+        await callback.answer("Неизвестный питомец", show_alert=True)
+        return
+
+    await state.set_state(ImgStates.waiting_photo)
+    await state.update_data(pet_key=pet_key)
+    await callback.message.edit_text(
+        f"<b>{PETS[pet_key]['name']}</b>\n\n"
+        "<i>Отправь фото одним сообщением (как фото, не файлом).</i>",
+        reply_markup=img_prompt_kb(pet_key),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "img:cancel")
+async def img_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("img:del:"))
+async def img_delete(callback: CallbackQuery, state: FSMContext):
+    pet_key = callback.data.split(":")[2]
+    pet_images.pop(pet_key, None)
+    save_images()
+    await state.clear()
+    await callback.message.edit_text(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+    await callback.answer("Фото удалено")
+
+
+@admin_router.message(ImgStates.waiting_photo, F.photo)
+async def img_receive(message: Message, state: FSMContext):
+    data = await state.get_data()
+    pet_key = data.get("pet_key")
+    if pet_key not in PETS:
+        await state.clear()
+        return
+
+    # Берём самое большое разрешение
+    pet_images[pet_key] = message.photo[-1].file_id
+    save_images()
+    await state.clear()
+
+    await message.answer(f"<b>Фото для {PETS[pet_key]['name']} сохранено</b>")
+    # Предпросмотр карточки (без кнопок выбора)
+    await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
+    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+
+
+@admin_router.message(ImgStates.waiting_photo)
+async def img_not_photo(message: Message):
+    await message.answer("<i>Нужно отправить именно фото. Или нажми «Отмена».</i>")
+
+
+dp.include_router(admin_router)
 
 
 # ---------- Хендлеры ----------
