@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -9,6 +10,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputRichMessage,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -135,25 +137,6 @@ def pets_list_kb() -> InlineKeyboardMarkup:
     )
 
 
-def pet_card_kb(pet_key: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Выбрать",
-                    callback_data=f"pet:pick:{pet_key}",
-                    style=ButtonStyle.SUCCESS,
-                ),
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="pet:back",
-                    style=ButtonStyle.DANGER,
-                ),
-            ]
-        ]
-    )
-
-
 # ---------- Тексты ----------
 
 WELCOME_TEXT = (
@@ -175,22 +158,45 @@ def stat_bar(value: int, max_value: int = 10) -> str:
     return "▰" * value + "▱" * (max_value - value)
 
 
-def pet_card_text(pet_key: str) -> str:
+def pet_card_html(pet_key: str) -> str:
+    """Rich Message (Bot API 10.1+): таблица характеристик и кнопки внутри сообщения."""
     pet = PETS[pet_key]
 
-    stats_lines = "\n".join(
-        f"{STAT_LABELS[key]:<9}{stat_bar(val)} {val:>2}/10"
+    rows = "".join(
+        "<tr>"
+        f"<td>{escape(STAT_LABELS[key])}</td>"
+        f"<td>{stat_bar(val)}</td>"
+        f'<td align="center">{val}/10</td>'
+        "</tr>"
         for key, val in pet["stats"].items()
     )
 
     return (
-        f"<b>{pet['name'].upper()}</b>\n"
-        f"<i>Стихия: {pet['element']}  ·  Редкость: {pet['rarity']}</i>\n\n"
-        f"<blockquote><i>{pet['story']}</i></blockquote>\n"
-        f"<b>Характеристики</b>\n"
-        f"<pre>{stats_lines}</pre>\n"
-        f"<b>Способность: {pet['skill']}</b>\n"
-        f"<i>{pet['skill_desc']}</i>"
+        f"<h2>{escape(pet['name'].upper())}</h2>"
+        f"<p><i>Стихия: {escape(pet['element'])} · "
+        f"Редкость: {escape(pet['rarity'])}</i></p>"
+        f"<blockquote>{escape(pet['story'])}</blockquote>"
+        "<h3>Характеристики</h3>"
+        "<table bordered striped>"
+        "<tr><th>Параметр</th><th>Уровень</th><th>Значение</th></tr>"
+        f"{rows}"
+        "</table>"
+        f"<p><b>Способность: {escape(pet['skill'])}</b></p>"
+        f"<p><i>{escape(pet['skill_desc'])}</i></p>"
+        # Кнопки прямо в теле сообщения (Bot API 10.3)
+        "<tg-button-row>"
+        f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
+        'style="success">Выбрать</tg-button>'
+        '<tg-button type="callback_data" data="pet:back" '
+        'style="danger">Назад</tg-button>'
+        "</tg-button-row>"
+    )
+
+
+async def send_pet_card(bot: Bot, chat_id: int, pet_key: str) -> None:
+    await bot.send_rich_message(
+        chat_id=chat_id,
+        rich_message=InputRichMessage(html=pet_card_html(pet_key)),
     )
 
 
@@ -219,17 +225,17 @@ async def on_pet_view(callback: CallbackQuery):
         await callback.answer("Неизвестный питомец", show_alert=True)
         return
 
-    await callback.message.edit_text(
-        pet_card_text(pet_key),
-        reply_markup=pet_card_kb(pet_key),
-    )
     await callback.answer()
+    # Обычное сообщение -> rich: надёжнее удалить и отправить новое
+    await callback.message.delete()
+    await send_pet_card(callback.bot, callback.message.chat.id, pet_key)
 
 
 @dp.callback_query(F.data == "pet:back")
 async def on_pet_back(callback: CallbackQuery):
-    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
     await callback.answer()
+    await callback.message.delete()
+    await callback.message.answer(PETS_LIST_TEXT, reply_markup=pets_list_kb())
 
 
 @dp.callback_query(F.data.startswith("pet:pick:"))
@@ -247,14 +253,15 @@ async def on_pet_pick(callback: CallbackQuery):
         return
 
     user_pets[user_id] = pet_key
+    await callback.answer()
 
-    # Фиксируем выбор, кнопки убираются
-    await callback.message.edit_text(
+    # Карточка со своими кнопками убирается, вместо неё фиксируем выбор
+    await callback.message.delete()
+    await callback.message.answer(
         f"<b>Выбор сделан</b>\n\n"
         f"<i>Твой спутник:</i> <b>{pet['name']}</b>\n"
         f"<i>Стихия: {pet['element']}</i>"
     )
-    await callback.answer()
 
     # 1) сначала пожелание удачи
     await callback.message.answer(
