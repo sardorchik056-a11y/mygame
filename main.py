@@ -39,7 +39,20 @@ STAT_EMOJI = {
     "spd": ("5258203794772085854", "⚡️"),
     "luck": ("5422407403884798028", "🍀"),
 }
-FIRE_EMOJI = ("5424972470023104089", "🔥")
+
+# Эмодзи для подписей
+ELEMENT_LABEL_EMOJI = ("5859548930458523065", "🔥")  # слово «Стихия»
+SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способность»
+
+# Эмодзи самой стихии
+ELEMENT_EMOJI = {
+    "Огонь": ("5424972470023104089", "🔥"),
+    "Вода": ("5458654415307153329", "💧"),
+    "Земля": ("6102899956383747910", "🌍"),
+}
+
+# Эмодзи кнопки «Назад»
+BACK_EMOJI_ID = "6039539366177541657"
 
 
 def custom_emoji(pair: tuple[str, str]) -> str:
@@ -171,24 +184,23 @@ PETS_LIST_TEXT = (
 
 
 def pet_card_html(pet_key: str) -> str:
-    """Rich Message (Bot API 10.1+): таблица характеристик и кнопки внутри сообщения."""
+    """Rich Message (Bot API 10.1+): таблица характеристик и кнопка «Выбрать» внутри."""
     pet = PETS[pet_key]
 
-    rows = ""
-    for key, val in pet["stats"].items():
-        value = str(val)
-        if key == "atk":
-            value += " " + custom_emoji(FIRE_EMOJI)
-        rows += (
-            "<tr>"
-            f"<td>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</td>"
-            f'<td align="center">{value}</td>'
-            "</tr>"
-        )
+    rows = "".join(
+        "<tr>"
+        f"<td>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</td>"
+        f'<td align="center">{val}</td>'
+        "</tr>"
+        for key, val in pet["stats"].items()
+    )
+
+    element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
     return (
         f"<h2>{escape(pet['name'].upper())}</h2>"
-        f"<p><i>Стихия: {escape(pet['element'])} · "
+        f"<p><i>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"{element_emoji} {escape(pet['element'])} · "
         f"Редкость: {escape(pet['rarity'])}</i></p>"
         f"<blockquote>{escape(pet['story'])}</blockquote>"
         "<h3>Характеристики</h3>"
@@ -196,15 +208,30 @@ def pet_card_html(pet_key: str) -> str:
         "<tr><th>Параметр</th><th>Значение</th></tr>"
         f"{rows}"
         "</table>"
-        f"<p><b>Способность: {escape(pet['skill'])}</b></p>"
+        f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
+        f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        # Кнопки прямо в теле сообщения (Bot API 10.3)
+        # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
         'style="success">Выбрать</tg-button>'
-        '<tg-button type="callback_data" data="pet:back" '
-        'style="danger">Назад</tg-button>'
         "</tg-button-row>"
+    )
+
+
+def back_kb() -> InlineKeyboardMarkup:
+    # Обычная инлайн-кнопка под сообщением: синяя, с кастомным эмодзи
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="pet:back",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=BACK_EMOJI_ID,
+                )
+            ]
+        ]
     )
 
 
@@ -212,6 +239,7 @@ async def send_pet_card(bot: Bot, chat_id: int, pet_key: str) -> None:
     await bot.send_rich_message(
         chat_id=chat_id,
         rich_message=InputRichMessage(html=pet_card_html(pet_key)),
+        reply_markup=back_kb(),
     )
 
 
