@@ -198,10 +198,10 @@ def pet_card_html(pet_key: str) -> str:
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
     return (
-        f"<p><b>{escape(pet['name'].upper())}</b></p>"
+        f"<p><b>{escape(pet['name'].upper())} · "
+        f"{escape(pet['rarity'])}</b></p>"
         f"<p><b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
-        f"{element_emoji} {escape(pet['element'])} · "
-        f"Редкость: {escape(pet['rarity'])}</b></p>"
+        f"{escape(pet['element'])} {element_emoji}</b></p>"
         # История питомца курсивом
         f"<blockquote><i>{escape(pet['story'])}</i></blockquote>"
         "<p><b>Характеристики</b></p>"
