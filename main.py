@@ -49,8 +49,60 @@ def save_images() -> None:
 
 pet_images: dict[str, str] = load_images()
 
-# user_id -> pet_key. Для постоянного хранения замени на SQLite.
-user_pets: dict[int, str] = {}
+# Данные игроков хранятся в файле рядом с ботом.
+# "user_id": {"pet": key, "level": 1, "xp": 0, "wins": 0, "losses": 0}
+USERS_FILE = Path(__file__).with_name("users.json")
+
+
+def load_users() -> dict[str, dict]:
+    try:
+        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_users() -> None:
+    USERS_FILE.write_text(
+        json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+users: dict[str, dict] = load_users()
+
+
+def get_user(user_id: int) -> dict | None:
+    return users.get(str(user_id))
+
+
+def create_user(user_id: int, pet_key: str) -> None:
+    users[str(user_id)] = {
+        "pet": pet_key,
+        "level": 1,
+        "xp": 0,
+        "wins": 0,
+        "losses": 0,
+    }
+    save_users()
+
+
+def xp_needed(level: int) -> int:
+    """Сколько опыта нужно, чтобы выйти с этого уровня на следующий."""
+    return 100 + (level - 1) * 50
+
+
+def add_xp(user_id: int, amount: int) -> int:
+    """Начислить опыт (пригодится для арены). Возвращает, на сколько вырос уровень."""
+    user = get_user(user_id)
+    if user is None:
+        return 0
+    user["xp"] += amount
+    gained = 0
+    while user["xp"] >= xp_needed(user["level"]):
+        user["xp"] -= xp_needed(user["level"])
+        user["level"] += 1
+        gained += 1
+    save_users()
+    return gained
 
 STAT_LABELS = {
     "hp": "Здоровье",
@@ -258,6 +310,100 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
     )
 
 
+def xp_bar(xp: int, need: int, width: int = 10) -> str:
+    filled = min(width, int(width * xp / need))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def profile_html(user_id: int, with_image: bool = False) -> str:
+    """Профиль питомца игрока: уровень, опыт, характеристики, бои, способность."""
+    user = get_user(user_id)
+    pet = PETS[user["pet"]]
+    level, xp = user["level"], user["xp"]
+    need = xp_needed(level)
+
+    stats_rows = "".join(
+        "<tr>"
+        f"<td><b>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</b></td>"
+        f'<td align="center"><b>{val}</b></td>'
+        "</tr>"
+        for key, val in pet["stats"].items()
+    )
+
+    battles_rows = "".join(
+        "<tr>"
+        f"<td><b>{label}</b></td>"
+        f'<td align="center"><b>{value}</b></td>'
+        "</tr>"
+        for label, value in (
+            ("⚔️ Победы", user["wins"]),
+            ("💔 Поражения", user["losses"]),
+        )
+    )
+
+    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
+    element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
+
+    return (
+        f"{image}"
+        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
+        "<br>&nbsp;<br>"
+        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"{escape(pet['element'])} {element_emoji}</b></p>"
+        f"<p><b>🏆 Уровень {level}</b><br>"
+        f"<b>{xp_bar(xp, need)} {xp}/{need} XP</b></p>"
+        "<p><b>Характеристики</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
+        f"{stats_rows}"
+        "</table>"
+        "<p><b>Бои</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
+        f"{battles_rows}"
+        "</table>"
+        f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
+        f"{escape(pet['skill'])}</b></p>"
+        f"<p><i>{escape(pet['skill_desc'])}</i></p>"
+    )
+
+
+def menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Мой питомец",
+                    callback_data="menu:pet",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ]
+        ]
+    )
+
+
+def profile_back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="menu:back",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=BACK_EMOJI_ID,
+                )
+            ]
+        ]
+    )
+
+
+MENU_TEXT = (
+    "<b>Главное меню</b>\n\n"
+    "<i>Здесь ты можешь посмотреть на своего питомца: его уровень, "
+    "опыт и характеристики.</i>"
+)
+
+
 def back_kb() -> InlineKeyboardMarkup:
     # Обычная инлайн-кнопка под сообщением: синяя, с кастомным эмодзи
     return InlineKeyboardMarkup(
@@ -274,18 +420,22 @@ def back_kb() -> InlineKeyboardMarkup:
     )
 
 
-async def send_pet_card(
-    bot: Bot, chat_id: int, pet_key: str, preview: bool = False
+async def send_rich_card(
+    bot: Bot,
+    chat_id: int,
+    pet_key: str,
+    build_html,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
+    """Отправляет rich-сообщение; если у питомца есть фото, ставит его сверху."""
     file_id = pet_images.get(pet_key)
-    reply_markup = None if preview else back_kb()
 
     if file_id:
         try:
             await bot.send_rich_message(
                 chat_id=chat_id,
                 rich_message=InputRichMessage(
-                    html=pet_card_html(pet_key, with_image=True, preview=preview),
+                    html=build_html(True),
                     media=[
                         InputRichMessageMedia(
                             id="pet", media=InputMediaPhoto(media=file_id)
@@ -296,13 +446,25 @@ async def send_pet_card(
             )
             return
         except TelegramBadRequest as e:
-            # Например, file_id устарел — показываем карточку без фото
+            # Например, file_id устарел: показываем без фото
             logging.warning("Не удалось отправить фото %s: %s", pet_key, e)
 
     await bot.send_rich_message(
         chat_id=chat_id,
-        rich_message=InputRichMessage(html=pet_card_html(pet_key, preview=preview)),
+        rich_message=InputRichMessage(html=build_html(False)),
         reply_markup=reply_markup,
+    )
+
+
+async def send_pet_card(
+    bot: Bot, chat_id: int, pet_key: str, preview: bool = False
+) -> None:
+    await send_rich_card(
+        bot,
+        chat_id,
+        pet_key,
+        lambda with_image: pet_card_html(pet_key, with_image, preview),
+        None if preview else back_kb(),
     )
 
 
@@ -428,7 +590,7 @@ dp.include_router(admin_router)
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     # Если питомец уже выбран, сразу меню
-    if message.from_user.id in user_pets:
+    if get_user(message.from_user.id):
         await message.answer("<b>С возвращением</b>", reply_markup=main_menu())
         return
 
@@ -465,7 +627,7 @@ async def on_pet_back(callback: CallbackQuery):
 async def on_pet_pick(callback: CallbackQuery):
     user_id = callback.from_user.id
 
-    if user_id in user_pets:
+    if get_user(user_id):
         await callback.answer("Питомец уже выбран", show_alert=True)
         return
 
@@ -475,7 +637,7 @@ async def on_pet_pick(callback: CallbackQuery):
         await callback.answer("Неизвестный питомец", show_alert=True)
         return
 
-    user_pets[user_id] = pet_key
+    create_user(user_id, pet_key)
     await callback.answer()
 
     # Карточка со своими кнопками убирается, вместо неё фиксируем выбор
@@ -498,7 +660,32 @@ async def on_pet_pick(callback: CallbackQuery):
 
 @dp.message(F.text == "Меню")
 async def open_menu(message: Message):
-    await message.answer("<b>Главное меню</b>", reply_markup=main_menu())
+    await message.answer(MENU_TEXT, reply_markup=menu_kb())
+
+
+@dp.callback_query(F.data == "menu:pet")
+async def on_menu_pet(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user is None:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.delete()
+    await send_rich_card(
+        callback.bot,
+        callback.message.chat.id,
+        user["pet"],
+        lambda with_image: profile_html(callback.from_user.id, with_image),
+        profile_back_kb(),
+    )
+
+
+@dp.callback_query(F.data == "menu:back")
+async def on_menu_back(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.delete()
+    await callback.message.answer(MENU_TEXT, reply_markup=menu_kb())
 
 
 @dp.message(F.text == "Арена")
