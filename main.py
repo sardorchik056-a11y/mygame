@@ -184,13 +184,13 @@ PETS_LIST_TEXT = (
 
 
 def pet_card_html(pet_key: str) -> str:
-    """Rich Message (Bot API 10.1+): таблица характеристик и кнопка «Выбрать» внутри."""
+    """Rich Message (Bot API 10.1+): весь текст жирным, история питомца курсивом."""
     pet = PETS[pet_key]
 
     rows = "".join(
         "<tr>"
-        f"<td>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</td>"
-        f'<td align="center">{val}</td>'
+        f"<td><b>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</b></td>"
+        f'<td align="center"><b>{val}</b></td>'
         "</tr>"
         for key, val in pet["stats"].items()
     )
@@ -198,14 +198,15 @@ def pet_card_html(pet_key: str) -> str:
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
     return (
-        f"<h2>{escape(pet['name'].upper())}</h2>"
-        f"<p><i>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"<p><b>{escape(pet['name'].upper())}</b></p>"
+        f"<p><b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{element_emoji} {escape(pet['element'])} · "
-        f"Редкость: {escape(pet['rarity'])}</i></p>"
-        f"<blockquote>{escape(pet['story'])}</blockquote>"
-        "<h3>Характеристики</h3>"
+        f"Редкость: {escape(pet['rarity'])}</b></p>"
+        # История питомца курсивом
+        f"<blockquote><i>{escape(pet['story'])}</i></blockquote>"
+        "<p><b>Характеристики</b></p>"
         "<table bordered striped>"
-        "<tr><th>Параметр</th><th>Значение</th></tr>"
+        "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
         f"{rows}"
         "</table>"
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
