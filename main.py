@@ -1,106 +1,297 @@
 import asyncio
 import logging
 
-import aiosqlite
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ButtonStyle, ParseMode
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-
-BOT_TOKEN = "8651720497:AAG_fEJKDwIl-SeTPFi_TSRPVnaDGtv96bw"
-DB_PATH = "bot.db"
-
-E_SUPPORT = '<tg-emoji emoji-id="5391112412445288650">🥸</tg-emoji>'
-E_DENIED = '<tg-emoji emoji-id="5210952531676504517">❌</tg-emoji>'
-E_MAIL = '<tg-emoji emoji-id="5253742260054409879">✉️</tg-emoji>'
-E_WAIT = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
-
-TEXT_START = (
-    f"{E_DENIED} <b>ДОСТУП ОГРАНИЧЕН</b>\n\n"
-    "<i>Для начала работы сначала подайте заявку.</i>"
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
 )
-TEXT_SUBMITTED = (
-    f"{E_MAIL} <b>ЗАЯВКА ПОДАНА, ОЖИДАЙТЕ РАССМОТРЕНИЯ</b>\n\n"
-    f"{E_SUPPORT} <b>ПОДДЕРЖКА</b> @DqASAQ"
-)
-TEXT_ALREADY = f"<b>ЗАЯВКА УЖЕ В РАССМОТРЕНИИ</b> {E_WAIT}"
 
-router = Router()
+BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
+
+dp = Dispatcher()
+
+# user_id -> pet_key. Для постоянного хранения замени на SQLite.
+user_pets: dict[int, str] = {}
+
+STAT_LABELS = {
+    "hp": "Здоровье",
+    "atk": "Атака",
+    "def": "Защита",
+    "spd": "Скорость",
+    "luck": "Удача",
+}
+
+PETS = {
+    "flame": {
+        "name": "Пиро",
+        "element": "Огонь",
+        "rarity": "Эпический",
+        "story": (
+            "Пиро родился в жерле потухшего вулкана, где до сих пор тлеют угли. "
+            "Он вспыльчив, но предан хозяину до последнего вздоха. "
+            "Говорят, его пламя не гаснет даже под проливным дождём."
+        ),
+        "stats": {"hp": 6, "atk": 10, "def": 4, "spd": 7, "luck": 5},
+        "skill": "Огненная ярость",
+        "skill_desc": "Чем меньше здоровья, тем сильнее удары.",
+    },
+    "aqua": {
+        "name": "Аква",
+        "element": "Вода",
+        "rarity": "Эпический",
+        "story": (
+            "Аква вышла из глубин подземного озера, куда не проникает солнечный свет. "
+            "Она спокойна, рассудительна и умеет ждать нужного момента. "
+            "Её чешуя мерцает, как звёзды в ночной воде."
+        ),
+        "stats": {"hp": 7, "atk": 6, "def": 6, "spd": 7, "luck": 6},
+        "skill": "Приливная волна",
+        "skill_desc": "Замедляет противника в начале боя.",
+    },
+    "terra": {
+        "name": "Терра",
+        "element": "Земля",
+        "rarity": "Эпический",
+        "story": (
+            "Терра проснулась среди древних скал, которые старше любого города. "
+            "Она неторопливая и выносливая, её очень трудно сдвинуть с места. "
+            "Каждый её шаг оставляет на камне цветущий след."
+        ),
+        "stats": {"hp": 10, "atk": 5, "def": 10, "spd": 3, "luck": 4},
+        "skill": "Каменная кожа",
+        "skill_desc": "Поглощает часть входящего урона.",
+    },
+}
 
 
-def apply_kb() -> InlineKeyboardMarkup:
+# ---------- Клавиатуры ----------
+
+def main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="Меню",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="5257965174979042426",
+                ),
+                KeyboardButton(
+                    text="Арена",
+                    style=ButtonStyle.DANGER,
+                    icon_custom_emoji_id="5454014806950429357",
+                ),
+                KeyboardButton(
+                    text="Рынок",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="6010183144450299916",
+                ),
+            ],
+            [
+                KeyboardButton(
+                    text="Настройки",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id="5341715473882955310",
+                ),
+            ],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def continue_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Подать заявку",
-                    callback_data="apply",
-                    style="success",
-                    icon_custom_emoji_id="5253742260054409879",
+                    text="Продолжить",
+                    callback_data="intro:continue",
+                    style=ButtonStyle.SUCCESS,
                 )
             ]
         ]
     )
 
 
-async def init_db() -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS applications ("
-            "user_id INTEGER PRIMARY KEY, "
-            "username TEXT, "
-            "created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
-        )
-        await db.commit()
+def pets_list_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{pet['name']} — {pet['element']}",
+                    callback_data=f"pet:view:{key}",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ]
+            for key, pet in PETS.items()
+        ]
+    )
 
 
-async def has_application(user_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT 1 FROM applications WHERE user_id = ?", (user_id,)
-        ) as cur:
-            return await cur.fetchone() is not None
+def pet_card_kb(pet_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Выбрать",
+                    callback_data=f"pet:pick:{pet_key}",
+                    style=ButtonStyle.SUCCESS,
+                ),
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="pet:back",
+                    style=ButtonStyle.DANGER,
+                ),
+            ]
+        ]
+    )
 
 
-async def add_application(user_id: int, username: str | None) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO applications (user_id, username) VALUES (?, ?)",
-            (user_id, username),
-        )
-        await db.commit()
+# ---------- Тексты ----------
+
+WELCOME_TEXT = (
+    "<b>Добро пожаловать</b>\n\n"
+    "<i>Тебя ждёт мир, где рядом с тобой будет верный питомец. "
+    "Вместе вы сможете сражаться на арене, торговать на рынке "
+    "и становиться сильнее.</i>\n\n"
+    "<i>Но сначала нужно найти себе спутника.</i>"
+)
+
+PETS_LIST_TEXT = (
+    "<b>Выбор питомца</b>\n\n"
+    "<i>Три существа ждут своего хозяина. "
+    "Нажми на любого, чтобы узнать его историю и силу.</i>"
+)
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
-    if await has_application(message.from_user.id):
-        await message.answer(TEXT_ALREADY)
+def stat_bar(value: int, max_value: int = 10) -> str:
+    return "▰" * value + "▱" * (max_value - value)
+
+
+def pet_card_text(pet_key: str) -> str:
+    pet = PETS[pet_key]
+
+    stats_lines = "\n".join(
+        f"{STAT_LABELS[key]:<9}{stat_bar(val)} {val:>2}/10"
+        for key, val in pet["stats"].items()
+    )
+
+    return (
+        f"<b>{pet['name'].upper()}</b>\n"
+        f"<i>Стихия: {pet['element']}  ·  Редкость: {pet['rarity']}</i>\n\n"
+        f"<blockquote><i>{pet['story']}</i></blockquote>\n"
+        f"<b>Характеристики</b>\n"
+        f"<pre>{stats_lines}</pre>\n"
+        f"<b>Способность: {pet['skill']}</b>\n"
+        f"<i>{pet['skill_desc']}</i>"
+    )
+
+
+# ---------- Хендлеры ----------
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    # Если питомец уже выбран, сразу меню
+    if message.from_user.id in user_pets:
+        await message.answer("<b>С возвращением</b>", reply_markup=main_menu())
         return
-    await message.answer(TEXT_START, reply_markup=apply_kb())
+
+    await message.answer(WELCOME_TEXT, reply_markup=continue_kb())
 
 
-@router.callback_query(F.data == "apply")
-async def on_apply(call: CallbackQuery) -> None:
-    user = call.from_user
+@dp.callback_query(F.data == "intro:continue")
+async def on_continue(callback: CallbackQuery):
+    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
+    await callback.answer()
 
-    if await has_application(user.id):
-        await call.answer()
-        await call.message.answer(TEXT_ALREADY)
+
+@dp.callback_query(F.data.startswith("pet:view:"))
+async def on_pet_view(callback: CallbackQuery):
+    pet_key = callback.data.split(":")[2]
+    if pet_key not in PETS:
+        await callback.answer("Неизвестный питомец", show_alert=True)
         return
 
-    await add_application(user.id, user.username)
-    await call.answer()
-    await call.message.edit_text(TEXT_SUBMITTED, reply_markup=None)
+    await callback.message.edit_text(
+        pet_card_text(pet_key),
+        reply_markup=pet_card_kb(pet_key),
+    )
+    await callback.answer()
 
 
-async def main() -> None:
+@dp.callback_query(F.data == "pet:back")
+async def on_pet_back(callback: CallbackQuery):
+    await callback.message.edit_text(PETS_LIST_TEXT, reply_markup=pets_list_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pet:pick:"))
+async def on_pet_pick(callback: CallbackQuery):
+    user_id = callback.from_user.id
+
+    if user_id in user_pets:
+        await callback.answer("Питомец уже выбран", show_alert=True)
+        return
+
+    pet_key = callback.data.split(":")[2]
+    pet = PETS.get(pet_key)
+    if pet is None:
+        await callback.answer("Неизвестный питомец", show_alert=True)
+        return
+
+    user_pets[user_id] = pet_key
+
+    # Фиксируем выбор, кнопки убираются
+    await callback.message.edit_text(
+        f"<b>Выбор сделан</b>\n\n"
+        f"<i>Твой спутник:</i> <b>{pet['name']}</b>\n"
+        f"<i>Стихия: {pet['element']}</i>"
+    )
+    await callback.answer()
+
+    # 1) сначала пожелание удачи
+    await callback.message.answer(
+        f"<i>{pet['name']} теперь рядом с тобой. "
+        f"Удачи в приключениях, пусть ваш путь будет долгим и победным.</i>"
+    )
+
+    # 2) только потом меню
+    await callback.message.answer("<b>Главное меню</b>", reply_markup=main_menu())
+
+
+@dp.message(F.text == "Меню")
+async def open_menu(message: Message):
+    await message.answer("<b>Главное меню</b>", reply_markup=main_menu())
+
+
+@dp.message(F.text == "Арена")
+async def open_arena(message: Message):
+    await message.answer("<b>Арена</b>")
+
+
+@dp.message(F.text == "Рынок")
+async def open_market(message: Message):
+    await message.answer("<b>Рынок</b>")
+
+
+@dp.message(F.text == "Настройки")
+async def open_settings(message: Message):
+    await message.answer("<b>Настройки</b>")
+
+
+async def main():
     logging.basicConfig(level=logging.INFO)
-    await init_db()
-    bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher()
-    dp.include_router(router)
-    await bot.delete_webhook(drop_pending_updates=True)
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     await dp.start_polling(bot)
 
 
