@@ -155,49 +155,36 @@ PETS_LIST_TEXT = (
 
 
 def pet_card_html(pet_key: str) -> str:
-    """Rich Message (Bot API 10.1+): таблица и кнопка «Выбрать» внутри сообщения."""
+    """Rich Message (Bot API 10.1+): таблица характеристик и кнопки внутри сообщения."""
     pet = PETS[pet_key]
 
-    info = [
-        ("Стихия", pet["element"]),
-        ("Редкость", pet["rarity"]),
-    ]
-    info += [(STAT_LABELS[key], str(val)) for key, val in pet["stats"].items()]
-
     rows = "".join(
-        f"<tr><td>{escape(name)}</td><td align=\"center\">{escape(value)}</td></tr>"
-        for name, value in info
+        "<tr>"
+        f"<td>{escape(STAT_LABELS[key])}</td>"
+        f'<td align="center">{val}/10</td>'
+        "</tr>"
+        for key, val in pet["stats"].items()
     )
 
     return (
         f"<h2>{escape(pet['name'].upper())}</h2>"
+        f"<p><i>Стихия: {escape(pet['element'])} · "
+        f"Редкость: {escape(pet['rarity'])}</i></p>"
         f"<blockquote>{escape(pet['story'])}</blockquote>"
+        "<h3>Характеристики</h3>"
         "<table bordered striped>"
         "<tr><th>Параметр</th><th>Значение</th></tr>"
         f"{rows}"
         "</table>"
         f"<p><b>Способность: {escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        # Кнопка прямо в теле сообщения (Bot API 10.3)
+        # Кнопки прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
         'style="success">Выбрать</tg-button>'
+        '<tg-button type="callback_data" data="pet:back" '
+        'style="danger">Назад</tg-button>'
         "</tg-button-row>"
-    )
-
-
-def back_kb() -> InlineKeyboardMarkup:
-    # Обычная инлайн-кнопка под сообщением
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data="pet:back",
-                    style=ButtonStyle.DANGER,
-                )
-            ]
-        ]
     )
 
 
@@ -205,7 +192,6 @@ async def send_pet_card(bot: Bot, chat_id: int, pet_key: str) -> None:
     await bot.send_rich_message(
         chat_id=chat_id,
         rich_message=InputRichMessage(html=pet_card_html(pet_key)),
-        reply_markup=back_kb(),
     )
 
 
