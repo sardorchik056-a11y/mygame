@@ -125,6 +125,11 @@ STAT_EMOJI = {
 ELEMENT_LABEL_EMOJI = ("5859548930458523065", "🔥")  # слово «Стихия»
 SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способность»
 
+# Эмодзи профиля
+LEVEL_EMOJI = ("5431816358675366190", "🆙")
+WINS_EMOJI = ("5454014806950429357", "⚔️")
+LOSSES_EMOJI = ("5285535716808342592", "☠️")
+
 # Эмодзи самой стихии
 ELEMENT_EMOJI = {
     "Огонь": ("5424972470023104089", "🔥"),
@@ -336,8 +341,8 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f'<td align="center"><b>{value}</b></td>'
         "</tr>"
         for label, value in (
-            ("⚔️ Победы", user["wins"]),
-            ("💔 Поражения", user["losses"]),
+            (f"{custom_emoji(WINS_EMOJI)} Победы", user["wins"]),
+            (f"{custom_emoji(LOSSES_EMOJI)} Поражения", user["losses"]),
         )
     )
 
@@ -350,7 +355,7 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{escape(pet['element'])} {element_emoji}</b></p>"
-        f"<p><b>🏆 Уровень {level}</b><br>"
+        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}</b><br>"
         f"<b>{xp_bar(xp, need)} {xp}/{need} XP</b></p>"
         "<p><b>Характеристики</b></p>"
         "<table bordered striped>"
