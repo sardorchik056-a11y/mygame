@@ -31,6 +31,22 @@ STAT_LABELS = {
     "luck": "Удача",
 }
 
+# Кастомные эмодзи: (id, запасной обычный эмодзи)
+STAT_EMOJI = {
+    "hp": ("5337080053119336309", "👍"),
+    "atk": ("5321022334335724730", "🤺"),
+    "def": ("5465154440287757794", "🛡"),
+    "spd": ("5258203794772085854", "⚡️"),
+    "luck": ("5422407403884798028", "🍀"),
+}
+FIRE_EMOJI = ("5424972470023104089", "🔥")
+
+
+def custom_emoji(pair: tuple[str, str]) -> str:
+    emoji_id, fallback = pair
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
 PETS = {
     "flame": {
         "name": "Пиро",
@@ -158,13 +174,17 @@ def pet_card_html(pet_key: str) -> str:
     """Rich Message (Bot API 10.1+): таблица характеристик и кнопки внутри сообщения."""
     pet = PETS[pet_key]
 
-    rows = "".join(
-        "<tr>"
-        f"<td>{escape(STAT_LABELS[key])}</td>"
-        f'<td align="center">{val}/10</td>'
-        "</tr>"
-        for key, val in pet["stats"].items()
-    )
+    rows = ""
+    for key, val in pet["stats"].items():
+        value = str(val)
+        if key == "atk":
+            value += " " + custom_emoji(FIRE_EMOJI)
+        rows += (
+            "<tr>"
+            f"<td>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</td>"
+            f'<td align="center">{value}</td>'
+            "</tr>"
+        )
 
     return (
         f"<h2>{escape(pet['name'].upper())}</h2>"
