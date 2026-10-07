@@ -149,14 +149,13 @@ def pet_stats(pet: dict, level: int) -> dict[str, int]:
 
 def upgrade_lack(user: dict) -> list[str]:
     """Чего не хватает для прокачки (пустой список, если всё есть).
-    Для эволюции XP не нужен."""
+    XP нужен всегда, в том числе для эволюции, в обычном размере."""
     level = user["level"]
     need_meat, need_fruit = upgrade_cost(level)
+    need_xp = xp_needed(level)
     lack = []
-    if not is_evolution(level):
-        need_xp = xp_needed(level)
-        if user["xp"] < need_xp:
-            lack.append(f"XP: {need_xp - user['xp']}")
+    if user["xp"] < need_xp:
+        lack.append(f"XP: {need_xp - user['xp']}")
     if user["meat"] < need_meat:
         lack.append(f"мяса: {need_meat - user['meat']}")
     if user["fruit"] < need_fruit:
@@ -190,7 +189,8 @@ LEVEL_EMOJI = ("5431816358675366190", "🆙")
 WINS_EMOJI = ("5454014806950429357", "⚔️")
 LOSSES_EMOJI = ("5285535716808342592", "☠️")
 CHECK_EMOJI = ("5206607081334906820", "✔️")  # «ресурса достаточно»
-UPGRADE_EMOJI = ("5449683594425410231", "🔼")  # кнопки «Прокачать»
+UPGRADE_EMOJI = ("5449683594425410231", "🔼")
+EVO_EMOJI = ("5345857480213674463", "🌱")  # кнопка «Эволюционировать»  # кнопки «Прокачать»
 
 # Эмодзи самой стихии
 ELEMENT_EMOJI = {
@@ -853,11 +853,10 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     evolution = is_evolution(level)
 
     needs = [
+        (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], xp_needed(level)),
         (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
         (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
     ]
-    if not evolution:  # на эволюцию XP не тратится
-        needs.insert(0, (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], xp_needed(level)))
 
     rows = "".join(
         "<tr>"
@@ -869,16 +868,15 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     )
 
     if evolution:
-        kind = (
-            f"<i>Эволюция: характеристики +{round(EVO_GROWTH * 100)}%. "
-            f"Еды нужно в {EVO_COST_MULT} раз больше, XP не нужен.</i>"
-        )
+        kind = f"<i>Эволюция: характеристики +{round(EVO_GROWTH * 100)}%.</i>"
         title = f"Эволюция {level} → {level + 1}"
         button = "Эволюционировать"
+        button_emoji = EVO_EMOJI
     else:
         kind = f"<i>Характеристики +{round(STAT_GROWTH * 100)}%.</i>"
         title = f"Уровень {level} → {level + 1}"
         button = "Прокачать"
+        button_emoji = UPGRADE_EMOJI
 
     lack = upgrade_lack(user)
     status = (
@@ -901,7 +899,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         '<tg-button type="callback_data" data="upg:do" '
-        f'style="success">{custom_emoji(UPGRADE_EMOJI)} {button}</tg-button>'
+        f'style="success">{custom_emoji(button_emoji)} {button}</tg-button>'
         "</tg-button-row>"
     )
 
@@ -964,8 +962,7 @@ async def on_upgrade_do(callback: CallbackQuery):
     level = user["level"]
     evolution = is_evolution(level)
     need_meat, need_fruit = upgrade_cost(level)
-    if not evolution:  # на эволюцию XP не тратится
-        user["xp"] -= xp_needed(level)
+    user["xp"] -= xp_needed(level)
     user["meat"] -= need_meat
     user["fruit"] -= need_fruit
     user["level"] += 1
