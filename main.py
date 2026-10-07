@@ -119,18 +119,44 @@ INFO_EMOJI = ("5334544901428229844", "ℹ️")
 FRUIT_EMOJI = "🥭"
 
 
+MAX_LEVEL = 100
+EVO_EVERY = 10      # эволюция при выходе на каждый 10-й уровень
+EVO_COST_MULT = 7   # эволюция стоит в 7 раз больше еды
+STAT_GROWTH = 0.04  # обычная прокачка: характеристики +4%
+EVO_GROWTH = 0.15   # эволюция: характеристики +15%
+
+
+def is_evolution(level: int) -> bool:
+    """Прокачка с этого уровня на следующий — эволюция (10, 20, ... 100)."""
+    return (level + 1) % EVO_EVERY == 0
+
+
 def upgrade_cost(level: int) -> tuple[int, int]:
     """Сколько (мяса, фруктов) нужно, чтобы поднять уровень с текущего."""
-    return level, level + 1
+    meat, fruit = level, level + 1
+    if is_evolution(level):
+        meat, fruit = meat * EVO_COST_MULT, fruit * EVO_COST_MULT
+    return meat, fruit
+
+
+def pet_stats(pet: dict, level: int) -> dict[str, int]:
+    """Характеристики питомца на уровне: +4% за обычный уровень, +15% за эволюцию."""
+    evolutions = level // EVO_EVERY
+    regular = (level - 1) - evolutions
+    mult = (1 + STAT_GROWTH) ** regular * (1 + EVO_GROWTH) ** evolutions
+    return {key: round(val * mult) for key, val in pet["stats"].items()}
 
 
 def upgrade_lack(user: dict) -> list[str]:
-    """Чего не хватает для прокачки (пустой список, если всё есть)."""
-    need_meat, need_fruit = upgrade_cost(user["level"])
-    need_xp = xp_needed(user["level"])
+    """Чего не хватает для прокачки (пустой список, если всё есть).
+    Для эволюции XP не нужен."""
+    level = user["level"]
+    need_meat, need_fruit = upgrade_cost(level)
     lack = []
-    if user["xp"] < need_xp:
-        lack.append(f"XP: {need_xp - user['xp']}")
+    if not is_evolution(level):
+        need_xp = xp_needed(level)
+        if user["xp"] < need_xp:
+            lack.append(f"XP: {need_xp - user['xp']}")
     if user["meat"] < need_meat:
         lack.append(f"мяса: {need_meat - user['meat']}")
     if user["fruit"] < need_fruit:
@@ -192,7 +218,7 @@ PETS = {
             "Он вспыльчив, но предан хозяину до последнего вздоха. "
             "Говорят, его пламя не гаснет даже под проливным дождём."
         ),
-        "stats": {"hp": 6, "atk": 10, "def": 4, "spd": 7, "luck": 5},
+        "stats": {"hp": 60, "atk": 100, "def": 40, "spd": 70, "luck": 50},
         "skill": "Огненная ярость",
         "skill_desc": "Чем меньше здоровья, тем сильнее удары.",
     },
@@ -205,7 +231,7 @@ PETS = {
             "Она спокойна, рассудительна и умеет ждать нужного момента. "
             "Её чешуя мерцает, как звёзды в ночной воде."
         ),
-        "stats": {"hp": 7, "atk": 6, "def": 6, "spd": 7, "luck": 6},
+        "stats": {"hp": 70, "atk": 60, "def": 60, "spd": 70, "luck": 60},
         "skill": "Приливная волна",
         "skill_desc": "Замедляет противника в начале боя.",
     },
@@ -218,7 +244,7 @@ PETS = {
             "Она неторопливая и выносливая, её очень трудно сдвинуть с места. "
             "Каждый её шаг оставляет на камне цветущий след."
         ),
-        "stats": {"hp": 10, "atk": 5, "def": 10, "spd": 3, "luck": 4},
+        "stats": {"hp": 100, "atk": 50, "def": 100, "spd": 30, "luck": 40},
         "skill": "Каменная кожа",
         "skill_desc": "Поглощает часть входящего урона.",
     },
@@ -371,7 +397,7 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f"<td><b>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</b></td>"
         f'<td align="center"><b>{val}</b></td>'
         "</tr>"
-        for key, val in pet["stats"].items()
+        for key, val in pet_stats(pet, level).items()
     )
 
     battles_rows = "".join(
@@ -394,8 +420,13 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{escape(pet['element'])} {element_emoji}</b></p>"
-        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}</b><br>"
-        f"<b>{xp_bar(xp, need)} {xp}/{need} XP</b></p>"
+        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}/{MAX_LEVEL}</b><br>"
+        + (
+            "<b>Максимальный уровень</b></p>"
+            if level >= MAX_LEVEL
+            else f"<b>{xp_bar(xp, need)} {xp}/{need} XP</b></p>"
+        )
+        +
         "<p><b>Характеристики</b></p>"
         "<table bordered striped>"
         "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
@@ -409,11 +440,15 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        # Кнопка прямо в теле сообщения (Bot API 10.3)
-        "<tg-button-row>"
-        '<tg-button type="callback_data" data="pet:upgrade" '
-        f'style="success">{custom_emoji(UPGRADE_EMOJI)} Прокачать уровень</tg-button>'
-        "</tg-button-row>"
+        # Кнопка прямо в теле сообщения (Bot API 10.3); на макс. уровне её нет
+        + (
+            ""
+            if level >= MAX_LEVEL
+            else "<tg-button-row>"
+            '<tg-button type="callback_data" data="pet:upgrade" '
+            f'style="success">{custom_emoji(UPGRADE_EMOJI)} Прокачать уровень</tg-button>'
+            "</tg-button-row>"
+        )
     )
 
 
@@ -794,11 +829,35 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     user = get_user(user_id)
     pet = PETS[user["pet"]]
     level = user["level"]
-    need_meat, need_fruit = upgrade_cost(level)
-    need_xp = xp_needed(level)
 
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
+
+    head = (
+        f"{image}"
+        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
+        "<br>&nbsp;<br>"
+        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"{escape(pet['element'])} {element_emoji}</b></p>"
+    )
+
+    if level >= MAX_LEVEL:
+        return (
+            head
+            + f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}/{MAX_LEVEL}</b>"
+            "<br>&nbsp;<br>"
+            "<i>Питомец достиг максимального уровня. Дальше прокачивать некуда.</i></p>"
+        )
+
+    need_meat, need_fruit = upgrade_cost(level)
+    evolution = is_evolution(level)
+
+    needs = [
+        (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
+        (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
+    ]
+    if not evolution:  # на эволюцию XP не тратится
+        needs.insert(0, (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], xp_needed(level)))
 
     rows = "".join(
         "<tr>"
@@ -806,12 +865,20 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         f'<td align="center"><b>{have}/{need}'
         f'{" " + custom_emoji(CHECK_EMOJI) if have >= need else ""}</b></td>'
         "</tr>"
-        for label, have, need in (
-            (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], need_xp),
-            (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
-            (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
-        )
+        for label, have, need in needs
     )
+
+    if evolution:
+        kind = (
+            f"<i>Эволюция: характеристики +{round(EVO_GROWTH * 100)}%. "
+            f"Еды нужно в {EVO_COST_MULT} раз больше, XP не нужен.</i>"
+        )
+        title = f"Эволюция {level} → {level + 1}"
+        button = "Эволюционировать"
+    else:
+        kind = f"<i>Характеристики +{round(STAT_GROWTH * 100)}%.</i>"
+        title = f"Уровень {level} → {level + 1}"
+        button = "Прокачать"
 
     lack = upgrade_lack(user)
     status = (
@@ -821,12 +888,9 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     )
 
     return (
-        f"{image}"
-        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
-        "<br>&nbsp;<br>"
-        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
-        f"{escape(pet['element'])} {element_emoji}</b></p>"
-        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b>"
+        head
+        + f"<p><b>{custom_emoji(LEVEL_EMOJI)} {title}</b>"
+        f"<br>{kind}"
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(INFO_EMOJI)} Для прокачки нужно</b></p>"
         "<table bordered striped>"
@@ -837,7 +901,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         '<tg-button type="callback_data" data="upg:do" '
-        f'style="success">{custom_emoji(UPGRADE_EMOJI)} Прокачать</tg-button>'
+        f'style="success">{custom_emoji(UPGRADE_EMOJI)} {button}</tg-button>'
         "</tg-button-row>"
     )
 
@@ -888,18 +952,32 @@ async def on_upgrade_do(callback: CallbackQuery):
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return
 
+    if user["level"] >= MAX_LEVEL:
+        await callback.answer("Достигнут максимальный уровень", show_alert=True)
+        return
+
     lack = upgrade_lack(user)
     if lack:
         await callback.answer("Не хватает " + ", ".join(lack), show_alert=True)
         return
 
-    need_meat, need_fruit = upgrade_cost(user["level"])
-    user["xp"] -= xp_needed(user["level"])
+    level = user["level"]
+    evolution = is_evolution(level)
+    need_meat, need_fruit = upgrade_cost(level)
+    if not evolution:  # на эволюцию XP не тратится
+        user["xp"] -= xp_needed(level)
     user["meat"] -= need_meat
     user["fruit"] -= need_fruit
     user["level"] += 1
     save_users()
-    await callback.answer(f"Уровень повышен до {user['level']}!")
+    if evolution:
+        await callback.answer(
+            f"Эволюция! Уровень {user['level']}, "
+            f"характеристики +{round(EVO_GROWTH * 100)}%",
+            show_alert=True,
+        )
+    else:
+        await callback.answer(f"Уровень повышен до {user['level']}!")
 
     # Старое сообщение удаляем, присылаем новое с обновлёнными шкалами
     await callback.message.delete()
