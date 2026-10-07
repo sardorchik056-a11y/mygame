@@ -114,7 +114,8 @@ def add_xp(user_id: int, amount: int) -> None:
 
 
 MEAT_EMOJI = "🥩"
-XP_EMOJI = "✨"
+XP_EMOJI = ("5429578972771926029", "🟣")
+INFO_EMOJI = ("5334544901428229844", "ℹ️")
 FRUIT_EMOJI = "🥭"
 
 
@@ -806,7 +807,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         f'{" " + custom_emoji(CHECK_EMOJI) if have >= need else ""}</b></td>'
         "</tr>"
         for label, have, need in (
-            (f"{XP_EMOJI} XP", user["xp"], need_xp),
+            (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], need_xp),
             (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
             (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
         )
@@ -827,7 +828,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         f"{escape(pet['element'])} {element_emoji}</b></p>"
         f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b>"
         "<br>&nbsp;<br>"
-        "<b>Для прокачки нужно</b></p>"
+        f"<b>{custom_emoji(INFO_EMOJI)} Для прокачки нужно</b></p>"
         "<table bordered striped>"
         "<tr><th><b>Ресурс</b></th><th><b>Есть/нужно</b></th></tr>"
         f"{rows}"
@@ -943,7 +944,7 @@ async def cmd_give(message: Message):
     user["xp"] += xp
     save_users()
     await message.answer(
-        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}  {XP_EMOJI} +{xp}"
+        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}  {custom_emoji(XP_EMOJI)} +{xp}"
     )
 
 
