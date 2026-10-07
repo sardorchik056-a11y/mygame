@@ -556,42 +556,14 @@ def profile_back_kb() -> InlineKeyboardMarkup:
 
 
 def menu_html(user_id: int | None = None, with_image: bool = False) -> str:
-    """Rich-карточка главного меню: своё изображение (ключ «menu») и краткая сводка."""
-    user = get_user(user_id) if user_id else None
-
+    """Rich-карточка главного меню: своё изображение (ключ «menu») и короткий текст."""
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
-
-    summary = ""
-    if user is not None:
-        pet = PETS[user["pet"]]
-        element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
-        rows = "".join(
-            "<tr>"
-            f"<td><b>{label}</b></td>"
-            f'<td align="center"><b>{value}</b></td>'
-            "</tr>"
-            for label, value in (
-                (f"{custom_emoji(PET_BTN_EMOJI)} Питомец", escape(pet["name"])),
-                (f"{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия",
-                 f"{escape(pet['element'])} {element_emoji}"),
-                (f"{custom_emoji(LEVEL_EMOJI)} Уровень", f"{user['level']}/{MAX_LEVEL}"),
-                (f"{custom_emoji(COIN_EMOJI)} Монеты", user["coins"]),
-            )
-        )
-        summary = (
-            "<table bordered striped>"
-            "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
-            f"{rows}"
-            "</table>"
-        )
 
     return (
         f"{image}"
         f"<p><b>{custom_emoji(MENU_EMOJI)} ГЛАВНОЕ МЕНЮ</b></p>"
-        "<blockquote><i>Отсюда начинается любое приключение. Загляни к питомцу, "
-        "проверь запасы и готовься к новым боям.</i></blockquote>"
-        f"{summary}"
-        f"<p><b>{custom_emoji(INFO_EMOJI)} Выбери раздел ниже.</b></p>"
+        "<blockquote><i>Здесь начинается твой путь. Навести питомца, "
+        "проверь запасы и отправляйся навстречу новым победам.</i></blockquote>"
     )
 
 
