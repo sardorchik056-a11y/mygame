@@ -775,49 +775,92 @@ async def on_menu_back(callback: CallbackQuery):
     await callback.message.answer(MENU_TEXT, reply_markup=menu_kb())
 
 
-def upgrade_text(user: dict) -> str:
+def resource_bar(have: int, need: int, width: int = 10) -> str:
+    """Шкала ресурса: заполняется до нужного количества, число справа: есть/нужно."""
+    filled = min(width, int(width * have / need)) if need else width
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def upgrade_html(user_id: int, with_image: bool = False) -> str:
+    """Rich-карточка прокачки: уровень, шкалы мяса и фруктов, кнопка в теле."""
+    user = get_user(user_id)
     pet = PETS[user["pet"]]
     level = user["level"]
     need_meat, need_fruit = upgrade_cost(level)
+    meat, fruit = user["meat"], user["fruit"]
+
+    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
+    element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
+
+    lack = []
+    if meat < need_meat:
+        lack.append(f"мяса: {need_meat - meat}")
+    if fruit < need_fruit:
+        lack.append(f"фруктов: {need_fruit - fruit}")
+    status = (
+        "<i>Ресурсов достаточно, можно прокачивать.</i>"
+        if not lack
+        else f"<i>Не хватает {escape(', '.join(lack))}.</i>"
+    )
+
     return (
-        f"<b>Прокачка · {escape(pet['name'])}</b>\n\n"
-        f"<b>Уровень {level} → {level + 1}</b>\n\n"
-        "<i>Для повышения уровня нужны:</i>\n"
-        f"<b>{MEAT_EMOJI} Мясо: {user['meat']}/{need_meat}</b>\n"
-        f"<b>{FRUIT_EMOJI} Фрукты: {user['fruit']}/{need_fruit}</b>"
+        f"{image}"
+        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
+        "<br>&nbsp;<br>"
+        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"{escape(pet['element'])} {element_emoji}</b></p>"
+        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b></p>"
+        "<p><b>Для прокачки нужно</b></p>"
+        f"<p><b>{MEAT_EMOJI} Мясо</b><br>"
+        f"<b>{resource_bar(meat, need_meat)} {meat}/{need_meat}</b></p>"
+        f"<p><b>{FRUIT_EMOJI} Фрукты</b><br>"
+        f"<b>{resource_bar(fruit, need_fruit)} {fruit}/{need_fruit}</b></p>"
+        f"<p>{status}</p>"
+        # Кнопка прямо в теле сообщения (Bot API 10.3)
+        "<tg-button-row>"
+        '<tg-button type="callback_data" data="upg:do" '
+        'style="success">Прокачать</tg-button>'
+        "</tg-button-row>"
     )
 
 
-def upgrade_kb() -> InlineKeyboardMarkup:
+def upgrade_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Прокачать",
-                    callback_data="upg:do",
-                    style=ButtonStyle.SUCCESS,
+                    text="Назад",
+                    callback_data="upg:back",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=BACK_EMOJI_ID,
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Закрыть",
-                    callback_data="upg:close",
-                    style=ButtonStyle.DANGER,
-                )
-            ],
+            ]
         ]
+    )
+
+
+async def send_upgrade_card(bot: Bot, chat_id: int, user_id: int) -> None:
+    user = get_user(user_id)
+    await send_rich_card(
+        bot,
+        chat_id,
+        user["pet"],
+        lambda with_image: upgrade_html(user_id, with_image),
+        upgrade_back_kb(),
     )
 
 
 @dp.callback_query(F.data == "pet:upgrade")
 async def on_upgrade_open(callback: CallbackQuery):
-    user = get_user(callback.from_user.id)
-    if user is None:
+    if get_user(callback.from_user.id) is None:
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return
     await callback.answer()
-    # Новое сообщение под карточкой, сама карточка остаётся на месте
-    await callback.message.answer(upgrade_text(user), reply_markup=upgrade_kb())
+    # Старое сообщение удаляем, присылаем новое
+    await callback.message.delete()
+    await send_upgrade_card(
+        callback.bot, callback.message.chat.id, callback.from_user.id
+    )
 
 
 @dp.callback_query(F.data == "upg:do")
@@ -845,18 +888,28 @@ async def on_upgrade_do(callback: CallbackQuery):
     save_users()
     await callback.answer(f"Уровень повышен до {user['level']}!")
 
-    try:
-        await callback.message.edit_text(
-            upgrade_text(user), reply_markup=upgrade_kb()
-        )
-    except TelegramBadRequest as e:
-        logging.warning("Не удалось обновить экран прокачки: %s", e)
+    # Старое сообщение удаляем, присылаем новое с обновлёнными шкалами
+    await callback.message.delete()
+    await send_upgrade_card(
+        callback.bot, callback.message.chat.id, callback.from_user.id
+    )
 
 
-@dp.callback_query(F.data == "upg:close")
-async def on_upgrade_close(callback: CallbackQuery):
+@dp.callback_query(F.data == "upg:back")
+async def on_upgrade_back(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user is None:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return
     await callback.answer()
     await callback.message.delete()
+    await send_rich_card(
+        callback.bot,
+        callback.message.chat.id,
+        user["pet"],
+        lambda with_image: profile_html(callback.from_user.id, with_image),
+        profile_back_kb(),
+    )
 
 
 @admin_router.message(Command("give"))
