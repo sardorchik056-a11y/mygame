@@ -209,6 +209,8 @@ SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способно
 LEVEL_EMOJI = ("5431816358675366190", "🆙")
 WINS_EMOJI = ("5454014806950429357", "⚔️")
 LOSSES_EMOJI = ("5285535716808342592", "☠️")
+PET_BTN_EMOJI = ("5314714191314043019", "🐾")  # кнопка «Мой питомец»
+MENU_EMOJI = ("5257965174979042426", "📋")  # заголовок меню
 DONATE_EMOJI = ("5427168083074628963", "💎")  # кнопка «Задонатить»
 CHECK_EMOJI = ("5206607081334906820", "✔️")  # «ресурса достаточно»
 UPGRADE_EMOJI = ("5449683594425410231", "🔼")
@@ -523,6 +525,7 @@ def menu_kb() -> InlineKeyboardMarkup:
                     text="Мой питомец",
                     callback_data="menu:pet",
                     style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=PET_BTN_EMOJI[0],
                 )
             ],
             [
@@ -552,11 +555,54 @@ def profile_back_kb() -> InlineKeyboardMarkup:
     )
 
 
-MENU_TEXT = (
-    "<b>Главное меню</b>\n\n"
-    "<i>Здесь ты можешь посмотреть на своего питомца: его уровень, "
-    "опыт и характеристики, а также свои запасы: монеты, мясо и фрукты.</i>"
-)
+def menu_html(user_id: int | None = None, with_image: bool = False) -> str:
+    """Rich-карточка главного меню: своё изображение (ключ «menu») и краткая сводка."""
+    user = get_user(user_id) if user_id else None
+
+    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
+
+    summary = ""
+    if user is not None:
+        pet = PETS[user["pet"]]
+        element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
+        rows = "".join(
+            "<tr>"
+            f"<td><b>{label}</b></td>"
+            f'<td align="center"><b>{value}</b></td>'
+            "</tr>"
+            for label, value in (
+                (f"{custom_emoji(PET_BTN_EMOJI)} Питомец", escape(pet["name"])),
+                (f"{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия",
+                 f"{escape(pet['element'])} {element_emoji}"),
+                (f"{custom_emoji(LEVEL_EMOJI)} Уровень", f"{user['level']}/{MAX_LEVEL}"),
+                (f"{custom_emoji(COIN_EMOJI)} Монеты", user["coins"]),
+            )
+        )
+        summary = (
+            "<table bordered striped>"
+            "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
+            f"{rows}"
+            "</table>"
+        )
+
+    return (
+        f"{image}"
+        f"<p><b>{custom_emoji(MENU_EMOJI)} ГЛАВНОЕ МЕНЮ</b></p>"
+        "<blockquote><i>Отсюда начинается любое приключение. Загляни к питомцу, "
+        "проверь запасы и готовься к новым боям.</i></blockquote>"
+        f"{summary}"
+        f"<p><b>{custom_emoji(INFO_EMOJI)} Выбери раздел ниже.</b></p>"
+    )
+
+
+async def send_menu(bot: Bot, chat_id: int, user_id: int) -> None:
+    await send_rich_card(
+        bot,
+        chat_id,
+        "menu",
+        lambda with_image: menu_html(user_id, with_image),
+        menu_kb(),
+    )
 
 
 def back_kb() -> InlineKeyboardMarkup:
@@ -627,6 +673,7 @@ async def send_pet_card(
 IMG_TARGETS: dict[str, str] = {
     "welcome": "Приветствие (Керри)",
     "pets_list": "Выбор питомцев",
+    "menu": "Меню",
     "stock": "Запасы",
     **{key: pet["name"] for key, pet in PETS.items()},
 }
@@ -668,7 +715,7 @@ admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 IMG_MENU_TEXT = (
     "<b>Изображения питомцев</b>\n\n"
     "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
-    "выбора питомцев, на запасы или на карточку питомца. "
+    "выбора питомцев, на меню, на запасы или на карточку питомца. "
     "Галочка значит, что фото уже есть.</i>"
 )
 
@@ -765,6 +812,13 @@ async def img_receive(message: Message, state: FSMContext):
         await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
     elif pet_key == "welcome":
         await send_screen(message.bot, message.chat.id, "welcome", WELCOME_TEXT)
+    elif pet_key == "menu":
+        await send_rich_card(
+            message.bot,
+            message.chat.id,
+            "menu",
+            lambda with_image: menu_html(message.from_user.id, with_image),
+        )
     elif pet_key == "stock":
         await send_rich_card(
             message.bot,
@@ -876,7 +930,7 @@ async def on_pet_pick(callback: CallbackQuery):
 
 @dp.message(F.text == "Меню")
 async def open_menu(message: Message):
-    await message.answer(MENU_TEXT, reply_markup=menu_kb())
+    await send_menu(message.bot, message.chat.id, message.from_user.id)
 
 
 @dp.callback_query(F.data == "menu:pet")
@@ -925,7 +979,9 @@ async def on_stock_donate(callback: CallbackQuery):
 async def on_menu_back(callback: CallbackQuery):
     await callback.answer()
     await callback.message.delete()
-    await callback.message.answer(MENU_TEXT, reply_markup=menu_kb())
+    await send_menu(
+        callback.bot, callback.message.chat.id, callback.from_user.id
+    )
 
 
 def upgrade_html(user_id: int, with_image: bool = False) -> str:
