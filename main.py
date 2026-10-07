@@ -70,8 +70,19 @@ def save_users() -> None:
 users: dict[str, dict] = load_users()
 
 
+START_MEAT = 3
+START_FRUIT = 4
+
+
 def get_user(user_id: int) -> dict | None:
-    return users.get(str(user_id))
+    user = users.get(str(user_id))
+    if user is not None:
+        # Старые игроки без запасов тоже получают стартовый набор еды
+        if "meat" not in user or "fruit" not in user:
+            user.setdefault("meat", START_MEAT)
+            user.setdefault("fruit", START_FRUIT)
+            save_users()
+    return user
 
 
 def create_user(user_id: int, pet_key: str) -> None:
@@ -81,6 +92,8 @@ def create_user(user_id: int, pet_key: str) -> None:
         "xp": 0,
         "wins": 0,
         "losses": 0,
+        "meat": START_MEAT,
+        "fruit": START_FRUIT,
     }
     save_users()
 
@@ -103,6 +116,15 @@ def add_xp(user_id: int, amount: int) -> int:
         gained += 1
     save_users()
     return gained
+
+MEAT_EMOJI = "🥩"
+FRUIT_EMOJI = "🍎"
+
+
+def upgrade_cost(level: int) -> tuple[int, int]:
+    """Сколько (мяса, фруктов) нужно, чтобы поднять уровень с текущего."""
+    return level, level + 1
+
 
 STAT_LABELS = {
     "hp": "Здоровье",
@@ -373,6 +395,11 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
+        # Кнопка прямо в теле сообщения (Bot API 10.3)
+        "<tg-button-row>"
+        '<tg-button type="callback_data" data="pet:upgrade" '
+        'style="success">Прокачать уровень</tg-button>'
+        "</tg-button-row>"
     )
 
 
@@ -746,6 +773,111 @@ async def on_menu_back(callback: CallbackQuery):
     await callback.answer()
     await callback.message.delete()
     await callback.message.answer(MENU_TEXT, reply_markup=menu_kb())
+
+
+def upgrade_text(user: dict) -> str:
+    pet = PETS[user["pet"]]
+    level = user["level"]
+    need_meat, need_fruit = upgrade_cost(level)
+    return (
+        f"<b>Прокачка · {escape(pet['name'])}</b>\n\n"
+        f"<b>Уровень {level} → {level + 1}</b>\n\n"
+        "<i>Для повышения уровня нужны:</i>\n"
+        f"<b>{MEAT_EMOJI} Мясо: {user['meat']}/{need_meat}</b>\n"
+        f"<b>{FRUIT_EMOJI} Фрукты: {user['fruit']}/{need_fruit}</b>"
+    )
+
+
+def upgrade_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Прокачать",
+                    callback_data="upg:do",
+                    style=ButtonStyle.SUCCESS,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Закрыть",
+                    callback_data="upg:close",
+                    style=ButtonStyle.DANGER,
+                )
+            ],
+        ]
+    )
+
+
+@dp.callback_query(F.data == "pet:upgrade")
+async def on_upgrade_open(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user is None:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return
+    await callback.answer()
+    # Новое сообщение под карточкой, сама карточка остаётся на месте
+    await callback.message.answer(upgrade_text(user), reply_markup=upgrade_kb())
+
+
+@dp.callback_query(F.data == "upg:do")
+async def on_upgrade_do(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user is None:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return
+
+    need_meat, need_fruit = upgrade_cost(user["level"])
+    lack_meat = max(0, need_meat - user["meat"])
+    lack_fruit = max(0, need_fruit - user["fruit"])
+    if lack_meat or lack_fruit:
+        parts = []
+        if lack_meat:
+            parts.append(f"мяса: {lack_meat}")
+        if lack_fruit:
+            parts.append(f"фруктов: {lack_fruit}")
+        await callback.answer("Не хватает " + ", ".join(parts), show_alert=True)
+        return
+
+    user["meat"] -= need_meat
+    user["fruit"] -= need_fruit
+    user["level"] += 1
+    save_users()
+    await callback.answer(f"Уровень повышен до {user['level']}!")
+
+    try:
+        await callback.message.edit_text(
+            upgrade_text(user), reply_markup=upgrade_kb()
+        )
+    except TelegramBadRequest as e:
+        logging.warning("Не удалось обновить экран прокачки: %s", e)
+
+
+@dp.callback_query(F.data == "upg:close")
+async def on_upgrade_close(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.delete()
+
+
+@admin_router.message(Command("give"))
+async def cmd_give(message: Message):
+    """/give <мясо> <фрукты> — выдать себе еду для теста."""
+    user = get_user(message.from_user.id)
+    if user is None:
+        await message.answer("<i>Сначала выбери питомца: /start</i>")
+        return
+    parts = (message.text or "").split()[1:]
+    try:
+        meat, fruit = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        await message.answer("<i>Формат: /give 5 5 (мясо, фрукты)</i>")
+        return
+    user["meat"] += meat
+    user["fruit"] += fruit
+    save_users()
+    await message.answer(
+        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}"
+    )
 
 
 @dp.message(F.text == "Арена")
