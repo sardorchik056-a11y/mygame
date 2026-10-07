@@ -129,7 +129,7 @@ def upgrade_lack(user: dict) -> list[str]:
     need_xp = xp_needed(user["level"])
     lack = []
     if user["xp"] < need_xp:
-        lack.append(f"опыта: {need_xp - user['xp']}")
+        lack.append(f"XP: {need_xp - user['xp']}")
     if user["meat"] < need_meat:
         lack.append(f"мяса: {need_meat - user['meat']}")
     if user["fruit"] < need_fruit:
@@ -162,6 +162,7 @@ SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способно
 LEVEL_EMOJI = ("5431816358675366190", "🆙")
 WINS_EMOJI = ("5454014806950429357", "⚔️")
 LOSSES_EMOJI = ("5285535716808342592", "☠️")
+CHECK_EMOJI = ("5206607081334906820", "✔️")  # «ресурса достаточно»
 UPGRADE_EMOJI = ("5449683594425410231", "🔼")  # кнопки «Прокачать»
 
 # Эмодзи самой стихии
@@ -787,12 +788,6 @@ async def on_menu_back(callback: CallbackQuery):
     await callback.message.answer(MENU_TEXT, reply_markup=menu_kb())
 
 
-def resource_bar(have: int, need: int, width: int = 10) -> str:
-    """Шкала ресурса: заполняется до нужного количества, число справа: есть/нужно."""
-    filled = min(width, int(width * have / need)) if need else width
-    return "▰" * filled + "▱" * (width - filled)
-
-
 def upgrade_html(user_id: int, with_image: bool = False) -> str:
     """Rich-карточка прокачки: уровень, таблица требований, кнопка в теле."""
     user = get_user(user_id)
@@ -807,11 +802,11 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     rows = "".join(
         "<tr>"
         f"<td><b>{label}</b></td>"
-        f'<td align="center"><b>{resource_bar(have, need, 6)}</b></td>'
-        f'<td align="center"><b>{have}/{need} {"✅" if have >= need else "❌"}</b></td>'
+        f'<td align="center"><b>{have}/{need}'
+        f'{" " + custom_emoji(CHECK_EMOJI) if have >= need else ""}</b></td>'
         "</tr>"
         for label, have, need in (
-            (f"{XP_EMOJI} Опыт", user["xp"], need_xp),
+            (f"{XP_EMOJI} XP", user["xp"], need_xp),
             (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
             (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
         )
@@ -834,7 +829,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         "<br>&nbsp;<br>"
         "<b>Для прокачки нужно</b></p>"
         "<table bordered striped>"
-        "<tr><th><b>Ресурс</b></th><th><b>Шкала</b></th><th><b>Есть/нужно</b></th></tr>"
+        "<tr><th><b>Ресурс</b></th><th><b>Есть/нужно</b></th></tr>"
         f"{rows}"
         "</table>"
         f"<p>{status}</p>"
