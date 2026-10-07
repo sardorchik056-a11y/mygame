@@ -103,27 +103,38 @@ def xp_needed(level: int) -> int:
     return 100 + (level - 1) * 50
 
 
-def add_xp(user_id: int, amount: int) -> int:
-    """Начислить опыт (пригодится для арены). Возвращает, на сколько вырос уровень."""
+def add_xp(user_id: int, amount: int) -> None:
+    """Начислить опыт (пригодится для арены). Уровень не повышается сам:
+    его нужно прокачать за опыт, мясо и фрукты."""
     user = get_user(user_id)
     if user is None:
-        return 0
+        return
     user["xp"] += amount
-    gained = 0
-    while user["xp"] >= xp_needed(user["level"]):
-        user["xp"] -= xp_needed(user["level"])
-        user["level"] += 1
-        gained += 1
     save_users()
-    return gained
+
 
 MEAT_EMOJI = "🥩"
-FRUIT_EMOJI = "🍎"
+XP_EMOJI = "✨"
+FRUIT_EMOJI = "🥭"
 
 
 def upgrade_cost(level: int) -> tuple[int, int]:
     """Сколько (мяса, фруктов) нужно, чтобы поднять уровень с текущего."""
     return level, level + 1
+
+
+def upgrade_lack(user: dict) -> list[str]:
+    """Чего не хватает для прокачки (пустой список, если всё есть)."""
+    need_meat, need_fruit = upgrade_cost(user["level"])
+    need_xp = xp_needed(user["level"])
+    lack = []
+    if user["xp"] < need_xp:
+        lack.append(f"опыта: {need_xp - user['xp']}")
+    if user["meat"] < need_meat:
+        lack.append(f"мяса: {need_meat - user['meat']}")
+    if user["fruit"] < need_fruit:
+        lack.append(f"фруктов: {need_fruit - user['fruit']}")
+    return lack
 
 
 STAT_LABELS = {
@@ -783,23 +794,32 @@ def resource_bar(have: int, need: int, width: int = 10) -> str:
 
 
 def upgrade_html(user_id: int, with_image: bool = False) -> str:
-    """Rich-карточка прокачки: уровень, шкалы мяса и фруктов, кнопка в теле."""
+    """Rich-карточка прокачки: уровень, таблица требований, кнопка в теле."""
     user = get_user(user_id)
     pet = PETS[user["pet"]]
     level = user["level"]
     need_meat, need_fruit = upgrade_cost(level)
-    meat, fruit = user["meat"], user["fruit"]
+    need_xp = xp_needed(level)
 
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
-    lack = []
-    if meat < need_meat:
-        lack.append(f"мяса: {need_meat - meat}")
-    if fruit < need_fruit:
-        lack.append(f"фруктов: {need_fruit - fruit}")
+    rows = "".join(
+        "<tr>"
+        f"<td><b>{label}</b></td>"
+        f'<td align="center"><b>{resource_bar(have, need, 6)}</b></td>'
+        f'<td align="center"><b>{have}/{need} {"✅" if have >= need else "❌"}</b></td>'
+        "</tr>"
+        for label, have, need in (
+            (f"{XP_EMOJI} Опыт", user["xp"], need_xp),
+            (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
+            (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
+        )
+    )
+
+    lack = upgrade_lack(user)
     status = (
-        "<i>Ресурсов достаточно, можно прокачивать.</i>"
+        "<i>Всё готово, можно повышать уровень.</i>"
         if not lack
         else f"<i>Не хватает {escape(', '.join(lack))}.</i>"
     )
@@ -813,10 +833,10 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b>"
         "<br>&nbsp;<br>"
         "<b>Для прокачки нужно</b></p>"
-        f"<p><b>{MEAT_EMOJI} Мясо</b><br>"
-        f"<b>{resource_bar(meat, need_meat)} {meat}/{need_meat}</b></p>"
-        f"<p><b>{FRUIT_EMOJI} Фрукты</b><br>"
-        f"<b>{resource_bar(fruit, need_fruit)} {fruit}/{need_fruit}</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Ресурс</b></th><th><b>Шкала</b></th><th><b>Есть/нужно</b></th></tr>"
+        f"{rows}"
+        "</table>"
         f"<p>{status}</p>"
         # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
@@ -872,18 +892,13 @@ async def on_upgrade_do(callback: CallbackQuery):
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return
 
-    need_meat, need_fruit = upgrade_cost(user["level"])
-    lack_meat = max(0, need_meat - user["meat"])
-    lack_fruit = max(0, need_fruit - user["fruit"])
-    if lack_meat or lack_fruit:
-        parts = []
-        if lack_meat:
-            parts.append(f"мяса: {lack_meat}")
-        if lack_fruit:
-            parts.append(f"фруктов: {lack_fruit}")
-        await callback.answer("Не хватает " + ", ".join(parts), show_alert=True)
+    lack = upgrade_lack(user)
+    if lack:
+        await callback.answer("Не хватает " + ", ".join(lack), show_alert=True)
         return
 
+    need_meat, need_fruit = upgrade_cost(user["level"])
+    user["xp"] -= xp_needed(user["level"])
     user["meat"] -= need_meat
     user["fruit"] -= need_fruit
     user["level"] += 1
@@ -916,7 +931,7 @@ async def on_upgrade_back(callback: CallbackQuery):
 
 @admin_router.message(Command("give"))
 async def cmd_give(message: Message):
-    """/give <мясо> <фрукты> — выдать себе еду для теста."""
+    """/give <мясо> <фрукты> [опыт] — выдать себе ресурсы для теста."""
     user = get_user(message.from_user.id)
     if user is None:
         await message.answer("<i>Сначала выбери питомца: /start</i>")
@@ -924,14 +939,16 @@ async def cmd_give(message: Message):
     parts = (message.text or "").split()[1:]
     try:
         meat, fruit = int(parts[0]), int(parts[1])
+        xp = int(parts[2]) if len(parts) > 2 else 0
     except (IndexError, ValueError):
-        await message.answer("<i>Формат: /give 5 5 (мясо, фрукты)</i>")
+        await message.answer("<i>Формат: /give 5 5 100 (мясо, фрукты, опыт)</i>")
         return
     user["meat"] += meat
     user["fruit"] += fruit
+    user["xp"] += xp
     save_users()
     await message.answer(
-        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}"
+        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}  {XP_EMOJI} +{xp}"
     )
 
 
