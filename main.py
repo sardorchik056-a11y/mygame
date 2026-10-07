@@ -510,7 +510,7 @@ def stock_html(user_id: int | None = None, with_image: bool = False) -> str:
         # Синяя кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         '<tg-button type="callback_data" data="stock:donate" '
-        f'style="primary">{custom_emoji(DONATE_EMOJI)} Задонатить</tg-button>'
+        f'style="success">{custom_emoji(DONATE_EMOJI)} Задонатить</tg-button>'
         "</tg-button-row>"
     )
 
