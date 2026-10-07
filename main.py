@@ -151,6 +151,7 @@ SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способно
 LEVEL_EMOJI = ("5431816358675366190", "🆙")
 WINS_EMOJI = ("5454014806950429357", "⚔️")
 LOSSES_EMOJI = ("5285535716808342592", "☠️")
+UPGRADE_EMOJI = ("5449683594425410231", "🔼")  # кнопки «Прокачать»
 
 # Эмодзи самой стихии
 ELEMENT_EMOJI = {
@@ -398,7 +399,7 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         '<tg-button type="callback_data" data="pet:upgrade" '
-        'style="success">Прокачать уровень</tg-button>'
+        f'style="success">{custom_emoji(UPGRADE_EMOJI)} Прокачать уровень</tg-button>'
         "</tg-button-row>"
     )
 
@@ -809,8 +810,9 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{escape(pet['element'])} {element_emoji}</b></p>"
-        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b></p>"
-        "<p><b>Для прокачки нужно</b></p>"
+        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level} → {level + 1}</b>"
+        "<br>&nbsp;<br>"
+        "<b>Для прокачки нужно</b></p>"
         f"<p><b>{MEAT_EMOJI} Мясо</b><br>"
         f"<b>{resource_bar(meat, need_meat)} {meat}/{need_meat}</b></p>"
         f"<p><b>{FRUIT_EMOJI} Фрукты</b><br>"
@@ -819,7 +821,7 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
         # Кнопка прямо в теле сообщения (Bot API 10.3)
         "<tg-button-row>"
         '<tg-button type="callback_data" data="upg:do" '
-        'style="success">Прокачать</tg-button>'
+        f'style="success">{custom_emoji(UPGRADE_EMOJI)} Прокачать</tg-button>'
         "</tg-button-row>"
     )
 
