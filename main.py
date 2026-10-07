@@ -432,18 +432,6 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         )
     )
 
-    stock_rows = "".join(
-        "<tr>"
-        f"<td><b>{label}</b></td>"
-        f'<td align="center"><b>{value}</b></td>'
-        "</tr>"
-        for label, value in (
-            (f"{custom_emoji(COIN_EMOJI)} Монеты", user["coins"]),
-            (f"{MEAT_EMOJI} Мясо", user["meat"]),
-            (f"{FRUIT_EMOJI} Фрукты", user["fruit"]),
-        )
-    )
-
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
@@ -465,11 +453,6 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
         f"{stats_rows}"
         "</table>"
-        "<p><b>Запасы</b></p>"
-        "<table bordered striped>"
-        "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
-        f"{stock_rows}"
-        "</table>"
         "<p><b>Бои</b></p>"
         "<table bordered striped>"
         "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
@@ -490,6 +473,42 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
     )
 
 
+def stock_html(user_id: int, with_image: bool = False) -> str:
+    """Rich-карточка запасов: монеты, мясо, фрукты."""
+    user = get_user(user_id)
+    pet = PETS[user["pet"]]
+
+    rows = "".join(
+        "<tr>"
+        f"<td><b>{label}</b></td>"
+        f'<td align="center"><b>{value}</b></td>'
+        "</tr>"
+        for label, value in (
+            (f"{custom_emoji(COIN_EMOJI)} Монеты", user["coins"]),
+            (f"{MEAT_EMOJI} Мясо", user["meat"]),
+            (f"{FRUIT_EMOJI} Фрукты", user["fruit"]),
+        )
+    )
+
+    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
+    element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
+
+    return (
+        f"{image}"
+        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
+        "<br>&nbsp;<br>"
+        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
+        f"{escape(pet['element'])} {element_emoji}</b></p>"
+        "<p><b>Запасы</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Ресурс</b></th><th><b>Количество</b></th></tr>"
+        f"{rows}"
+        "</table>"
+        "<p><i>Мясо и фрукты нужны для прокачки и эволюции питомца. "
+        "Монеты можно будет тратить на рынке.</i></p>"
+    )
+
+
 def menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -499,7 +518,15 @@ def menu_kb() -> InlineKeyboardMarkup:
                     callback_data="menu:pet",
                     style=ButtonStyle.PRIMARY,
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Запасы",
+                    callback_data="menu:stock",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=COIN_EMOJI[0],
+                )
+            ],
         ]
     )
 
@@ -522,7 +549,7 @@ def profile_back_kb() -> InlineKeyboardMarkup:
 MENU_TEXT = (
     "<b>Главное меню</b>\n\n"
     "<i>Здесь ты можешь посмотреть на своего питомца: его уровень, "
-    "опыт и характеристики.</i>"
+    "опыт и характеристики, а также свои запасы: монеты, мясо и фрукты.</i>"
 )
 
 
@@ -851,6 +878,24 @@ async def on_menu_pet(callback: CallbackQuery):
         callback.message.chat.id,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
+        profile_back_kb(),
+    )
+
+
+@dp.callback_query(F.data == "menu:stock")
+async def on_menu_stock(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if user is None:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.delete()
+    await send_rich_card(
+        callback.bot,
+        callback.message.chat.id,
+        user["pet"],
+        lambda with_image: stock_html(callback.from_user.id, with_image),
         profile_back_kb(),
     )
 
