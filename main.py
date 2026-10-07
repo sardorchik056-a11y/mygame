@@ -473,10 +473,13 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
     )
 
 
-def stock_html(user_id: int, with_image: bool = False) -> str:
-    """Rich-карточка запасов: монеты, мясо, фрукты."""
-    user = get_user(user_id)
-    pet = PETS[user["pet"]]
+def stock_html(user_id: int | None = None, with_image: bool = False) -> str:
+    """Rich-карточка запасов: не связана с питомцем, своё изображение (ключ «stock»)."""
+    user = (get_user(user_id) if user_id else None) or {
+        "coins": 0,
+        "meat": 0,
+        "fruit": 0,
+    }
 
     rows = "".join(
         "<tr>"
@@ -491,21 +494,18 @@ def stock_html(user_id: int, with_image: bool = False) -> str:
     )
 
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
-    element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
     return (
         f"{image}"
-        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
-        "<br>&nbsp;<br>"
-        f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
-        f"{escape(pet['element'])} {element_emoji}</b></p>"
-        "<p><b>Запасы</b></p>"
+        f"<p><b>{custom_emoji(COIN_EMOJI)} ЗАПАСЫ</b></p>"
+        "<blockquote><i>Всё, что ты собрал в пути. Монеты пригодятся на рынке, "
+        "а еда нужна для роста питомца.</i></blockquote>"
         "<table bordered striped>"
         "<tr><th><b>Ресурс</b></th><th><b>Количество</b></th></tr>"
         f"{rows}"
         "</table>"
-        "<p><i>Мясо и фрукты нужны для прокачки и эволюции питомца. "
-        "Монеты можно будет тратить на рынке.</i></p>"
+        f"<p><b>{custom_emoji(INFO_EMOJI)} Мясо и фрукты тратятся на прокачку "
+        "и эволюцию питомца.</b></p>"
     )
 
 
@@ -621,6 +621,7 @@ async def send_pet_card(
 IMG_TARGETS: dict[str, str] = {
     "welcome": "Приветствие (Керри)",
     "pets_list": "Выбор питомцев",
+    "stock": "Запасы",
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -661,7 +662,8 @@ admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 IMG_MENU_TEXT = (
     "<b>Изображения питомцев</b>\n\n"
     "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
-    "выбора питомцев или на карточку питомца. Галочка значит, что фото уже есть.</i>"
+    "выбора питомцев, на запасы или на карточку питомца. "
+    "Галочка значит, что фото уже есть.</i>"
 )
 
 
@@ -757,6 +759,13 @@ async def img_receive(message: Message, state: FSMContext):
         await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
     elif pet_key == "welcome":
         await send_screen(message.bot, message.chat.id, "welcome", WELCOME_TEXT)
+    elif pet_key == "stock":
+        await send_rich_card(
+            message.bot,
+            message.chat.id,
+            "stock",
+            lambda with_image: stock_html(message.from_user.id, with_image),
+        )
     else:
         await send_screen(message.bot, message.chat.id, "pets_list", PETS_LIST_TEXT)
     await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
@@ -894,7 +903,7 @@ async def on_menu_stock(callback: CallbackQuery):
     await send_rich_card(
         callback.bot,
         callback.message.chat.id,
-        user["pet"],
+        "stock",
         lambda with_image: stock_html(callback.from_user.id, with_image),
         profile_back_kb(),
     )
