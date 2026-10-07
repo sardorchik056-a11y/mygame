@@ -209,6 +209,7 @@ SKILL_EMOJI = ("5364265456641258077", "⭐️")  # слово «Способно
 LEVEL_EMOJI = ("5431816358675366190", "🆙")
 WINS_EMOJI = ("5454014806950429357", "⚔️")
 LOSSES_EMOJI = ("5285535716808342592", "☠️")
+DONATE_EMOJI = ("5427168083074628963", "💎")  # кнопка «Задонатить»
 CHECK_EMOJI = ("5206607081334906820", "✔️")  # «ресурса достаточно»
 UPGRADE_EMOJI = ("5449683594425410231", "🔼")
 EVO_EMOJI = ("5345857480213674463", "🌱")  # кнопка «Эволюционировать»  # кнопки «Прокачать»
@@ -506,6 +507,11 @@ def stock_html(user_id: int | None = None, with_image: bool = False) -> str:
         "</table>"
         f"<p><b>{custom_emoji(INFO_EMOJI)} Мясо и фрукты тратятся на прокачку "
         "и эволюцию питомца.</b></p>"
+        # Синяя кнопка прямо в теле сообщения (Bot API 10.3)
+        "<tg-button-row>"
+        '<tg-button type="callback_data" data="stock:donate" '
+        f'style="primary">{custom_emoji(DONATE_EMOJI)} Задонатить</tg-button>'
+        "</tg-button-row>"
     )
 
 
@@ -907,6 +913,12 @@ async def on_menu_stock(callback: CallbackQuery):
         lambda with_image: stock_html(callback.from_user.id, with_image),
         profile_back_kb(),
     )
+
+
+@dp.callback_query(F.data == "stock:donate")
+async def on_stock_donate(callback: CallbackQuery):
+    # Заглушка: донат пока не реализован
+    await callback.answer("Донат скоро появится", show_alert=True)
 
 
 @dp.callback_query(F.data == "menu:back")
