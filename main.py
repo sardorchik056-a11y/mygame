@@ -72,15 +72,23 @@ users: dict[str, dict] = load_users()
 
 START_MEAT = 3
 START_FRUIT = 4
+START_COINS = 0
 
 
 def get_user(user_id: int) -> dict | None:
     user = users.get(str(user_id))
     if user is not None:
         # Старые игроки без запасов тоже получают стартовый набор еды
-        if "meat" not in user or "fruit" not in user:
-            user.setdefault("meat", START_MEAT)
-            user.setdefault("fruit", START_FRUIT)
+        missing = False
+        for field, default in (
+            ("meat", START_MEAT),
+            ("fruit", START_FRUIT),
+            ("coins", START_COINS),
+        ):
+            if field not in user:
+                user[field] = default
+                missing = True
+        if missing:
             save_users()
     return user
 
@@ -94,6 +102,7 @@ def create_user(user_id: int, pet_key: str) -> None:
         "losses": 0,
         "meat": START_MEAT,
         "fruit": START_FRUIT,
+        "coins": START_COINS,
     }
     save_users()
 
@@ -101,6 +110,17 @@ def create_user(user_id: int, pet_key: str) -> None:
 def xp_needed(level: int) -> int:
     """Сколько опыта нужно, чтобы выйти с этого уровня на следующий."""
     return 100 + (level - 1) * 50
+
+
+def add_coins(user_id: int, amount: int) -> bool:
+    """Начислить монеты (amount > 0) или потратить (amount < 0).
+    Возвращает False, если на списание не хватает монет."""
+    user = get_user(user_id)
+    if user is None or user["coins"] + amount < 0:
+        return False
+    user["coins"] += amount
+    save_users()
+    return True
 
 
 def add_xp(user_id: int, amount: int) -> None:
@@ -113,6 +133,7 @@ def add_xp(user_id: int, amount: int) -> None:
     save_users()
 
 
+COIN_EMOJI = ("5449418135381759397", "🪙")  # валюта бота: монеты
 MEAT_EMOJI = "🥩"
 XP_EMOJI = ("5429578972771926029", "🟣")
 INFO_EMOJI = ("5334544901428229844", "ℹ️")
@@ -411,6 +432,18 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         )
     )
 
+    stock_rows = "".join(
+        "<tr>"
+        f"<td><b>{label}</b></td>"
+        f'<td align="center"><b>{value}</b></td>'
+        "</tr>"
+        for label, value in (
+            (f"{custom_emoji(COIN_EMOJI)} Монеты", user["coins"]),
+            (f"{MEAT_EMOJI} Мясо", user["meat"]),
+            (f"{FRUIT_EMOJI} Фрукты", user["fruit"]),
+        )
+    )
+
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     element_emoji = custom_emoji(ELEMENT_EMOJI[pet["element"]])
 
@@ -431,6 +464,11 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         "<table bordered striped>"
         "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
         f"{stats_rows}"
+        "</table>"
+        "<p><b>Запасы</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Параметр</b></th><th><b>Значение</b></th></tr>"
+        f"{stock_rows}"
         "</table>"
         "<p><b>Бои</b></p>"
         "<table bordered striped>"
@@ -1002,7 +1040,7 @@ async def on_upgrade_back(callback: CallbackQuery):
 
 @admin_router.message(Command("give"))
 async def cmd_give(message: Message):
-    """/give <мясо> <фрукты> [опыт] — выдать себе ресурсы для теста."""
+    """/give <мясо> <фрукты> [XP] [монеты] — выдать себе ресурсы для теста."""
     user = get_user(message.from_user.id)
     if user is None:
         await message.answer("<i>Сначала выбери питомца: /start</i>")
@@ -1011,15 +1049,21 @@ async def cmd_give(message: Message):
     try:
         meat, fruit = int(parts[0]), int(parts[1])
         xp = int(parts[2]) if len(parts) > 2 else 0
+        coins = int(parts[3]) if len(parts) > 3 else 0
     except (IndexError, ValueError):
-        await message.answer("<i>Формат: /give 5 5 100 (мясо, фрукты, опыт)</i>")
+        await message.answer(
+            "<i>Формат: /give 5 5 100 50 (мясо, фрукты, XP, монеты)</i>"
+        )
         return
     user["meat"] += meat
     user["fruit"] += fruit
     user["xp"] += xp
+    user["coins"] += coins
     save_users()
     await message.answer(
-        f"<b>Выдано</b>\n{MEAT_EMOJI} +{meat}  {FRUIT_EMOJI} +{fruit}  {custom_emoji(XP_EMOJI)} +{xp}"
+        "<b>Выдано</b>\n"
+        f"{custom_emoji(COIN_EMOJI)} +{coins}  {MEAT_EMOJI} +{meat}  "
+        f"{FRUIT_EMOJI} +{fruit}  {custom_emoji(XP_EMOJI)} +{xp}"
     )
 
 
