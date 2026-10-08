@@ -1,15 +1,17 @@
-"""Раздел «Шахты»: кирки, шахтёры и пассивный доход монет.
+"""Раздел «Шахты»: кирки, шахтёры разных типов и ручной запуск добычи.
 
 Модуль самостоятельный и не импортирует main.py (чтобы не было циклического
 импорта). Нужные функции бот передаёт один раз через mine.setup(...).
 
 Как это работает:
-  * Каждый шахтёр добывает монеты, даже пока игрока нет в боте.
+  * Шахту нужно запускать вручную. Один запуск длится RUN_HOURS часов,
+    добыча идёт только пока шахта работает (в том числе когда игрока нет в боте).
+  * Остановить шахту можно только когда с момента запуска прошло больше
+    MIN_STOP_MINUTES минут. Всё, что успели добыть, остаётся на складе.
   * Кирка усиливает сразу всех шахтёров (множитель дохода).
-  * Добыча копится на складе, но не больше, чем за STORAGE_HOURS часов:
-    забирать монеты нужно вовремя.
-  * Кирки покупаются по порядку, шахтёры нанимаются по одному, и каждый
-    следующий стоит дороже.
+  * Шахтёры бывают разных типов: у каждого свой доход, цена и лимит.
+    Сильные типы открываются вместе с определёнными кирками.
+  * У каждой кирки и у каждого типа шахтёров есть своя карточка характеристик.
 """
 
 import logging
@@ -34,26 +36,78 @@ def setup(**deps) -> None:
 
 # ---------- Баланс шахт ----------
 
-# Кирки: название, множитель дохода, цена в монетах. Первая выдаётся бесплатно.
+RUN_HOURS = 8          # сколько длится один запуск шахты
+MIN_STOP_MINUTES = 5   # раньше этого срока остановить шахту нельзя
+
+# Кирки идут по порядку. Первая выдаётся бесплатно.
 PICKAXES = [
-    {"name": "Деревянная кирка", "mult": 1.0, "price": 0},
-    {"name": "Каменная кирка", "mult": 1.5, "price": 500},
-    {"name": "Железная кирка", "mult": 2.5, "price": 2_500},
-    {"name": "Золотая кирка", "mult": 4.0, "price": 10_000},
-    {"name": "Алмазная кирка", "mult": 7.0, "price": 40_000},
-    {"name": "Мифриловая кирка", "mult": 12.0, "price": 150_000},
+    {
+        "name": "Деревянная кирка", "mult": 1.0, "price": 0, "icon": "🪵",
+        "desc": "Простая кирка для начала. Работает, пока не сломается терпение.",
+    },
+    {
+        "name": "Каменная кирка", "mult": 1.5, "price": 500, "icon": "🪨",
+        "desc": "Тяжёлая и надёжная. Открывает рудокопов.",
+    },
+    {
+        "name": "Железная кирка", "mult": 2.5, "price": 2_500, "icon": "⚙️",
+        "desc": "Кованая сталь, острая кромка. Открывает подрывников.",
+    },
+    {
+        "name": "Золотая кирка", "mult": 4.0, "price": 10_000, "icon": "🥇",
+        "desc": "Мягкая, но очень дорогая. Зато шахтёры работают как заведённые. "
+                "Открывает геологов.",
+    },
+    {
+        "name": "Алмазная кирка", "mult": 7.0, "price": 40_000, "icon": "💎",
+        "desc": "Режет любую породу. Открывает гномов-мастеров.",
+    },
+    {
+        "name": "Мифриловая кирка", "mult": 12.0, "price": 150_000, "icon": "✨",
+        "desc": "Лёгкая как пёрышко и крепче всего на свете. Открывает бригадиров.",
+    },
 ]
 
-MINER_BASE_INCOME = 10     # монет в час у одного шахтёра с деревянной киркой
-MINER_BASE_PRICE = 100     # цена первого нанимаемого шахтёра
-MINER_PRICE_GROWTH = 1.35  # каждый следующий дороже в столько раз
-MAX_MINERS = 30
-START_MINERS = 1           # один шахтёр у каждого игрока бесплатно
-STORAGE_HOURS = 8          # склад вмещает добычу за столько часов
+# Типы шахтёров: доход в час (с деревянной киркой), цена первого найма,
+# лимит именно этого типа и номер кирки, с которой тип становится доступен.
+MINERS = [
+    {
+        "name": "Новичок", "icon": "👷", "income": 10, "price": 100,
+        "max": 10, "req_pick": 0,
+        "desc": "Только вчера впервые взял в руки кирку. Старается, но медленно.",
+    },
+    {
+        "name": "Рудокоп", "icon": "⛏️", "income": 25, "price": 400,
+        "max": 8, "req_pick": 1,
+        "desc": "Знает, где копать. Основа любой шахты.",
+    },
+    {
+        "name": "Подрывник", "icon": "🧨", "income": 60, "price": 1_500,
+        "max": 6, "req_pick": 2,
+        "desc": "Не любит лишних вопросов и тишину. Зато порода сыплется сама.",
+    },
+    {
+        "name": "Геолог", "icon": "🧭", "income": 150, "price": 6_000,
+        "max": 5, "req_pick": 3,
+        "desc": "Видит жилы там, где другие видят камни.",
+    },
+    {
+        "name": "Гном-мастер", "icon": "🧙", "income": 400, "price": 25_000,
+        "max": 4, "req_pick": 4,
+        "desc": "Копает с рождения. Борода длиннее, чем штрек.",
+    },
+    {
+        "name": "Бригадир", "icon": "👑", "income": 1_000, "price": 100_000,
+        "max": 3, "req_pick": 5,
+        "desc": "Командует всей сменой, и смена работает в полную силу.",
+    },
+]
 
-# Эмодзи, пока обычные. Когда будут кастомные, меняем здесь.
+MINER_PRICE_GROWTH = 1.35  # каждый следующий шахтёр одного типа дороже в столько раз
+
 PICK_ICON = "⛏️"
 MINER_ICON = "👷"
+TIMER_ICON = "⏱️"
 STORAGE_ICON = "📦"
 LOCK_ICON = "🔒"
 
@@ -63,41 +117,81 @@ IMG_TARGETS: dict[str, str] = {
     "mine_picks": "Шахты: кирки",
     "mine_miners": "Шахты: шахтёры",
 }
+for _i, _p in enumerate(PICKAXES):
+    IMG_TARGETS[f"mine_pick_{_i}"] = f"Шахты: {_p['name']}"
+for _i, _m in enumerate(MINERS):
+    IMG_TARGETS[f"mine_miner_{_i}"] = f"Шахты: {_m['name']}"
 
 
 # ---------- Состояние и расчёты ----------
 
 def get_mine(user: dict) -> dict:
-    """Данные шахты игрока; при первом входе создаются стартовые."""
-    if "mine" not in user:
-        user["mine"] = {
+    """Данные шахты игрока; при первом входе создаются стартовые.
+    Старые данные (miners было числом) переносятся в новый формат."""
+    m = user.get("mine")
+    changed = False
+
+    if m is None:
+        m = user["mine"] = {
             "pick": 0,
-            "miners": START_MINERS,
+            "miners": {"0": 1},   # один новичок бесплатно
             "stored": 0.0,
             "ts": time.time(),
+            "run_start": None,
+            "run_end": None,
         }
+        changed = True
+
+    if isinstance(m.get("miners"), int):  # миграция со старой версии
+        m["miners"] = {"0": m["miners"]}
+        changed = True
+    for key, default in (("run_start", None), ("run_end", None)):
+        if key not in m:
+            m[key] = default
+            changed = True
+    m.pop("miners_old", None)
+
+    if changed:
         D.save_users()
-    return user["mine"]
+    return m
+
+
+def owned(m: dict, i: int) -> int:
+    return int(m["miners"].get(str(i), 0))
+
+
+def total_miners(m: dict) -> int:
+    return sum(int(v) for v in m["miners"].values())
+
+
+def base_income(m: dict) -> float:
+    """Доход всех шахтёров в час без учёта кирки."""
+    return sum(owned(m, i) * t["income"] for i, t in enumerate(MINERS))
 
 
 def income_per_hour(m: dict) -> float:
-    return m["miners"] * MINER_BASE_INCOME * PICKAXES[m["pick"]]["mult"]
+    return base_income(m) * PICKAXES[m["pick"]]["mult"]
 
 
-def capacity(m: dict) -> float:
-    return income_per_hour(m) * STORAGE_HOURS
+def is_running(m: dict) -> bool:
+    return m.get("run_end") is not None
 
 
 def settle(m: dict) -> None:
-    """Зачислить на склад добычу за прошедшее время."""
+    """Зачислить на склад добычу за время, пока шахта работала."""
     now = time.time()
-    hours = max(0.0, now - m["ts"]) / 3600
-    m["stored"] = min(capacity(m), m["stored"] + income_per_hour(m) * hours)
+    if is_running(m):
+        upto = min(now, m["run_end"])
+        hours = max(0.0, upto - m["ts"]) / 3600
+        m["stored"] += income_per_hour(m) * hours
+        if now >= m["run_end"]:
+            m["run_start"] = None
+            m["run_end"] = None
     m["ts"] = now
 
 
-def miner_price(m: dict) -> int:
-    return round(MINER_BASE_PRICE * MINER_PRICE_GROWTH ** (m["miners"] - 1))
+def miner_price(m: dict, i: int) -> int:
+    return round(MINERS[i]["price"] * MINER_PRICE_GROWTH ** owned(m, i))
 
 
 def fmt(n: float) -> str:
@@ -108,13 +202,22 @@ def fmt_mult(mult: float) -> str:
     return f"×{mult:g}"
 
 
-def time_to_full(m: dict) -> str:
-    left = capacity(m) - m["stored"]
-    minutes = int(left / income_per_hour(m) * 60)
-    if minutes < 1:
-        return "меньше минуты"
-    hours, mins = divmod(minutes, 60)
-    return f"{hours} ч {mins} мин" if hours else f"{mins} мин"
+def fmt_dur(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    mins, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} ч {mins} мин"
+    if mins:
+        return f"{mins} мин {secs} сек"
+    return f"{secs} сек"
+
+
+def stop_wait_left(m: dict) -> float:
+    """Сколько секунд ещё нельзя останавливать шахту (0, если уже можно)."""
+    if not is_running(m):
+        return 0
+    return max(0.0, m["run_start"] + MIN_STOP_MINUTES * 60 - time.time())
 
 
 def load(user_id: int) -> tuple[dict, dict]:
@@ -142,13 +245,13 @@ def _table(rows: list[tuple[str, str]], head=("Параметр", "Значен�
     )
 
 
-def _button(data: str, label: str, emoji: str = "") -> str:
-    """Зелёная кнопка прямо в теле rich-сообщения."""
+def _button(data: str, label: str, emoji: str = "", style: str = "success") -> str:
+    """Кнопка прямо в теле rich-сообщения."""
     text = f"{emoji} {label}".strip()
     return (
         "<tg-button-row>"
         f'<tg-button type="callback_data" data="{data}" '
-        f'style="success">{text}</tg-button>'
+        f'style="{style}">{text}</tg-button>'
         "</tg-button-row>"
     )
 
@@ -165,33 +268,49 @@ def _check() -> str:
     return D.custom_emoji(D.CHECK_EMOJI)
 
 
+def _image(with_image: bool) -> str:
+    return '<img src="tg://photo?id=pet"/>' if with_image else ""
+
+
 # ---------- Экраны ----------
 
 def mine_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     pick = PICKAXES[m["pick"]]
-    cap = capacity(m)
 
-    if m["stored"] >= cap - 1e-6:
-        status = "Склад полон. Забери монеты, пока шахтёры не простаивают."
+    if is_running(m):
+        left = m["run_end"] - time.time()
+        state = f"Работает, до конца {fmt_dur(left)}"
+        wait = stop_wait_left(m)
+        if wait > 0:
+            status = f"Остановить шахту можно через {fmt_dur(wait)}."
+        else:
+            status = "Шахту можно остановить, добытое останется на складе."
+        action = _button("mine:stop", "Остановить шахту", TIMER_ICON, "danger")
     else:
-        status = f"Склад заполнится через {time_to_full(m)}."
+        state = "Стоит"
+        status = (
+            f"Шахтёры работают только пока шахта запущена. "
+            f"Один запуск длится {RUN_HOURS} ч."
+        )
+        action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", TIMER_ICON)
 
-    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     return (
-        f"{image}"
+        f"{_image(with_image)}"
         f"<p><b>{PICK_ICON} ШАХТЫ</b></p>"
-        "<blockquote><i>Шахтёры добывают монеты, даже пока тебя нет рядом. "
-        "Заглядывай почаще и не давай складу переполниться.</i></blockquote>"
+        "<blockquote><i>Запусти шахту, и шахтёры будут добывать монеты, "
+        "даже пока тебя нет рядом.</i></blockquote>"
         + _table(
             [
-                (f"{PICK_ICON} Кирка", f"{pick['name']} {fmt_mult(pick['mult'])}"),
-                (f"{MINER_ICON} Шахтёры", f"{m['miners']}/{MAX_MINERS}"),
+                (f"{TIMER_ICON} Шахта", state),
+                (f"{pick['icon']} Кирка", f"{pick['name']} {fmt_mult(pick['mult'])}"),
+                (f"{MINER_ICON} Шахтёры", str(total_miners(m))),
                 (f"{_coin()} Доход", f"{fmt(income_per_hour(m))} в час"),
-                (f"{STORAGE_ICON} Склад", f"{fmt(m['stored'])}/{fmt(cap)}"),
+                (f"{STORAGE_ICON} Склад", fmt(m["stored"])),
             ]
         )
         + f"<p><b>{_info()} {status}</b></p>"
+        + action
         + _button("mine:collect", "Собрать монеты", _coin())
     )
 
@@ -209,26 +328,56 @@ def picks_html(user_id: int, with_image: bool = False) -> str:
             price = f"{_coin()} {fmt(pick['price'])}"
         else:
             price = f"{LOCK_ICON} {fmt(pick['price'])}"
-        rows.append((f"{pick['name']} {fmt_mult(pick['mult'])}", price))
+        rows.append((f"{pick['icon']} {pick['name']} {fmt_mult(pick['mult'])}", price))
 
-    if m["pick"] + 1 < len(PICKAXES):
-        nxt = PICKAXES[m["pick"] + 1]
-        info = (
-            f"Следующая: {nxt['name']} за {_coin()} {fmt(nxt['price'])}. "
-            f"Доход вырастет до {fmt(m['miners'] * MINER_BASE_INCOME * nxt['mult'])} в час."
-        )
-        button = _button("mine:buy_pick", "Купить кирку", PICK_ICON)
-    else:
-        info = "У тебя лучшая кирка. Дальше расти можно только числом шахтёров."
-        button = ""
-
-    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     return (
-        f"{image}"
+        f"{_image(with_image)}"
         f"<p><b>{PICK_ICON} КИРКИ</b></p>"
-        "<blockquote><i>Кирка усиливает сразу всех шахтёров. Покупай по порядку: "
-        "каждая следующая добывает заметно больше.</i></blockquote>"
+        "<blockquote><i>Кирка усиливает сразу всех шахтёров. Покупай по порядку. "
+        "Нажми на кирку внизу, чтобы открыть её карточку.</i></blockquote>"
         + _table(rows, head=("Кирка", "Цена"))
+    )
+
+
+def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
+    user, m = load(user_id)
+    pick = PICKAXES[i]
+    base = base_income(m)
+    now_income = income_per_hour(m)
+    new_income = base * pick["mult"]
+
+    if i < m["pick"]:
+        status, button = f"{_check()} Куплена", ""
+        info = "Эта кирка у тебя уже есть, но сейчас в руках кирка получше."
+    elif i == m["pick"]:
+        status, button = f"{_check()} В руках", ""
+        info = "Именно эта кирка сейчас усиливает всех шахтёров."
+    elif i == m["pick"] + 1:
+        status = f"{_coin()} Можно купить"
+        button = _button(f"mine:buy_pick:{i}", "Купить кирку", pick["icon"])
+        info = f"Доход вырастет на {fmt(new_income - now_income)} в час."
+    else:
+        status, button = f"{LOCK_ICON} Закрыта", ""
+        info = f"Сначала купи «{PICKAXES[i - 1]['name']}»."
+
+    opens = [t for t in MINERS if t["req_pick"] == i]
+    rows = [
+        (f"{pick['icon']} Кирка", pick["name"]),
+        (f"{PICK_ICON} Множитель", fmt_mult(pick["mult"])),
+        (f"{_coin()} Цена", fmt(pick["price"]) if pick["price"] else "бесплатно"),
+        (f"{_coin()} Доход сейчас с ней", f"{fmt(new_income)} в час"),
+        ("Статус", status),
+    ]
+    if opens:
+        rows.append(
+            (f"{MINER_ICON} Открывает", ", ".join(t["name"] for t in opens))
+        )
+
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{pick['icon']} {pick['name'].upper()}</b></p>"
+        f"<blockquote><i>{pick['desc']}</i></blockquote>"
+        + _table(rows)
         + f"<p><b>{_info()} {info}</b></p>"
         + button
     )
@@ -236,33 +385,61 @@ def picks_html(user_id: int, with_image: bool = False) -> str:
 
 def miners_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
-    pick = PICKAXES[m["pick"]]
-    one = MINER_BASE_INCOME * pick["mult"]
+
+    rows = []
+    for i, t in enumerate(MINERS):
+        if m["pick"] >= t["req_pick"]:
+            value = f"{owned(m, i)}/{t['max']}"
+        else:
+            value = f"{LOCK_ICON} {PICKAXES[t['req_pick']]['name']}"
+        rows.append((f"{t['icon']} {t['name']}", value))
+
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{MINER_ICON} ШАХТЁРЫ</b></p>"
+        "<blockquote><i>У каждого типа шахтёров свой доход, цена и лимит. "
+        "Нажми на шахтёра внизу, чтобы открыть его карточку.</i></blockquote>"
+        + _table(rows, head=("Шахтёр", "Нанято"))
+        + f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
+        f"Доход шахты: {fmt(income_per_hour(m))} в час.</b></p>"
+    )
+
+
+def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
+    user, m = load(user_id)
+    t = MINERS[i]
+    mult = PICKAXES[m["pick"]]["mult"]
+    have = owned(m, i)
+    unlocked = m["pick"] >= t["req_pick"]
 
     rows = [
-        (f"{MINER_ICON} Шахтёры", f"{m['miners']}/{MAX_MINERS}"),
-        (f"{_coin()} Один шахтёр", f"{fmt(one)} в час"),
-        (f"{_coin()} Все шахтёры", f"{fmt(income_per_hour(m))} в час"),
+        (f"{t['icon']} Тип", t["name"]),
+        (f"{MINER_ICON} Нанято", f"{have}/{t['max']}"),
+        (f"{_coin()} Доход одного", f"{fmt(t['income'] * mult)} в час"),
+        (f"{_coin()} Доход всех этого типа", f"{fmt(have * t['income'] * mult)} в час"),
+        (f"{PICK_ICON} Нужна кирка", PICKAXES[t["req_pick"]]["name"]),
     ]
 
-    if m["miners"] < MAX_MINERS:
-        price = miner_price(m)
+    button = ""
+    if not unlocked:
+        rows.append(("Статус", f"{LOCK_ICON} Закрыт"))
+        info = f"Купи «{PICKAXES[t['req_pick']]['name']}», чтобы нанимать таких."
+    elif have >= t["max"]:
+        rows.append(("Статус", f"{_check()} Лимит"))
+        info = "Все места для этого типа заняты. Нанимай других шахтёров."
+    else:
+        price = miner_price(m, i)
         rows.append((f"{_coin()} Цена найма", fmt(price)))
         info = (
-            f"Новый шахтёр принесёт ещё {fmt(one)} монет в час. "
-            "Каждый следующий стоит дороже."
+            f"Новый {t['name'].lower()} принесёт ещё {fmt(t['income'] * mult)} монет "
+            "в час. Каждый следующий этого типа стоит дороже."
         )
-        button = _button("mine:buy_miner", "Нанять шахтёра", MINER_ICON)
-    else:
-        info = "Все места в шахте заняты. Улучшай кирки, чтобы добывать больше."
-        button = ""
+        button = _button(f"mine:buy_miner:{i}", "Нанять", t["icon"])
 
-    image = '<img src="tg://photo?id=pet"/>' if with_image else ""
     return (
-        f"{image}"
-        f"<p><b>{MINER_ICON} ШАХТЁРЫ</b></p>"
-        "<blockquote><i>Больше шахтёров, больше монет. Нанимай помощников и "
-        "пусть работа кипит днём и ночью.</i></blockquote>"
+        f"{_image(with_image)}"
+        f"<p><b>{t['icon']} {t['name'].upper()}</b></p>"
+        f"<blockquote><i>{t['desc']}</i></blockquote>"
         + _table(rows)
         + f"<p><b>{_info()} {info}</b></p>"
         + button
@@ -289,19 +466,51 @@ def mine_kb() -> InlineKeyboardMarkup:
     )
 
 
-def sub_back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_btn("Назад", "mine:open", D.BACK_EMOJI_ID)]]
+def _pairs(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+def picks_kb() -> InlineKeyboardMarkup:
+    rows = _pairs(
+        [_btn(f"{p['icon']} {p['name']}", f"mine:pick:{i}") for i, p in enumerate(PICKAXES)]
     )
+    rows.append([_btn("Назад", "mine:open", D.BACK_EMOJI_ID)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def miners_kb() -> InlineKeyboardMarkup:
+    rows = _pairs(
+        [_btn(f"{t['icon']} {t['name']}", f"mine:miner:{i}") for i, t in enumerate(MINERS)]
+    )
+    rows.append([_btn("Назад", "mine:open", D.BACK_EMOJI_ID)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _back_to(data: str):
+    def kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[_btn("Назад", data, D.BACK_EMOJI_ID)]]
+        )
+    return kb
 
 
 # ---------- Отправка ----------
 
 SCREENS = {
     "mine": (mine_html, mine_kb),
-    "mine_picks": (picks_html, sub_back_kb),
-    "mine_miners": (miners_html, sub_back_kb),
+    "mine_picks": (picks_html, picks_kb),
+    "mine_miners": (miners_html, miners_kb),
 }
+for _i in range(len(PICKAXES)):
+    SCREENS[f"mine_pick_{_i}"] = (
+        lambda uid, wi=False, i=_i: pick_card_html(uid, i, wi),
+        _back_to("mine:picks"),
+    )
+for _i in range(len(MINERS)):
+    SCREENS[f"mine_miner_{_i}"] = (
+        lambda uid, wi=False, i=_i: miner_card_html(uid, i, wi),
+        _back_to("mine:miners"),
+    )
 
 
 async def send_screen(bot, chat_id: int, user_id: int, key: str) -> None:
@@ -335,6 +544,15 @@ async def _show(callback: CallbackQuery, key: str) -> None:
     await send_screen(callback.bot, callback.message.chat.id, callback.from_user.id, key)
 
 
+def _index(callback: CallbackQuery, size: int) -> int | None:
+    """Номер из callback_data вида «mine:pick:3»; None, если он неверный."""
+    try:
+        i = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        return None
+    return i if 0 <= i < size else None
+
+
 # ---------- Хендлеры ----------
 
 @router.callback_query(F.data.in_({"menu:mine", "mine:open"}))
@@ -361,6 +579,83 @@ async def on_miners(callback: CallbackQuery):
     await _show(callback, "mine_miners")
 
 
+@router.callback_query(F.data.regexp(r"^mine:pick:\d+$"))
+async def on_pick_card(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    i = _index(callback, len(PICKAXES))
+    if i is None:
+        await callback.answer()
+        return
+    await callback.answer()
+    await _show(callback, f"mine_pick_{i}")
+
+
+@router.callback_query(F.data.regexp(r"^mine:miner:\d+$"))
+async def on_miner_card(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    i = _index(callback, len(MINERS))
+    if i is None:
+        await callback.answer()
+        return
+    await callback.answer()
+    await _show(callback, f"mine_miner_{i}")
+
+
+@router.callback_query(F.data == "mine:start")
+async def on_start(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    m = get_mine(user)
+    settle(m)
+
+    if is_running(m):
+        await callback.answer("Шахта уже работает.", show_alert=True)
+        return
+    if total_miners(m) < 1:
+        await callback.answer("В шахте нет ни одного шахтёра.", show_alert=True)
+        return
+
+    now = time.time()
+    m["run_start"] = now
+    m["run_end"] = now + RUN_HOURS * 3600
+    m["ts"] = now
+    D.save_users()
+    await callback.answer(f"Шахта запущена на {RUN_HOURS} ч!")
+    await _show(callback, "mine")
+
+
+@router.callback_query(F.data == "mine:stop")
+async def on_stop(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    m = get_mine(user)
+    settle(m)
+
+    if not is_running(m):
+        await callback.answer("Шахта уже остановлена.", show_alert=True)
+        await _show(callback, "mine")
+        return
+
+    wait = stop_wait_left(m)
+    if wait > 0:
+        await callback.answer(
+            f"Рано. Шахту можно остановить только через {fmt_dur(wait)} "
+            f"(минимум {MIN_STOP_MINUTES} мин после запуска).",
+            show_alert=True,
+        )
+        return
+
+    m["run_start"] = None
+    m["run_end"] = None
+    D.save_users()
+    await callback.answer("Шахта остановлена. Добыча осталась на складе.")
+    await _show(callback, "mine")
+
+
 @router.callback_query(F.data == "mine:collect")
 async def on_collect(callback: CallbackQuery):
     user = await _require_user(callback)
@@ -371,7 +666,7 @@ async def on_collect(callback: CallbackQuery):
 
     gain = int(m["stored"])
     if gain < 1:
-        await callback.answer("Пока нечего собирать, шахтёры ещё трудятся.", show_alert=True)
+        await callback.answer("Пока нечего собирать.", show_alert=True)
         return
 
     m["stored"] -= gain
@@ -381,45 +676,64 @@ async def on_collect(callback: CallbackQuery):
     await _show(callback, "mine")
 
 
-@router.callback_query(F.data == "mine:buy_pick")
+@router.callback_query(F.data.regexp(r"^mine:buy_pick:\d+$"))
 async def on_buy_pick(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
+    i = _index(callback, len(PICKAXES))
+    if i is None:
+        await callback.answer()
+        return
+
     m = get_mine(user)
     settle(m)  # сначала фиксируем добычу по старому доходу
 
-    if m["pick"] + 1 >= len(PICKAXES):
-        await callback.answer("У тебя уже лучшая кирка.", show_alert=True)
+    if i <= m["pick"]:
+        await callback.answer("Эта кирка у тебя уже есть.", show_alert=True)
+        return
+    if i != m["pick"] + 1:
+        await callback.answer("Кирки покупаются по порядку.", show_alert=True)
         return
 
-    nxt = PICKAXES[m["pick"] + 1]
-    if user["coins"] < nxt["price"]:
+    pick = PICKAXES[i]
+    if user["coins"] < pick["price"]:
         await callback.answer(
-            f"Не хватает монет: {fmt(nxt['price'] - user['coins'])}", show_alert=True
+            f"Не хватает монет: {fmt(pick['price'] - user['coins'])}", show_alert=True
         )
         return
 
-    user["coins"] -= nxt["price"]
-    m["pick"] += 1
+    user["coins"] -= pick["price"]
+    m["pick"] = i
     D.save_users()
-    await callback.answer(f"Куплено: {nxt['name']}!", show_alert=True)
-    await _show(callback, "mine_picks")
+    await callback.answer(f"Куплено: {pick['name']}!", show_alert=True)
+    await _show(callback, f"mine_pick_{i}")
 
 
-@router.callback_query(F.data == "mine:buy_miner")
+@router.callback_query(F.data.regexp(r"^mine:buy_miner:\d+$"))
 async def on_buy_miner(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
-    m = get_mine(user)
-    settle(m)
-
-    if m["miners"] >= MAX_MINERS:
-        await callback.answer("Все места в шахте заняты.", show_alert=True)
+    i = _index(callback, len(MINERS))
+    if i is None:
+        await callback.answer()
         return
 
-    price = miner_price(m)
+    m = get_mine(user)
+    settle(m)
+    t = MINERS[i]
+
+    if m["pick"] < t["req_pick"]:
+        await callback.answer(
+            f"Нужна кирка: {PICKAXES[t['req_pick']]['name']}.", show_alert=True
+        )
+        return
+    if owned(m, i) >= t["max"]:
+        await callback.answer("Лимит этого типа шахтёров достигнут.", show_alert=True)
+        return
+
+    price = miner_price(m, i)
     if user["coins"] < price:
         await callback.answer(
             f"Не хватает монет: {fmt(price - user['coins'])}", show_alert=True
@@ -427,7 +741,7 @@ async def on_buy_miner(callback: CallbackQuery):
         return
 
     user["coins"] -= price
-    m["miners"] += 1
+    m["miners"][str(i)] = owned(m, i) + 1
     D.save_users()
-    await callback.answer(f"Нанят новый шахтёр! Теперь их {m['miners']}.")
-    await _show(callback, "mine_miners")
+    await callback.answer(f"Нанят: {t['name']}! Теперь их {owned(m, i)}.")
+    await _show(callback, f"mine_miner_{i}")
