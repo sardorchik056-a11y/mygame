@@ -23,6 +23,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+import mine
+
 BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
 
 # Telegram ID админов (свой ID можно узнать у @userinfobot)
@@ -536,6 +538,13 @@ def menu_kb() -> InlineKeyboardMarkup:
                     icon_custom_emoji_id=COIN_EMOJI[0],
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="⛏️ Шахты",
+                    callback_data="menu:mine",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
         ]
     )
 
@@ -647,6 +656,7 @@ IMG_TARGETS: dict[str, str] = {
     "pets_list": "Выбор питомцев",
     "menu": "Меню",
     "stock": "Запасы",
+    **mine.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -687,7 +697,7 @@ admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 IMG_MENU_TEXT = (
     "<b>Изображения питомцев</b>\n\n"
     "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
-    "выбора питомцев, на меню, на запасы или на карточку питомца. "
+    "выбора питомцев, на меню, на запасы, на шахты или на карточку питомца. "
     "Галочка значит, что фото уже есть.</i>"
 )
 
@@ -791,6 +801,10 @@ async def img_receive(message: Message, state: FSMContext):
             "menu",
             lambda with_image: menu_html(message.from_user.id, with_image),
         )
+    elif pet_key in mine.IMG_TARGETS:
+        await mine.send_preview(
+            message.bot, message.chat.id, message.from_user.id, pet_key
+        )
     elif pet_key == "stock":
         await send_rich_card(
             message.bot,
@@ -809,6 +823,19 @@ async def img_not_photo(message: Message):
 
 
 dp.include_router(admin_router)
+
+# Раздел «Шахты» живёт в mine.py; ему передаём нужные функции и эмодзи
+mine.setup(
+    get_user=get_user,
+    save_users=save_users,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    COIN_EMOJI=COIN_EMOJI,
+    INFO_EMOJI=INFO_EMOJI,
+    CHECK_EMOJI=CHECK_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+)
+dp.include_router(mine.router)
 
 
 # ---------- Хендлеры ----------
