@@ -1,5 +1,5 @@
 """
-Telegram-бот: главное меню + пополнение через xRocket (aiogram 3.x + aiosqlite)
+Telegram-бот: главное меню + пополнение через xRocket и CryptoBot/@send (aiogram 3.x + aiosqlite)
 
 Установка:
     pip install -U aiogram aiosqlite aiohttp
@@ -7,6 +7,7 @@ Telegram-бот: главное меню + пополнение через xRock
 Запуск:
     export BOT_TOKEN="123:ABC"
     export XROCKET_API_KEY="ключ из @xrocket → Rocket Pay → Create App → API token"
+    export CRYPTOBOT_API_KEY="токен из @send (или @CryptoBot) → Crypto Pay → Create App"
     export SUPPORT_USERNAME="your_support"     # без @
     python main.py
 """
@@ -45,7 +46,15 @@ CURRENCY = "$"
 XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "PASTE_XROCKET_API_KEY")
 XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
 PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
-TOPUP_AMOUNTS = [1, 2, 5, 10, 25, 50, 100, 250, 500]  # кнопки быстрых сумм
+
+# ── CryptoBot / @send (Crypto Pay API) ─────────────────────────
+CRYPTOBOT_API_KEY = os.getenv("CRYPTOBOT_API_KEY", "PASTE_CRYPTOBOT_API_TOKEN")
+# mainnet: https://pay.crypt.bot/api   |   testnet: https://testnet-pay.crypt.bot/api
+CRYPTOBOT_URL = os.getenv("CRYPTOBOT_URL", "https://pay.crypt.bot/api")
+
+# Способы пополнения: код -> название на кнопке
+PROVIDERS = {"xr": "xRocket", "cb": "CryptoBot (@send)"}
+TOPUP_AMOUNTS = [5, 10, 25, 50]  # кнопки быстрых сумм (остальное — «Другая сумма»)
 MIN_TOPUP = 1.0
 MAX_TOPUP = 1000.0
 INVOICE_TTL = 3600     # срок жизни счёта, сек
@@ -229,6 +238,16 @@ async def credit_payment(invoice_id: str) -> bool:
         return True
 
 
+async def user_payments(user_id: int, limit: int = 8) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def pending_payments() -> list[str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT invoice_id FROM payments WHERE status = 'pending'") as cur:
@@ -281,8 +300,7 @@ async def build_menu_text(user: dict) -> str:
         f"└ Регистрация: <code>{user['reg_date']}</code>\n\n"
         f"{EMOJI_FINANCE} <b>Финансы</b>\n"
         f"├ Баланс: <b>{money(user['balance'])}</b>\n"
-        f"├ Пополнено: <code>{money(user['deposited'])}</code>\n"
-
+        f"└ Пополнено: <code>{money(user['deposited'])}</code>\n\n"
         f"<i>Выберите нужный раздел ниже 👇</i>"
     )
 
@@ -319,6 +337,12 @@ def back_kb(*extra: InlineKeyboardButton) -> InlineKeyboardMarkup:
     for button in extra:
         kb.row(button)
     kb.row(back_btn("menu"))
+    return kb.as_markup()
+
+
+def back_kb_to(callback_data: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn(callback_data))
     return kb.as_markup()
 
 
@@ -421,20 +445,60 @@ async def cb_refs(call: CallbackQuery, bot: Bot) -> None:
 
 
 @router.callback_query(F.data == "finance")
-async def cb_finance(call: CallbackQuery) -> None:
+async def cb_finance(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     user = await ensure_user(call)
     text = (
-        f"<b>💳 Финансы</b>\n{SEP}\n\n"
-        f"💰 Баланс: <b>{money(user['balance'])}</b>\n\n"
+        f"{EMOJI_FINANCE} <b>Финансы</b>\n{SEP}\n\n"
+        "<blockquote><i>Пополняйте баланс в криптовалюте — быстро и без комиссии с нашей стороны. "
+        "Деньги зачисляются автоматически сразу после оплаты.</i></blockquote>\n\n"
+        f"💰 <b>Ваш баланс:</b> <b>{money(user['balance'])}</b>\n\n"
+        f"{EMOJI_STATS} <b>Статистика</b>\n"
         f"├ Всего пополнено: <code>{money(user['deposited'])}</code>\n"
         f"├ Всего потрачено: <code>{money(user['spent'])}</code>\n"
         f"└ Реферальный доход: <code>{money(user['ref_earned'])}</code>\n\n"
-        "<i>Выберите способ пополнения ниже.</i>"
+        "<i>Выберите действие ниже 👇</i>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(btn(text="➕ Пополнить баланс", callback_data="topup"))
+    kb.row(btn(text="Пополнить баланс", style="success", callback_data="topup",
+               icon_custom_emoji_id="5417924076503062111"))
+    kb.row(btn(text="🧾 История пополнений", callback_data="history"))
     kb.row(back_btn("menu"))
     await safe_edit(call, text, kb.as_markup())
+    await call.answer()
+
+
+PAY_STATUS = {
+    "paid": "✅ Оплачен",
+    "pending": "⏳ Ожидает",
+    "expired": "⌛ Истёк",
+    "cancelled": "✖️ Отменён",
+}
+
+
+@router.callback_query(F.data == "history")
+async def cb_history(call: CallbackQuery) -> None:
+    await ensure_user(call)
+    pays = await user_payments(call.from_user.id)
+    if pays:
+        lines = []
+        for i, p in enumerate(pays):
+            prov, _ = split_id(p["invoice_id"])
+            when = datetime.fromtimestamp(p["created_at"]).strftime("%d.%m %H:%M")
+            branch = "└" if i == len(pays) - 1 else "├"
+            lines.append(
+                f"{branch} <code>{when}</code> • <b>{money(p['amount'])}</b> • "
+                f"{PROVIDERS.get(prov, prov)} • {PAY_STATUS.get(p['status'], p['status'])}"
+            )
+        body = "\n".join(lines)
+    else:
+        body = "<i>Пополнений пока не было.</i>"
+    text = (
+        f"🧾 <b>История пополнений</b>\n{SEP}\n\n"
+        f"<blockquote><i>Последние {len(pays) or 8} операций по вашему аккаунту.</i></blockquote>\n\n"
+        f"{body}"
+    )
+    await safe_edit(call, text, back_kb_to("finance"))
     await call.answer()
 
 
@@ -480,6 +544,86 @@ async def xr_get_invoice(invoice_id: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
+#  CRYPTOBOT / @SEND: API (Crypto Pay)
+# ══════════════════════════════════════════════════════════════
+async def cp_request(method: str, params: dict | None = None) -> dict | list:
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_API_KEY, "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            CRYPTOBOT_URL.rstrip("/") + "/" + method, json=params or {}, headers=headers
+        ) as resp:
+            data = await resp.json(content_type=None)
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise XRocketError(f"CryptoBot HTTP {resp.status}: {str(data)[:300]}")
+    return data["result"]
+
+
+async def cp_create_invoice(user_id: int, amount: float) -> dict:
+    return await cp_request(
+        "createInvoice",
+        {
+            "currency_type": "fiat",
+            "fiat": "USD",
+            "amount": f"{amount:.2f}",
+            "description": f"Пополнение баланса {SHOP_NAME}",
+            "payload": str(user_id),
+            "allow_comments": False,
+            "allow_anonymous": False,
+            "expires_in": INVOICE_TTL,
+        },
+    )
+
+
+async def cp_get_invoice(raw_id: str) -> dict:
+    res = await cp_request("getInvoices", {"invoice_ids": raw_id})
+    items = res.get("items", []) if isinstance(res, dict) else res
+    if not items:
+        raise XRocketError("CryptoBot: счёт не найден")
+    return items[0]
+
+
+# ══════════════════════════════════════════════════════════════
+#  ЕДИНЫЙ ИНТЕРФЕЙС ПЛАТЁЖНЫХ СИСТЕМ
+#  id счёта в БД хранится как «<провайдер>-<id>», например cb-123456
+#  (старые счета без префикса считаются xRocket)
+# ══════════════════════════════════════════════════════════════
+def split_id(invoice_id: str) -> tuple[str, str]:
+    prefix, sep, raw = invoice_id.partition("-")
+    if sep and prefix in PROVIDERS:
+        return prefix, raw
+    return "xr", invoice_id
+
+
+async def create_invoice(provider: str, user_id: int, amount: float) -> tuple[str, str]:
+    """Возвращает (id счёта для БД, ссылка на оплату)."""
+    if provider == "cb":
+        inv = await cp_create_invoice(user_id, amount)
+        link = inv.get("bot_invoice_url") or inv.get("pay_url")
+        return f"cb-{inv['invoice_id']}", link
+    inv = await xr_create_invoice(user_id, amount)
+    return f"xr-{inv['id']}", inv["link"]
+
+
+async def invoice_status(invoice_id: str) -> str:
+    """Нормализованный статус: paid / expired / pending."""
+    provider, raw = split_id(invoice_id)
+    if provider == "cb":
+        status = str((await cp_get_invoice(raw)).get("status", "")).lower()
+    else:
+        status = str((await xr_get_invoice(raw)).get("status", "")).lower()
+    return status if status in ("paid", "expired") else "pending"
+
+
+async def delete_invoice(invoice_id: str) -> None:
+    provider, raw = split_id(invoice_id)
+    if provider == "cb":
+        await cp_request("deleteInvoice", {"invoice_id": int(raw)})
+    else:
+        await xr_request("DELETE", f"/tg-invoices/{raw}")
+
+
+# ══════════════════════════════════════════════════════════════
 #  ПОПОЛНЕНИЕ: ЭКРАНЫ
 # ══════════════════════════════════════════════════════════════
 class TopUp(StatesGroup):
@@ -500,40 +644,50 @@ async def edit_or_send(bot: Bot, chat_id: int, message_id: int, text: str, kb: I
             logging.exception("Не удалось отправить сообщение о платеже")
 
 
-async def topup_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+def topup_methods_screen() -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"{EMOJI_FINANCE} <b>Пополнение баланса</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите удобный способ оплаты. "
+        "Баланс пополнится автоматически сразу после платежа.</i></blockquote>\n\n"
+        f"📉 <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n\n"
+        "<i>Выберите способ оплаты 👇</i>"
+    )
+    kb = InlineKeyboardBuilder()
+    for code, name in PROVIDERS.items():
+        kb.row(btn(text=f"💳 {name}", callback_data=f"topup:{code}"))
+    kb.row(back_btn("finance"))
+    return text, kb.as_markup()
+
+
+async def topup_screen(user_id: int, provider: str = "xr") -> tuple[str, InlineKeyboardMarkup]:
     user = await get_user(user_id)
     balance = user["balance"] if user else 0.0
     text = (
-        f"{EMOJI_FINANCE} <b>Пополнение баланса</b>\n{SEP}\n\n"
-        "<blockquote><i>Выберите сумму пополнения или введите свою. "
-        "Оплата проходит через xRocket в криптовалюте — быстро и безопасно. "
-        "Баланс пополнится автоматически сразу после оплаты.</i></blockquote>\n\n"
-        f"💳 <b>Способ оплаты:</b> xRocket ({PAY_CURRENCY})\n"
+        f"{EMOJI_FINANCE} <b>Пополнение через {PROVIDERS[provider]}</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите сумму или введите свою — "
+        "мы выставим счёт, а вы оплатите его в любой удобной криптовалюте.</i></blockquote>\n\n"
         f"📉 <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
         f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n"
         f"💰 <b>Ваш баланс:</b> {money(balance)}\n\n"
         "<i>Выберите сумму ниже 👇</i>"
     )
     kb = InlineKeyboardBuilder()
-    for i in range(0, len(TOPUP_AMOUNTS), 3):
-        kb.row(
-            *[
-                btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{a:g}")
-                for a in TOPUP_AMOUNTS[i : i + 3]
-            ]
-        )
-    kb.row(btn(text="✏️ Другая сумма", callback_data="pay_custom"))
-    kb.row(back_btn("finance"))
+    kb.row(
+        *[btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{provider}:{a:g}") for a in TOPUP_AMOUNTS]
+    )
+    kb.row(btn(text="✏️ Другая сумма", callback_data=f"pay_custom:{provider}"))
+    kb.row(back_btn("topup"))
     return text, kb.as_markup()
 
 
 def invoice_screen(invoice_id: str, amount: float, link: str) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         f"🧾 <b>Счёт на оплату</b>\n{SEP}\n\n"
-        "<blockquote><i>Нажмите «Оплатить» и завершите платёж в xRocket. "
+        f"<blockquote><i>Нажмите «Оплатить» и завершите платёж в {PROVIDERS[split_id(invoice_id)[0]]}. "
         "Баланс пополнится автоматически — проверять вручную не обязательно.</i></blockquote>\n\n"
-        f"💵 <b>К оплате:</b> {money(amount)} ({PAY_CURRENCY})\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(invoice_id)}</code>\n"
+        f"💵 <b>К оплате:</b> {money(amount)}\n"
+        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
         f"⏳ <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
         "📌 <b>Статус:</b> ожидает оплаты"
     )
@@ -544,20 +698,20 @@ def invoice_screen(invoice_id: str, amount: float, link: str) -> tuple[str, Inli
     return text, kb.as_markup()
 
 
-async def show_invoice(bot: Bot, user_id: int, chat_id: int, message_id: int, amount: float) -> None:
+async def show_invoice(
+    bot: Bot, user_id: int, chat_id: int, message_id: int, amount: float, provider: str
+) -> None:
     try:
-        inv = await xr_create_invoice(user_id, amount)
-        invoice_id = str(inv["id"])
-        link = inv["link"]
+        invoice_id, link = await create_invoice(provider, user_id, amount)
     except Exception:
-        logging.exception("xRocket: не удалось создать счёт")
+        logging.exception("%s: не удалось создать счёт", provider)
         text = (
             f"⚠️ <b>Не удалось создать счёт</b>\n{SEP}\n\n"
             "<blockquote><i>Платёжная система временно недоступна. "
             "Попробуйте ещё раз через минуту или напишите в тех поддержку.</i></blockquote>"
         )
         kb = InlineKeyboardBuilder()
-        kb.row(back_btn("topup"))
+        kb.row(back_btn(f"topup:{provider}"))
         await edit_or_send(bot, chat_id, message_id, text, kb.as_markup())
         return
 
@@ -591,7 +745,7 @@ async def finalize_paid(bot: Bot, invoice_id: str) -> None:
         f"Спасибо, что выбираете {html.escape(SHOP_NAME)}!</i></blockquote>\n\n"
         f"💵 <b>Зачислено:</b> {money(pay['amount'])}\n"
         f"💰 <b>Ваш баланс:</b> {money(user['balance'])}\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(invoice_id)}</code>"
+        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
     kb = InlineKeyboardBuilder()
     kb.row(back_btn("menu"))
@@ -606,10 +760,10 @@ async def finalize_expired(bot: Bot, invoice_id: str) -> None:
         f"⌛ <b>Счёт истёк</b>\n{SEP}\n\n"
         "<blockquote><i>Время на оплату вышло, деньги не списаны. "
         "Создайте новый счёт, чтобы пополнить баланс.</i></blockquote>\n\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(invoice_id)}</code>"
+        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(back_btn("topup"))
+    kb.row(back_btn(f"topup:{split_id(invoice_id)[0]}"))
     await edit_or_send(bot, pay["chat_id"], pay["message_id"], text, kb.as_markup())
 
 
@@ -620,9 +774,9 @@ async def watch_invoice(bot: Bot, invoice_id: str) -> None:
             if not pay or pay["status"] != "pending":
                 return
             try:
-                status = str((await xr_get_invoice(invoice_id)).get("status", "")).lower()
+                status = await invoice_status(invoice_id)
             except Exception:
-                logging.warning("xRocket: ошибка проверки счёта %s", invoice_id)
+                logging.warning("Ошибка проверки счёта %s", invoice_id)
                 status = ""
             if status == "paid":
                 await finalize_paid(bot, invoice_id)
@@ -646,7 +800,20 @@ async def watch_invoice(bot: Bot, invoice_id: str) -> None:
 async def cb_topup(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await ensure_user(call)
-    text, kb = await topup_screen(call.from_user.id)
+    text, kb = topup_methods_screen()
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("topup:"))
+async def cb_topup_method(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await ensure_user(call)
+    provider = call.data.split(":", 1)[1]
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
+        return
+    text, kb = await topup_screen(call.from_user.id, provider)
     await safe_edit(call, text, kb)
     await call.answer()
 
@@ -656,21 +823,29 @@ async def cb_pay_amount(call: CallbackQuery, bot: Bot, state: FSMContext) -> Non
     await state.clear()
     await ensure_user(call)
     try:
-        amount = round(float(call.data.split(":", 1)[1]), 2)
+        _, provider, raw_amount = call.data.split(":")
+        amount = round(float(raw_amount), 2)
     except ValueError:
         await call.answer("Неверная сумма", show_alert=True)
+        return
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
         return
     if not MIN_TOPUP <= amount <= MAX_TOPUP:
         await call.answer("Сумма вне допустимого диапазона", show_alert=True)
         return
     await call.answer("Создаю счёт…")
-    await show_invoice(bot, call.from_user.id, call.message.chat.id, call.message.message_id, amount)
+    await show_invoice(bot, call.from_user.id, call.message.chat.id, call.message.message_id, amount, provider)
 
 
-@router.callback_query(F.data == "pay_custom")
+@router.callback_query(F.data.startswith("pay_custom:"))
 async def cb_pay_custom(call: CallbackQuery, state: FSMContext) -> None:
+    provider = call.data.split(":", 1)[1]
+    if provider not in PROVIDERS:
+        await call.answer("Неизвестный способ оплаты", show_alert=True)
+        return
     await state.set_state(TopUp.amount)
-    await state.update_data(msg_id=call.message.message_id)
+    await state.update_data(msg_id=call.message.message_id, provider=provider)
     text = (
         f"✏️ <b>Своя сумма</b>\n{SEP}\n\n"
         "<blockquote><i>Отправьте сообщением сумму пополнения в долларах. "
@@ -679,7 +854,7 @@ async def cb_pay_custom(call: CallbackQuery, state: FSMContext) -> None:
         f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(back_btn("topup"))
+    kb.row(back_btn(f"topup:{provider}"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
 
@@ -705,11 +880,12 @@ async def msg_custom_amount(message: Message, bot: Bot, state: FSMContext) -> No
         await message.delete()
     except Exception:
         pass
+    provider = data.get("provider", "xr")
     msg_id = data.get("msg_id")
     if msg_id is None:
         sent = await message.answer("⏳ Создаю счёт…")
         msg_id = sent.message_id
-    await show_invoice(bot, message.from_user.id, message.chat.id, msg_id, amount)
+    await show_invoice(bot, message.from_user.id, message.chat.id, msg_id, amount, provider)
 
 
 async def _own_payment(call: CallbackQuery, invoice_id: str) -> dict | None:
@@ -730,9 +906,9 @@ async def cb_check(call: CallbackQuery, bot: Bot) -> None:
         await call.answer("Этот счёт уже обработан", show_alert=True)
         return
     try:
-        status = str((await xr_get_invoice(invoice_id)).get("status", "")).lower()
+        status = await invoice_status(invoice_id)
     except Exception:
-        logging.exception("xRocket: ошибка проверки счёта")
+        logging.exception("Ошибка проверки счёта")
         await call.answer("Не удалось проверить оплату, попробуйте позже", show_alert=True)
         return
 
@@ -756,7 +932,7 @@ async def cb_cancel(call: CallbackQuery, bot: Bot) -> None:
     if pay["status"] == "pending":
         # если деньги уже пришли — не отменяем, а зачисляем
         try:
-            status = str((await xr_get_invoice(invoice_id)).get("status", "")).lower()
+            status = await invoice_status(invoice_id)
         except Exception:
             status = ""
         if status == "paid":
@@ -764,12 +940,12 @@ async def cb_cancel(call: CallbackQuery, bot: Bot) -> None:
             await finalize_paid(bot, invoice_id)
             return
         try:
-            await xr_request("DELETE", f"/tg-invoices/{invoice_id}")
+            await delete_invoice(invoice_id)
         except Exception:
-            logging.warning("xRocket: не удалось удалить счёт %s", invoice_id)
+            logging.warning("Не удалось удалить счёт %s", invoice_id)
         await set_payment_status(invoice_id, "cancelled")
 
-    text, kb = await topup_screen(call.from_user.id)
+    text, kb = await topup_screen(call.from_user.id, split_id(invoice_id)[0])
     await safe_edit(call, text, kb)
     await call.answer("Счёт отменён")
 
@@ -819,7 +995,9 @@ async def main() -> None:
     dp.include_router(router)
 
     if XROCKET_API_KEY.startswith("PASTE_"):
-        logging.warning("XROCKET_API_KEY не задан — пополнение работать не будет")
+        logging.warning("XROCKET_API_KEY не задан — пополнение через xRocket работать не будет")
+    if CRYPTOBOT_API_KEY.startswith("PASTE_"):
+        logging.warning("CRYPTOBOT_API_KEY не задан — пополнение через CryptoBot работать не будет")
     for invoice_id in await pending_payments():
         start_watcher(bot, invoice_id)  # продолжаем следить за счетами после перезапуска
 
