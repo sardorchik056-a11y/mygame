@@ -696,10 +696,10 @@ def invoice_screen(invoice_id: str, amount: float, link: str) -> tuple[str, Inli
         f"{EMOJI_STATUS} <b>Счёт на оплату</b>\n{SEP}\n\n"
         f"<blockquote><i>Нажмите «Оплатить» и завершите платёж в {PROVIDERS[split_id(invoice_id)[0]]}. "
         "Баланс пополнится автоматически — бот сам проверяет оплату.</i></blockquote>\n\n"
-        f"{EMOJI_PAY_AMOUNT} <b>К оплате:</b> {money(amount)}\n"
-        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
-        f"{EMOJI_TTL} <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
-        f"{EMOJI_STATUS} <b>Статус:</b> ожидает оплаты"
+        f"├ {EMOJI_PAY_AMOUNT} <b>К оплате:</b> {money(amount)}\n"
+        f"├ {EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
+        f"├ {EMOJI_TTL} <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
+        f"└ {EMOJI_STATUS} <b>Статус:</b> ожидает оплаты"
     )
     kb = InlineKeyboardBuilder()
     kb.row(btn(text="Оплатить", style="success", url=link, icon_custom_emoji_id="5445353829304387411"))
