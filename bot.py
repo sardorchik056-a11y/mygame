@@ -94,6 +94,9 @@ EMOJI_PAY_AMOUNT = '<tg-emoji emoji-id="5409048419211682843">💵</tg-emoji>'
 EMOJI_INVOICE = '<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji>'
 EMOJI_TTL = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
 EMOJI_STATUS = '<tg-emoji emoji-id="5397782960512444700">📌</tg-emoji>'
+EMOJI_FRESH = '<tg-emoji emoji-id="5850317551090800862">⏰</tg-emoji>'
+EMOJI_WARM = '<tg-emoji emoji-id="5881806211195605908">📸</tg-emoji>'
+EMOJI_STOCK = '<tg-emoji emoji-id="6039348811363520645">📂</tg-emoji>'
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -429,7 +432,7 @@ async def cb_menu(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
-PRODUCT_MARKS = {"fresh": NUM_1, "warm": NUM_2}
+PRODUCT_MARKS = {"fresh": EMOJI_FRESH, "warm": EMOJI_WARM}
 
 
 @router.callback_query(F.data == "buy")
@@ -442,7 +445,7 @@ async def cb_buy(call: CallbackQuery) -> None:
         blocks.append(
             f"{PRODUCT_MARKS[key]} <b>{p['title']}</b>\n"
             f"├ {EMOJI_PAY_AMOUNT} Цена: <b>{money(p['price'])}</b>\n"
-            f"└ {EMOJI_STATS} В наличии: {stock_text}"
+            f"└ {EMOJI_STOCK} В наличии: {stock_text}"
         )
     text = (
         f"{EMOJI_SHOP} <b>Каталог</b>\n{SEP}\n\n"
