@@ -90,7 +90,8 @@ MINE_EMOJI = ("5461047575379466857", "⛏")     # шахта
 PICK_EMOJI = ("5197371802136892976", "⛏")     # кирка
 INCOME_EMOJI = ("5202018746297767789", "🪙")  # доход
 STORAGE_EMOJI = ("5854908544712707500", "📦")  # склад
-TIMER_ICON = "⏱️"
+START_EMOJI = ("5906852613629941703", "🟢")    # кнопка «Запустить»
+STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Остановить»
 
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
@@ -331,14 +332,14 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
             status = f"Остановить шахту можно через {fmt_dur(wait)}."
         else:
             status = "Шахту можно остановить, добытое останется на складе."
-        action = _button("mine:stop", "Остановить шахту", TIMER_ICON, "danger")
+        action = _button("mine:stop", "Остановить шахту", D.custom_emoji(STOP_EMOJI), "danger")
     else:
         state = "Стоит"
         status = (
             "Шахтёры работают только пока шахта запущена. "
             f"Один запуск длится {RUN_HOURS} ч."
         )
-        action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", TIMER_ICON)
+        action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
 
     return (
         f"{_image(with_image)}"
