@@ -83,10 +83,14 @@ MINERS = [
 MINER_PRICE_GROWTH = 1.35  # каждый следующий шахтёр одного типа дороже в столько раз
 START_MINER = 0            # тип шахтёра, который выдаётся бесплатно
 
-PICK_ICON = "⛏️"
 MINER_ICON = "👷"
+
+# Кастомные эмодзи: (id, запасной обычный эмодзи)
+MINE_EMOJI = ("5461047575379466857", "⛏")     # шахта
+PICK_EMOJI = ("5197371802136892976", "⛏")     # кирка
+INCOME_EMOJI = ("5202018746297767789", "🪙")  # доход
+STORAGE_EMOJI = ("5854908544712707500", "📦")  # склад
 TIMER_ICON = "⏱️"
-STORAGE_ICON = "📦"
 
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
@@ -292,6 +296,22 @@ def _info() -> str:
     return D.custom_emoji(D.INFO_EMOJI)
 
 
+def _mine() -> str:
+    return D.custom_emoji(MINE_EMOJI)
+
+
+def _pick() -> str:
+    return D.custom_emoji(PICK_EMOJI)
+
+
+def _income() -> str:
+    return D.custom_emoji(INCOME_EMOJI)
+
+
+def _storage() -> str:
+    return D.custom_emoji(STORAGE_EMOJI)
+
+
 def _image(with_image: bool) -> str:
     return '<img src="tg://photo?id=pet"/>' if with_image else ""
 
@@ -322,16 +342,16 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
 
     return (
         f"{_image(with_image)}"
-        f"<p><b>{PICK_ICON} ШАХТЫ</b></p>"
+        f"<p><b>{_mine()} ШАХТЫ</b></p>"
         "<blockquote><i>Запусти шахту, и шахтёры будут добывать монеты, "
         "даже пока тебя нет рядом.</i></blockquote>"
         + _table(
             [
-                (f"{TIMER_ICON} Шахта", state),
+                (f"{_mine()} Шахта", state),
                 (f"{MINER_ICON} Шахтёры", str(total_miners(m))),
-                (f"{PICK_ICON} Кирки", f"надето {on_miners} из {total_picks}"),
-                (f"{_coin()} Доход", f"{fmt(income_per_hour(m))} в час"),
-                (f"{STORAGE_ICON} Склад", fmt(m["stored"])),
+                (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
+                (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
+                (f"{_storage()} Склад", fmt(m["stored"])),
             ]
         )
         + f"<p><b>{_info()} {status}</b></p>"
@@ -351,7 +371,7 @@ def picks_html(user_id: int, with_image: bool = False) -> str:
     ]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{PICK_ICON} КИРКИ</b></p>"
+        f"<p><b>{_pick()} КИРКИ</b></p>"
         "<blockquote><i>Кирки покупаются сколько угодно и выдаются шахтёрам "
         "в их карточках. Шахтёр с киркой добывает больше. "
         "Нажми на кирку внизу, чтобы открыть её карточку.</i></blockquote>"
@@ -363,7 +383,7 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     p = PICKAXES[i]
     rows = [
-        (f"{PICK_ICON} Множитель", fmt_mult(p["mult"])),
+        (f"{_pick()} Множитель", fmt_mult(p["mult"])),
         (f"{_coin()} Цена", fmt(p["price"])),
         ("Куплено", str(picks_owned(m, i))),
         ("Надето на шахтёрах", str(picks_equipped(m, i))),
@@ -412,10 +432,10 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     rows = [
         (f"{t['icon']} Шахтёр", t["name"]),
         (f"{MINER_ICON} Нанято", f"{have}/{t['max']}"),
-        (f"{_coin()} Доход без кирки", f"{fmt(t['income'])} в час"),
-        (f"{PICK_ICON} Без кирки", str(bare(m, i))),
-        (f"{PICK_ICON} С кирками", eq_text),
-        (f"{_coin()} Доход всех этого уровня", f"{fmt(miner_income(m, i))} в час"),
+        (f"{_income()} Доход без кирки", f"{fmt(t['income'])} в час"),
+        (f"{_pick()} Без кирки", str(bare(m, i))),
+        (f"{_pick()} С кирками", eq_text),
+        (f"{_income()} Доход всех этого уровня", f"{fmt(miner_income(m, i))} в час"),
     ]
 
     button = ""
@@ -524,7 +544,7 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def mine_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(f"{PICK_ICON} Кирки", "mine:picks"), _btn(f"{MINER_ICON} Шахтёры", "mine:miners")],
+            [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn(f"{MINER_ICON} Шахтёры", "mine:miners")],
             _back_row("menu:back"),
         ]
     )
