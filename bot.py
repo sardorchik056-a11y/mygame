@@ -84,6 +84,10 @@ EMOJI_MAX = '<tg-emoji emoji-id="5449683594425410231">🔼</tg-emoji>'
 EMOJI_CUSTOM = '<tg-emoji emoji-id="5197269100878907942">✍️</tg-emoji>'
 # иконки на кнопках способов оплаты
 PROVIDER_ICONS = {"xr": "5798534328698805312", "cb": "5798650400189980129"}
+EMOJI_PAY_AMOUNT = '<tg-emoji emoji-id="5409048419211682843">💵</tg-emoji>'
+EMOJI_INVOICE = '<tg-emoji emoji-id="5197288647275071607">🛡</tg-emoji>'
+EMOJI_TTL = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
+EMOJI_STATUS = '<tg-emoji emoji-id="5397782960512444700">📌</tg-emoji>'
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -306,7 +310,7 @@ async def build_menu_text(user: dict) -> str:
         f"└ Регистрация: <code>{user['reg_date']}</code>\n\n"
         f"{EMOJI_FINANCE} <b>Финансы</b>\n"
         f"├ Баланс: <b>{money(user['balance'])}</b>\n"
-        f"└ Пополнено: <code>{money(user['deposited'])}</code>\n\n"
+        f"└ Пополнено: <code>{money(user['deposited'])}</code>\n"
         f"<i>Выберите нужный раздел ниже 👇</i>"
     )
 
@@ -689,18 +693,18 @@ async def topup_screen(user_id: int, provider: str = "xr") -> tuple[str, InlineK
 
 def invoice_screen(invoice_id: str, amount: float, link: str) -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        f"🧾 <b>Счёт на оплату</b>\n{SEP}\n\n"
+        f"{EMOJI_STATUS} <b>Счёт на оплату</b>\n{SEP}\n\n"
         f"<blockquote><i>Нажмите «Оплатить» и завершите платёж в {PROVIDERS[split_id(invoice_id)[0]]}. "
-        "Баланс пополнится автоматически — проверять вручную не обязательно.</i></blockquote>\n\n"
-        f"💵 <b>К оплате:</b> {money(amount)}\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
-        f"⏳ <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
-        "📌 <b>Статус:</b> ожидает оплаты"
+        "Баланс пополнится автоматически — бот сам проверяет оплату.</i></blockquote>\n\n"
+        f"{EMOJI_PAY_AMOUNT} <b>К оплате:</b> {money(amount)}\n"
+        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>\n"
+        f"{EMOJI_TTL} <b>Действует:</b> {INVOICE_TTL // 60} мин.\n"
+        f"{EMOJI_STATUS} <b>Статус:</b> ожидает оплаты"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(btn(text="💳 Оплатить", style="success", url=link))
-    kb.row(btn(text="🔄 Проверить оплату", callback_data=f"check:{invoice_id}"))
-    kb.row(btn(text="✖️ Отменить счёт", style="danger", callback_data=f"cancel:{invoice_id}"))
+    kb.row(btn(text="Оплатить", style="success", url=link, icon_custom_emoji_id="5445353829304387411"))
+    kb.row(btn(text="Отменить счёт", style="danger", callback_data=f"cancel:{invoice_id}",
+               icon_custom_emoji_id="5210952531676504517"))
     return text, kb.as_markup()
 
 
@@ -751,7 +755,7 @@ async def finalize_paid(bot: Bot, invoice_id: str) -> None:
         f"Спасибо, что выбираете {html.escape(SHOP_NAME)}!</i></blockquote>\n\n"
         f"💵 <b>Зачислено:</b> {money(pay['amount'])}\n"
         f"{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(user['balance'])}\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
+        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
     kb = InlineKeyboardBuilder()
     kb.row(back_btn("menu"))
@@ -766,7 +770,7 @@ async def finalize_expired(bot: Bot, invoice_id: str) -> None:
         f"⌛ <b>Счёт истёк</b>\n{SEP}\n\n"
         "<blockquote><i>Время на оплату вышло, деньги не списаны. "
         "Создайте новый счёт, чтобы пополнить баланс.</i></blockquote>\n\n"
-        f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
+        f"{EMOJI_INVOICE} <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
     kb = InlineKeyboardBuilder()
     kb.row(back_btn(f"topup:{split_id(invoice_id)[0]}"))
@@ -900,32 +904,6 @@ async def _own_payment(call: CallbackQuery, invoice_id: str) -> dict | None:
         await call.answer("Счёт не найден", show_alert=True)
         return None
     return pay
-
-
-@router.callback_query(F.data.startswith("check:"))
-async def cb_check(call: CallbackQuery, bot: Bot) -> None:
-    invoice_id = call.data.split(":", 1)[1]
-    pay = await _own_payment(call, invoice_id)
-    if not pay:
-        return
-    if pay["status"] != "pending":
-        await call.answer("Этот счёт уже обработан", show_alert=True)
-        return
-    try:
-        status = await invoice_status(invoice_id)
-    except Exception:
-        logging.exception("Ошибка проверки счёта")
-        await call.answer("Не удалось проверить оплату, попробуйте позже", show_alert=True)
-        return
-
-    if status == "paid":
-        await call.answer("✅ Оплата получена!")
-        await finalize_paid(bot, invoice_id)
-    elif status == "expired":
-        await call.answer()
-        await finalize_expired(bot, invoice_id)
-    else:
-        await call.answer("⏳ Оплата пока не поступила. Попробуйте через несколько секунд.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("cancel:"))
