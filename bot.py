@@ -50,6 +50,7 @@ NUM_1 = '<tg-emoji emoji-id="5830126888357468979">1️⃣</tg-emoji>'
 NUM_2 = '<tg-emoji emoji-id="5830254543375441108">2️⃣</tg-emoji>'
 NUM_3 = '<tg-emoji emoji-id="5827786453303696733">3️⃣</tg-emoji>'
 NUM_4 = '<tg-emoji emoji-id="5830434773088083875">4️⃣</tg-emoji>'
+EMOJI_REFS = '<tg-emoji emoji-id="4960891456869893259">💠</tg-emoji>'
 EMOJI_STATS = '<tg-emoji emoji-id="5854798142578368552">📊</tg-emoji>'
 EMOJI_LINK = '<tg-emoji emoji-id="5271604874419647061">🔗</tg-emoji>'
 EMOJI_SHOP = '<tg-emoji emoji-id="5199874732983353088">💫</tg-emoji>'
@@ -302,12 +303,12 @@ async def cb_refs(call: CallbackQuery, bot: Bot) -> None:
     refs = await count_referrals(user["user_id"])
 
     text = (
-        f"<b>👥 Реферальная программа</b>\n{SEP}\n\n"
-        f"<i>Приглашайте друзей в {html.escape(SHOP_NAME)} и получайте "
+        f"{EMOJI_REFS} <b>Реферальная программа</b>\n{SEP}\n\n"
+        f"<blockquote><i>Приглашайте друзей в {html.escape(SHOP_NAME)} и получайте "
         f"{REF_PERCENT:g}% с каждого их пополнения — без ограничений по времени "
         f"и количеству приглашённых.\n\n"
         f"Бонус зачисляется на ваш баланс автоматически сразу после того, как друг "
-        f"пополнит счёт. Просто отправьте ему свою ссылку и наблюдайте, как растёт ваш доход.</i>\n\n"
+        f"пополнит счёт. Просто отправьте ему свою ссылку и наблюдайте, как растёт ваш доход.</i></blockquote>\n\n"
         f"{EMOJI_STATS} <b>Ваша статистика</b>\n"
         f"├ Приглашено: <b>{refs}</b>\n"
         f"└ Заработано: <b>{money(user['ref_earned'])}</b>\n\n"
@@ -317,6 +318,7 @@ async def cb_refs(call: CallbackQuery, bot: Bot) -> None:
     share_text = quote(f"Заходи в {SHOP_NAME}!")
     share = btn(
         text="Поделиться ссылкой",
+        style="success",
         icon_custom_emoji_id="5264759912025564026",
         url=f"https://t.me/share/url?url={quote(link, safe='')}&text={share_text}",
     )
