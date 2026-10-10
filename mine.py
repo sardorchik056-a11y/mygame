@@ -58,32 +58,31 @@ PICKAXES = [
 
 # Типы шахтёров: доход в час без кирки, цена первого найма, лимит этого типа.
 MINERS = [
-    {"name": "Шахтёр 1 уровня", "icon": "👷", "income": 10, "price": 100, "max": 10,
+    {"name": "Miner-lvl1", "income": 10, "price": 100, "max": 10,
      "desc": "Только вчера впервые взял в руки кирку. Старается, но медленно."},
-    {"name": "Шахтёр 2 уровня", "icon": "⛏️", "income": 25, "price": 400, "max": 8,
+    {"name": "Miner-lvl2", "income": 25, "price": 400, "max": 8,
      "desc": "Знает, где копать. Основа любой шахты."},
-    {"name": "Шахтёр 3 уровня", "icon": "🧨", "income": 60, "price": 1_500, "max": 6,
+    {"name": "Miner-lvl3", "income": 60, "price": 1_500, "max": 6,
      "desc": "Не любит лишних вопросов и тишину. Зато порода сыплется сама."},
-    {"name": "Шахтёр 4 уровня", "icon": "🧭", "income": 150, "price": 6_000, "max": 5,
+    {"name": "Miner-lvl4", "income": 150, "price": 6_000, "max": 5,
      "desc": "Видит жилы там, где другие видят камни."},
-    {"name": "Шахтёр 5 уровня", "icon": "🧙", "income": 400, "price": 25_000, "max": 4,
+    {"name": "Miner-lvl5", "income": 400, "price": 25_000, "max": 4,
      "desc": "Копает с рождения. Борода длиннее, чем штрек."},
-    {"name": "Шахтёр 6 уровня", "icon": "👑", "income": 1_000, "price": 100_000, "max": 3,
+    {"name": "Miner-lvl6", "income": 1_000, "price": 100_000, "max": 3,
      "desc": "Командует всей сменой, и смена работает в полную силу."},
-    {"name": "Шахтёр 7 уровня", "icon": "🛠️", "income": 2_500, "price": 400_000, "max": 3,
+    {"name": "Miner-lvl7", "income": 2_500, "price": 400_000, "max": 3,
      "desc": "Собирает собственные механизмы прямо в забое."},
-    {"name": "Шахтёр 8 уровня", "icon": "🚀", "income": 6_000, "price": 1_500_000, "max": 2,
+    {"name": "Miner-lvl8", "income": 6_000, "price": 1_500_000, "max": 2,
      "desc": "Бурит так быстро, что порода не успевает осыпаться."},
-    {"name": "Шахтёр 9 уровня", "icon": "🐉", "income": 15_000, "price": 6_000_000, "max": 2,
+    {"name": "Miner-lvl9", "income": 15_000, "price": 6_000_000, "max": 2,
      "desc": "Говорят, он договорился с драконом, который охраняет жилы."},
-    {"name": "Шахтёр 10 уровня", "icon": "🌟", "income": 40_000, "price": 25_000_000, "max": 1,
+    {"name": "Miner-lvl10", "income": 40_000, "price": 25_000_000, "max": 1,
      "desc": "Легенда шахт. Один такой стоит целой смены."},
 ]
 
 MINER_PRICE_GROWTH = 1.35  # каждый следующий шахтёр одного типа дороже в столько раз
 START_MINER = 0            # тип шахтёра, который выдаётся бесплатно
 
-MINER_ICON = "👷"
 
 # Кастомные эмодзи: (id, запасной обычный эмодзи)
 MINE_EMOJI = ("5461047575379466857", "⛏")     # шахта
@@ -349,7 +348,7 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         + _table(
             [
                 (f"{_mine()} Шахта", state),
-                (f"{MINER_ICON} Шахтёры", str(total_miners(m))),
+                ("Шахтёры", str(total_miners(m))),
                 (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
                 (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
                 (f"{_storage()} Склад", fmt(m["stored"])),
@@ -362,21 +361,12 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
 
 
 def picks_html(user_id: int, with_image: bool = False) -> str:
-    user, m = load(user_id)
-    rows = [
-        (
-            f"{p['icon']} {p['name']} {fmt_mult(p['mult'])}",
-            f"{fmt(p['price'])} · есть {picks_owned(m, i)}",
-        )
-        for i, p in enumerate(PICKAXES)
-    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{_pick()} КИРКИ</b></p>"
         "<blockquote><i>Кирки покупаются сколько угодно и выдаются шахтёрам "
         "в их карточках. Шахтёр с киркой добывает больше. "
         "Нажми на кирку внизу, чтобы открыть её карточку.</i></blockquote>"
-        + _table(rows, head=("Кирка", "Цена · в наличии"))
     )
 
 
@@ -384,7 +374,6 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     p = PICKAXES[i]
     rows = [
-        (f"{_pick()} Множитель", fmt_mult(p["mult"])),
         (f"{_coin()} Цена", fmt(p["price"])),
         ("Куплено", str(picks_owned(m, i))),
         ("Надето на шахтёрах", str(picks_equipped(m, i))),
@@ -395,8 +384,7 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
         f"<p><b>{p['icon']} {p['name'].upper()}</b></p>"
         f"<blockquote><i>{p['desc']}</i></blockquote>"
         + _table(rows)
-        + f"<p><b>{_info()} Шахтёр с этой киркой приносит в {fmt_mult(p['mult'])[1:]} "
-        "раза больше, чем без неё. Выдай её в карточке нужного шахтёра.</b></p>"
+        + f"<p><b>{_info()} Выдай её шахтёру в его карточке, чтобы он добывал больше.</b></p>"
         + _button(f"mine:buy_pick:{i}:1", "Купить 1", p["icon"])
         + _button(f"mine:buy_pick:{i}:5", "Купить 5", p["icon"])
     )
@@ -404,18 +392,13 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
 
 def miners_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
-    rows = [
-        (f"{t['icon']} {t['name']}", f"{owned(m, i)}/{t['max']}")
-        for i, t in enumerate(MINERS)
-    ]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{MINER_ICON} ШАХТЁРЫ</b></p>"
+        "<p><b>ШАХТЁРЫ</b></p>"
         "<blockquote><i>У каждого уровня шахтёров свой доход, цена и лимит. "
         "Нажми на шахтёра внизу, чтобы открыть его карточку, нанять его "
         "и выдать кирки.</i></blockquote>"
-        + _table(rows, head=("Шахтёр", "Нанято"))
-        + f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
+        f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
         f"Доход шахты: {fmt(income_per_hour(m))} в час.</b></p>"
     )
 
@@ -431,8 +414,8 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     ) or "нет"
 
     rows = [
-        (f"{t['icon']} Шахтёр", t["name"]),
-        (f"{MINER_ICON} Нанято", f"{have}/{t['max']}"),
+        ("Шахтёр", t["name"]),
+        ("Нанято", f"{have}/{t['max']}"),
         (f"{_income()} Доход без кирки", f"{fmt(t['income'])} в час"),
         (f"{_pick()} Без кирки", str(bare(m, i))),
         (f"{_pick()} С кирками", eq_text),
@@ -445,14 +428,14 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     else:
         rows.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
         info = (
-            f"Новый {t['name'].lower()} принесёт ещё {fmt(t['income'])} монет в час "
+            f"Новый {t['name']} принесёт ещё {fmt(t['income'])} монет в час "
             "без кирки. Каждый следующий этого уровня стоит дороже."
         )
-        button = _button(f"mine:buy_miner:{i}", "Нанять", t["icon"])
+        button = _button(f"mine:buy_miner:{i}", "Нанять")
 
     return (
         f"{_image(with_image)}"
-        f"<p><b>{t['icon']} {t['name'].upper()}</b></p>"
+        f"<p><b>{t['name'].upper()}</b></p>"
         f"<blockquote><i>{t['desc']}</i></blockquote>"
         + _table(rows)
         + f"<p><b>{_info()} {info}</b></p>"
@@ -479,7 +462,7 @@ def give_html(user_id: int, i: int, with_image: bool = False) -> str:
     table = (
         _table(
             [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} {fmt_mult(PICKAXES[p]['mult'])}",
+                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
                  f"{c} шт.")
                 for p, c in free
             ],
@@ -489,7 +472,7 @@ def give_html(user_id: int, i: int, with_image: bool = False) -> str:
     )
     return (
         f"{_image(with_image)}"
-        f"<p><b>{t['icon']} ВЫДАТЬ КИРКУ: {t['name'].upper()}</b></p>"
+        f"<p><b>ВЫДАТЬ КИРКУ: {t['name'].upper()}</b></p>"
         + table
         + f"<p><b>{_info()} {info}</b></p>"
     )
@@ -503,7 +486,7 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
     table = (
         _table(
             [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} {fmt_mult(PICKAXES[p]['mult'])}",
+                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
                  f"{c} шт.")
                 for p, c in sorted(eq.items())
             ],
@@ -517,7 +500,7 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
     )
     return (
         f"{_image(with_image)}"
-        f"<p><b>{t['icon']} СНЯТЬ КИРКУ: {t['name'].upper()}</b></p>"
+        f"<p><b>СНЯТЬ КИРКУ: {t['name'].upper()}</b></p>"
         + table
         + f"<p><b>{_info()} {info}</b></p>"
     )
@@ -545,7 +528,7 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def mine_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn(f"{MINER_ICON} Шахтёры", "mine:miners")],
+            [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn("Шахтёры", "mine:miners")],
             _back_row("menu:back"),
         ]
     )
@@ -558,7 +541,7 @@ def picks_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def miners_kb(user_id: int) -> InlineKeyboardMarkup:
-    rows = _pairs([_btn(f"{t['icon']} {t['name']}", f"mine:miner:{i}") for i, t in enumerate(MINERS)])
+    rows = _pairs([_btn(t["name"], f"mine:miner:{i}") for i, t in enumerate(MINERS)])
     rows.append(_back_row("mine:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -586,7 +569,7 @@ def _give_kb(i: int):
         buttons = []
         if bare(m, i) > 0:
             buttons = [
-                _btn(f"{PICKAXES[p]['icon']} {fmt_mult(PICKAXES[p]['mult'])} ({picks_free(m, p)})",
+                _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({picks_free(m, p)})",
                      f"mine:give:{i}:{p}")
                 for p in range(len(PICKAXES)) if picks_free(m, p) > 0
             ]
@@ -601,7 +584,7 @@ def _take_kb(i: int):
         _, m = load(user_id)
         rows = _pairs(
             [
-                _btn(f"{PICKAXES[p]['icon']} {fmt_mult(PICKAXES[p]['mult'])} ({c})",
+                _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({c})",
                      f"mine:take:{i}:{p}")
                 for p, c in sorted(eq_of(m, i).items())
             ]
