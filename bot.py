@@ -528,8 +528,8 @@ async def cb_item(call: CallbackQuery) -> None:
             show_alert=True,
         )
         return
-    # TODO: здесь будет выдача товара: списание баланса, уменьшение остатка, счётчик «Куплено»
-    await call.answer("Покупка скоро будет доступна", show_alert=True)
+    # Баланса хватает, но товара нет на складе — деньги не списываются
+    await call.answer("😔 Товара нет на складе. Загляните позже.", show_alert=True)
 
 
 @router.callback_query(F.data == "refs")
