@@ -43,7 +43,7 @@ REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнени
 CURRENCY = "$"
 
 # ── xRocket (оплата) ───────────────────────────────────────────
-XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "034cea3212dcfe762c3dc3093")
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "PASTE_XROCKET_API_KEY")
 XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
 PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
 
@@ -59,6 +59,12 @@ MIN_TOPUP = 1.0
 MAX_TOPUP = 1000.0
 INVOICE_TTL = 3600     # срок жизни счёта, сек
 POLL_INTERVAL = 8      # как часто проверять оплату, сек
+
+# Товары каталога: код -> название и цена. Остаток хранится в БД (таблица stock).
+PRODUCTS = {
+    "fresh": {"title": "Новореги", "price": 0.50},
+    "warm": {"title": "Прогретые", "price": 1.50},
+}
 
 # Статусы: (минимум покупок, название)
 STATUSES = [
@@ -130,6 +136,11 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS stock (key TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)"
+        )
+        for key in PRODUCTS:
+            await db.execute("INSERT OR IGNORE INTO stock (key, count) VALUES (?, 0)", (key,))
         await db.commit()
 
 
@@ -246,6 +257,13 @@ async def credit_payment(invoice_id: str) -> bool:
         await _credit(db, user_id, amount)
         await db.commit()
         return True
+
+
+async def get_stock(key: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT count FROM stock WHERE key = ?", (key,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 
 async def user_payments(user_id: int, limit: int = 8) -> list[dict]:
@@ -411,16 +429,63 @@ async def cb_menu(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
+PRODUCT_MARKS = {"fresh": NUM_1, "warm": NUM_2}
+
+
 @router.callback_query(F.data == "buy")
 async def cb_buy(call: CallbackQuery) -> None:
+    user = await ensure_user(call)
+    blocks = []
+    for key, p in PRODUCTS.items():
+        stock = await get_stock(key)
+        stock_text = f"<b>{stock:,}</b> шт.".replace(",", " ")
+        blocks.append(
+            f"{PRODUCT_MARKS[key]} <b>{p['title']}</b>\n"
+            f"├ {EMOJI_PAY_AMOUNT} Цена: <b>{money(p['price'])}</b>\n"
+            f"└ {EMOJI_STATS} В наличии: {stock_text}"
+        )
     text = (
-        f"<b>🛍 Каталог</b>\n{SEP}\n\n"
-        "Здесь будет список ваших товаров и услуг.\n\n"
-        "<blockquote>Подключите каталог: выведите категории кнопками, "
-        "а при покупке вызывайте списание баланса и увеличивайте счётчик «Куплено».</blockquote>"
+        f"{EMOJI_SHOP} <b>Каталог</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите нужную категорию. Сумма списывается с вашего баланса, "
+        "а товар выдаётся автоматически.</i></blockquote>\n\n"
+        + "\n\n".join(blocks)
+        + f"\n\n{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(user['balance'])}\n\n"
+        "<i>Выберите категорию ниже 👇</i>"
     )
-    await safe_edit(call, text, back_kb())
+    kb = InlineKeyboardBuilder()
+    for key, p in PRODUCTS.items():
+        kb.row(
+            btn(
+                text=f"{p['title']} • {money(p['price'])}",
+                style="success",
+                callback_data=f"item:{key}",
+                icon_custom_emoji_id="4990307318513009602",
+            )
+        )
+    kb.row(back_btn("menu"))
+    await safe_edit(call, text, kb.as_markup())
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("item:"))
+async def cb_item(call: CallbackQuery) -> None:
+    key = call.data.split(":", 1)[1]
+    product = PRODUCTS.get(key)
+    if not product:
+        await call.answer("Товар не найден", show_alert=True)
+        return
+    user = await ensure_user(call)
+    if await get_stock(key) <= 0:
+        await call.answer("😔 Сейчас нет в наличии. Загляните позже.", show_alert=True)
+        return
+    if user["balance"] < product["price"]:
+        await call.answer(
+            f"Недостаточно средств. Нужно {money(product['price'])}, на балансе {money(user['balance'])}.",
+            show_alert=True,
+        )
+        return
+    # TODO: здесь будет выдача товара: списание баланса, уменьшение остатка, счётчик «Куплено»
+    await call.answer("Покупка скоро будет доступна", show_alert=True)
 
 
 @router.callback_query(F.data == "refs")
