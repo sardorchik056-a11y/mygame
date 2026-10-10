@@ -44,7 +44,7 @@ STATUSES = [
 ]
 
 # Кастомные эмодзи (в <tg-emoji> внутри — запасной обычный эмодзи)
-EMOJI_PROFILE = '<tg-emoji emoji-id="5404739128199766189">😣</tg-emoji>'
+EMOJI_PROFILE = '<tg-emoji emoji-id="5452085950022707790">😎</tg-emoji>'
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -196,22 +196,22 @@ def btn(text: str, **kwargs) -> InlineKeyboardButton:
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(btn(text="🛍 Купить", callback_data="buy"))
+    kb.row(btn(text="Купить", callback_data="buy", icon_custom_emoji_id="4990307318513009602"))
     kb.row(
-        btn(text="👥 Рефералы", callback_data="refs"),
-        btn(text="💳 Финансы", callback_data="finance"),
+        btn(text="Рефералы", callback_data="refs", icon_custom_emoji_id="4960891456869893259"),
+        btn(text="Финансы", callback_data="finance", icon_custom_emoji_id="5417924076503062111"),
     )
     kb.row(
-        btn(text="🔖 Инструкция", callback_data="guide"),
-        btn(text="🆘 Тех поддержка", callback_data="support"),
+        btn(text="Инструкция", callback_data="guide", icon_custom_emoji_id="5366421375605040850"),
+        btn(text="Тех поддержка", callback_data="support", icon_custom_emoji_id="5238025132177369293"),
     )
     return kb.as_markup()
 
 
 def back_kb(*extra: InlineKeyboardButton) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    for btn in extra:
-        kb.row(btn)
+    for button in extra:
+        kb.row(button)
     kb.row(btn(text="⬅️ Главное меню", callback_data="menu"))
     return kb.as_markup()
 
