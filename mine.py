@@ -348,7 +348,7 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         + _table(
             [
                 (f"{_mine()} Шахта", state),
-                ("Шахтёры", str(total_miners(m))),
+                ("👷 Шахтёры", str(total_miners(m))),
                 (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
                 (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
                 (f"{_storage()} Склад", fmt(m["stored"])),
@@ -528,7 +528,7 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def mine_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn("Шахтёры", "mine:miners")],
+            [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn("👷 Шахтёры", "mine:miners")],
             _back_row("menu:back"),
         ]
     )
@@ -554,11 +554,12 @@ def _back_to(data: str):
 
 def _miner_card_kb(i: int):
     def kb(user_id: int) -> InlineKeyboardMarkup:
+        _, m = load(user_id)
+        row = [_btn("Выдать кирку", f"mine:give:{i}")]
+        if equipped_on(m, i) > 0:  # снимать нечего, пока кирок нет
+            row.append(_btn("Снять кирку", f"mine:take:{i}"))
         return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [_btn("Выдать кирку", f"mine:give:{i}"), _btn("Снять кирку", f"mine:take:{i}")],
-                _back_row("mine:miners"),
-            ]
+            inline_keyboard=[row, _back_row("mine:miners")]
         )
     return kb
 
