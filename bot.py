@@ -30,7 +30,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ══════════════════════════════════════════════════════════════
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
-SHOP_NAME = os.getenv("SHOP_NAME", "PREMIUM SHOP")
+SHOP_NAME = os.getenv("SHOP_NAME", "XYLI SHOP")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
 CURRENCY = "$"
@@ -45,6 +45,7 @@ STATUSES = [
 
 # Кастомные эмодзи (в <tg-emoji> внутри — запасной обычный эмодзи)
 EMOJI_PROFILE = '<tg-emoji emoji-id="5452085950022707790">😎</tg-emoji>'
+EMOJI_SHOP = '<tg-emoji emoji-id="5199874732983353088">💫</tg-emoji>'
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -170,7 +171,7 @@ async def build_menu_text(user: dict) -> str:
     status, _, _ = get_status(user["purchased"])
 
     return (
-        f"<b>🛍 {html.escape(SHOP_NAME)}</b>\n"
+        f"{EMOJI_SHOP} <b>{html.escape(SHOP_NAME)}</b>\n"
         f"<i>Быстро  •  Надёжно  •  Автоматически</i>\n"
         f"{SEP}\n\n"
         f"{EMOJI_PROFILE} <b>Профиль</b>\n"
@@ -189,14 +190,14 @@ async def build_menu_text(user: dict) -> str:
 # ══════════════════════════════════════════════════════════════
 #  КЛАВИАТУРЫ
 # ══════════════════════════════════════════════════════════════
-def btn(text: str, **kwargs) -> InlineKeyboardButton:
-    """Синяя кнопка (Bot API 9.4: style = primary)."""
-    return InlineKeyboardButton(text=text, style="primary", **kwargs)
+def btn(text: str, style: str = "primary", **kwargs) -> InlineKeyboardButton:
+    """Кнопка со стилем (Bot API 9.4): primary = синяя, success = зелёная, danger = красная."""
+    return InlineKeyboardButton(text=text, style=style, **kwargs)
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(btn(text="Купить", callback_data="buy", icon_custom_emoji_id="4990307318513009602"))
+    kb.row(btn(text="Купить", style="success", callback_data="buy", icon_custom_emoji_id="4990307318513009602"))
     kb.row(
         btn(text="Рефералы", callback_data="refs", icon_custom_emoji_id="4960891456869893259"),
         btn(text="Финансы", callback_data="finance", icon_custom_emoji_id="5417924076503062111"),
