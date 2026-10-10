@@ -33,7 +33,7 @@ SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
 SHOP_NAME = os.getenv("SHOP_NAME", "PREMIUM SHOP")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
-CURRENCY = "₽"
+CURRENCY = "$"
 
 # Статусы: (минимум покупок, название)
 STATUSES = [
@@ -42,6 +42,10 @@ STATUSES = [
     (25, "🔥 Постоянный клиент"),
     (100, "💎 VIP"),
 ]
+
+# Кастомные эмодзи (в <tg-emoji> внутри — запасной обычный эмодзи)
+EMOJI_PROFILE = '<tg-emoji emoji-id="5404739128199766189">😣</tg-emoji>'
+EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
 SEP = "━━━━━━━━━━━━━━━━━━━━"
@@ -134,7 +138,7 @@ async def add_balance(user_id: int, amount: float) -> None:
 #  ВСПОМОГАТЕЛЬНОЕ
 # ══════════════════════════════════════════════════════════════
 def money(value: float) -> str:
-    return f"{value:,.2f}".replace(",", " ") + f" {CURRENCY}"
+    return f"{CURRENCY}{value:,.2f}"
 
 
 def get_status(purchased: int) -> tuple[str, int | None, int]:
@@ -169,12 +173,12 @@ async def build_menu_text(user: dict) -> str:
         f"<b>🛍 {html.escape(SHOP_NAME)}</b>\n"
         f"<i>Быстро  •  Надёжно  •  Автоматически</i>\n"
         f"{SEP}\n\n"
-        f"👤 <b>Профиль</b>\n"
+        f"{EMOJI_PROFILE} <b>Профиль</b>\n"
         f"├ Никнейм: <b>{display_name(user)}</b>\n"
         f"├ ID: <code>{user['user_id']}</code>\n"
         f"├ Статус: <b>{status}</b>\n"
         f"└ Регистрация: <code>{user['reg_date']}</code>\n\n"
-        f"💰 <b>Финансы</b>\n"
+        f"{EMOJI_FINANCE} <b>Финансы</b>\n"
         f"├ Баланс: <b>{money(user['balance'])}</b>\n"
         f"├ Пополнено: <code>{money(user['deposited'])}</code>\n"
 
@@ -185,16 +189,21 @@ async def build_menu_text(user: dict) -> str:
 # ══════════════════════════════════════════════════════════════
 #  КЛАВИАТУРЫ
 # ══════════════════════════════════════════════════════════════
+def btn(text: str, **kwargs) -> InlineKeyboardButton:
+    """Синяя кнопка (Bot API 9.4: style = primary)."""
+    return InlineKeyboardButton(text=text, style="primary", **kwargs)
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="🛍 Купить", callback_data="buy"))
+    kb.row(btn(text="🛍 Купить", callback_data="buy"))
     kb.row(
-        InlineKeyboardButton(text="👥 Рефералы", callback_data="refs"),
-        InlineKeyboardButton(text="💳 Финансы", callback_data="finance"),
+        btn(text="👥 Рефералы", callback_data="refs"),
+        btn(text="💳 Финансы", callback_data="finance"),
     )
     kb.row(
-        InlineKeyboardButton(text="🔖 Инструкция", callback_data="guide"),
-        InlineKeyboardButton(text="🆘 Тех поддержка", callback_data="support"),
+        btn(text="🔖 Инструкция", callback_data="guide"),
+        btn(text="🆘 Тех поддержка", callback_data="support"),
     )
     return kb.as_markup()
 
@@ -203,7 +212,7 @@ def back_kb(*extra: InlineKeyboardButton) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for btn in extra:
         kb.row(btn)
-    kb.row(InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu"))
+    kb.row(btn(text="⬅️ Главное меню", callback_data="menu"))
     return kb.as_markup()
 
 
@@ -288,7 +297,7 @@ async def cb_refs(call: CallbackQuery, bot: Bot) -> None:
         f"└ Заработано: <b>{money(user['ref_earned'])}</b>\n\n"
         f"🔗 <b>Ваша ссылка</b>\n<code>{link}</code>"
     )
-    share = InlineKeyboardButton(
+    share = btn(
         text="📤 Поделиться ссылкой",
         url=f"https://t.me/share/url?url={link}&text=Заходи в {SHOP_NAME}!",
     )
@@ -308,8 +317,8 @@ async def cb_finance(call: CallbackQuery) -> None:
         "<i>Выберите способ пополнения ниже.</i>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup"))
-    kb.row(InlineKeyboardButton(text="⬅️ Главное меню", callback_data="menu"))
+    kb.row(btn(text="➕ Пополнить баланс", callback_data="topup"))
+    kb.row(btn(text="⬅️ Главное меню", callback_data="menu"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
 
@@ -323,7 +332,7 @@ async def cb_topup(call: CallbackQuery) -> None:
         "баланс и реферальный бонус начислятся автоматически.</blockquote>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="finance"))
+    kb.row(btn(text="⬅️ Назад", callback_data="finance"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
 
@@ -356,7 +365,7 @@ async def cb_support(call: CallbackQuery) -> None:
         "<blockquote>Для быстрого решения укажите свой ID: "
         f"<code>{call.from_user.id}</code> и опишите проблему.</blockquote>"
     )
-    contact = InlineKeyboardButton(text="💬 Написать в поддержку", url=f"https://t.me/{SUPPORT_USERNAME}")
+    contact = btn(text="💬 Написать в поддержку", url=f"https://t.me/{SUPPORT_USERNAME}")
     await safe_edit(call, text, back_kb(contact))
     await call.answer()
 
