@@ -43,7 +43,7 @@ SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
 # Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
 SUPPORT_URL = os.getenv("SUPPORT_URL", f"https://t.me/{SUPPORT_USERNAME}")
 # Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "8118184388").replace(" ", "").split(",") if x.isdigit()}
 SHOP_NAME = os.getenv("SHOP_NAME", "XYLI SHOP")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
