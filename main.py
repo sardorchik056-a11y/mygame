@@ -52,7 +52,7 @@ def save_images() -> None:
 pet_images: dict[str, str] = load_images()
 
 # Данные игроков хранятся в файле рядом с ботом.
-# "user_id": {"pet": key, "level": 1, "xp": 0, "wins": 0, "losses": 0}
+# "user_id": {"pet": key, "level": 1, "wins": 0, "losses": 0}
 USERS_FILE = Path(__file__).with_name("users.json")
 
 
@@ -99,7 +99,6 @@ def create_user(user_id: int, pet_key: str) -> None:
     users[str(user_id)] = {
         "pet": pet_key,
         "level": 1,
-        "xp": 0,
         "wins": 0,
         "losses": 0,
         "meat": START_MEAT,
@@ -107,11 +106,6 @@ def create_user(user_id: int, pet_key: str) -> None:
         "coins": START_COINS,
     }
     save_users()
-
-
-def xp_needed(level: int) -> int:
-    """Сколько опыта нужно, чтобы выйти с этого уровня на следующий."""
-    return 100 + (level - 1) * 50
 
 
 def add_coins(user_id: int, amount: int) -> bool:
@@ -125,19 +119,8 @@ def add_coins(user_id: int, amount: int) -> bool:
     return True
 
 
-def add_xp(user_id: int, amount: int) -> None:
-    """Начислить опыт (пригодится для арены). Уровень не повышается сам:
-    его нужно прокачать за опыт, мясо и фрукты."""
-    user = get_user(user_id)
-    if user is None:
-        return
-    user["xp"] += amount
-    save_users()
-
-
 COIN_EMOJI = ("5449418135381759397", "🪙")  # валюта бота: монеты
 MEAT_EMOJI = "🥩"
-XP_EMOJI = ("5429578972771926029", "🟣")
 INFO_EMOJI = ("5334544901428229844", "ℹ️")
 FRUIT_EMOJI = "🥭"
 
@@ -172,13 +155,10 @@ def pet_stats(pet: dict, level: int) -> dict[str, int]:
 
 def upgrade_lack(user: dict) -> list[str]:
     """Чего не хватает для прокачки (пустой список, если всё есть).
-    XP нужен всегда, в том числе для эволюции, в обычном размере."""
+    Нужны только мясо и фрукты."""
     level = user["level"]
     need_meat, need_fruit = upgrade_cost(level)
-    need_xp = xp_needed(level)
     lack = []
-    if user["xp"] < need_xp:
-        lack.append(f"XP: {need_xp - user['xp']}")
     if user["meat"] < need_meat:
         lack.append(f"мяса: {need_meat - user['meat']}")
     if user["fruit"] < need_fruit:
@@ -187,6 +167,7 @@ def upgrade_lack(user: dict) -> list[str]:
 
 
 STAT_LABELS = {
+    "hp": "Здоровье",
     "atk": "Атака",
     "def": "Защита",
     "spd": "Скорость",
@@ -195,6 +176,7 @@ STAT_LABELS = {
 
 # Кастомные эмодзи: (id, запасной обычный эмодзи)
 STAT_EMOJI = {
+    "hp": ("5337080053119336309", "👍"),
     "atk": ("5321022334335724730", "🤺"),
     "def": ("5465154440287757794", "🛡"),
     "spd": ("5258203794772085854", "⚡️"),
@@ -242,9 +224,9 @@ PETS = {
             "Он вспыльчив, но предан хозяину до последнего вздоха. "
             "Говорят, его пламя не гаснет даже под проливным дождём."
         ),
-        "stats": {"atk": 100, "def": 40, "spd": 70, "luck": 50},
+        "stats": {"hp": 60, "atk": 100, "def": 40, "spd": 70, "luck": 50},
         "skill": "Огненная ярость",
-        "skill_desc": "С каждым раундом боя удары становятся всё сильнее.",
+        "skill_desc": "Чем меньше здоровья, тем сильнее удары.",
     },
     "aqua": {
         "name": "Аква",
@@ -255,7 +237,7 @@ PETS = {
             "Она спокойна, рассудительна и умеет ждать нужного момента. "
             "Её чешуя мерцает, как звёзды в ночной воде."
         ),
-        "stats": {"atk": 60, "def": 60, "spd": 70, "luck": 60},
+        "stats": {"hp": 70, "atk": 60, "def": 60, "spd": 70, "luck": 60},
         "skill": "Приливная волна",
         "skill_desc": "Замедляет противника в начале боя.",
     },
@@ -268,7 +250,7 @@ PETS = {
             "Она неторопливая и выносливая, её очень трудно сдвинуть с места. "
             "Каждый её шаг оставляет на камне цветущий след."
         ),
-        "stats": {"atk": 50, "def": 100, "spd": 30, "luck": 40},
+        "stats": {"hp": 100, "atk": 50, "def": 100, "spd": 30, "luck": 40},
         "skill": "Каменная кожа",
         "skill_desc": "Поглощает часть входящего урона.",
     },
@@ -404,17 +386,11 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
     )
 
 
-def xp_bar(xp: int, need: int, width: int = 10) -> str:
-    filled = min(width, int(width * xp / need))
-    return "▰" * filled + "▱" * (width - filled)
-
-
 def profile_html(user_id: int, with_image: bool = False) -> str:
-    """Профиль питомца игрока: уровень, опыт, характеристики, бои, способность."""
+    """Профиль питомца игрока: уровень, характеристики, бои, способность."""
     user = get_user(user_id)
     pet = PETS[user["pet"]]
-    level, xp = user["level"], user["xp"]
-    need = xp_needed(level)
+    level = user["level"]
 
     stats_rows = "".join(
         "<tr>"
@@ -444,12 +420,8 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{escape(pet['element'])} {element_emoji}</b></p>"
-        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}/{MAX_LEVEL}</b><br>"
-        + (
-            "<b>Максимальный уровень</b></p>"
-            if level >= MAX_LEVEL
-            else f"<b>{xp_bar(xp, need)} {xp}/{need} XP</b></p>"
-        )
+        f"<p><b>{custom_emoji(LEVEL_EMOJI)} Уровень {level}/{MAX_LEVEL}</b>"
+        + ("<br><b>Максимальный уровень</b></p>" if level >= MAX_LEVEL else "</p>")
         +
         "<p><b>Характеристики</b></p>"
         "<table bordered striped>"
@@ -1011,7 +983,6 @@ def upgrade_html(user_id: int, with_image: bool = False) -> str:
     evolution = is_evolution(level)
 
     needs = [
-        (f"{custom_emoji(XP_EMOJI)} XP", user["xp"], xp_needed(level)),
         (f"{MEAT_EMOJI} Мясо", user["meat"], need_meat),
         (f"{FRUIT_EMOJI} Фрукты", user["fruit"], need_fruit),
     ]
@@ -1120,7 +1091,6 @@ async def on_upgrade_do(callback: CallbackQuery):
     level = user["level"]
     evolution = is_evolution(level)
     need_meat, need_fruit = upgrade_cost(level)
-    user["xp"] -= xp_needed(level)
     user["meat"] -= need_meat
     user["fruit"] -= need_fruit
     user["level"] += 1
@@ -1160,7 +1130,7 @@ async def on_upgrade_back(callback: CallbackQuery):
 
 @admin_router.message(Command("give"))
 async def cmd_give(message: Message):
-    """/give <мясо> <фрукты> [XP] [монеты] — выдать себе ресурсы для теста."""
+    """/give <мясо> <фрукты> [монеты] — выдать себе ресурсы для теста."""
     user = get_user(message.from_user.id)
     if user is None:
         await message.answer("<i>Сначала выбери питомца: /start</i>")
@@ -1168,22 +1138,20 @@ async def cmd_give(message: Message):
     parts = (message.text or "").split()[1:]
     try:
         meat, fruit = int(parts[0]), int(parts[1])
-        xp = int(parts[2]) if len(parts) > 2 else 0
-        coins = int(parts[3]) if len(parts) > 3 else 0
+        coins = int(parts[2]) if len(parts) > 2 else 0
     except (IndexError, ValueError):
         await message.answer(
-            "<i>Формат: /give 5 5 100 50 (мясо, фрукты, XP, монеты)</i>"
+            "<i>Формат: /give 5 5 50 (мясо, фрукты, монеты)</i>"
         )
         return
     user["meat"] += meat
     user["fruit"] += fruit
-    user["xp"] += xp
     user["coins"] += coins
     save_users()
     await message.answer(
         "<b>Выдано</b>\n"
         f"{custom_emoji(COIN_EMOJI)} +{coins}  {MEAT_EMOJI} +{meat}  "
-        f"{FRUIT_EMOJI} +{fruit}  {custom_emoji(XP_EMOJI)} +{xp}"
+        f"{FRUIT_EMOJI} +{fruit}"
     )
 
 
