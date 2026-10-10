@@ -433,6 +433,7 @@ async def cb_menu(call: CallbackQuery, state: FSMContext) -> None:
 
 
 PRODUCT_MARKS = {"fresh": EMOJI_FRESH, "warm": EMOJI_WARM}
+PRODUCT_ICONS = {"fresh": "5850317551090800862", "warm": "5881806211195605908"}
 
 
 @router.callback_query(F.data == "buy")
@@ -462,7 +463,7 @@ async def cb_buy(call: CallbackQuery) -> None:
                 text=f"{p['title']} • {money(p['price'])}",
                 style="success",
                 callback_data=f"item:{key}",
-                icon_custom_emoji_id="4990307318513009602",
+                icon_custom_emoji_id=PRODUCT_ICONS[key],
             )
         )
     kb.row(back_btn("menu"))
