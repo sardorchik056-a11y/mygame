@@ -43,7 +43,7 @@ REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнени
 CURRENCY = "$"
 
 # ── xRocket (оплата) ───────────────────────────────────────────
-XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "PASTE_XROCKET_API_KEY")
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMwMDgzMiIsImp0aSI6ImFwcDozMDA4MzI6MGViMmU0YjYtMmY4ZC00MzYwLWFjNWUtZWUzMTkzMTI3MTdjIiwiaWF0IjoxNzkxNjM1MzY5fQ.tuxepw0hfGRPsS42-yYoYrBbVC27PiCTrIiCyVR8aYw")
 XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
 PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
 
@@ -78,6 +78,12 @@ EMOJI_REFS = '<tg-emoji emoji-id="4960891456869893259">💠</tg-emoji>'
 EMOJI_STATS = '<tg-emoji emoji-id="5854798142578368552">📊</tg-emoji>'
 EMOJI_LINK = '<tg-emoji emoji-id="5271604874419647061">🔗</tg-emoji>'
 EMOJI_SHOP = '<tg-emoji emoji-id="5199874732983353088">💫</tg-emoji>'
+EMOJI_BALANCE = '<tg-emoji emoji-id="5224257782013769471">💰</tg-emoji>'
+EMOJI_MIN = '<tg-emoji emoji-id="5447183459602669338">🔽</tg-emoji>'
+EMOJI_MAX = '<tg-emoji emoji-id="5449683594425410231">🔼</tg-emoji>'
+EMOJI_CUSTOM = '<tg-emoji emoji-id="5197269100878907942">✍️</tg-emoji>'
+# иконки на кнопках способов оплаты
+PROVIDER_ICONS = {"xr": "5798534328698805312", "cb": "5798650400189980129"}
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -452,7 +458,7 @@ async def cb_finance(call: CallbackQuery, state: FSMContext) -> None:
         f"{EMOJI_FINANCE} <b>Финансы</b>\n{SEP}\n\n"
         "<blockquote><i>Пополняйте баланс в криптовалюте — быстро и без комиссии с нашей стороны. "
         "Деньги зачисляются автоматически сразу после оплаты.</i></blockquote>\n\n"
-        f"💰 <b>Ваш баланс:</b> <b>{money(user['balance'])}</b>\n\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> <b>{money(user['balance'])}</b>\n\n"
         f"{EMOJI_STATS} <b>Статистика</b>\n"
         f"├ Всего пополнено: <code>{money(user['deposited'])}</code>\n"
         f"├ Всего потрачено: <code>{money(user['spent'])}</code>\n"
@@ -462,7 +468,7 @@ async def cb_finance(call: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardBuilder()
     kb.row(btn(text="Пополнить баланс", style="success", callback_data="topup",
                icon_custom_emoji_id="5417924076503062111"))
-    kb.row(btn(text="🧾 История пополнений", callback_data="history"))
+    kb.row(btn(text="История пополнений", callback_data="history", icon_custom_emoji_id="5444856076954520455"))
     kb.row(back_btn("menu"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
@@ -649,13 +655,13 @@ def topup_methods_screen() -> tuple[str, InlineKeyboardMarkup]:
         f"{EMOJI_FINANCE} <b>Пополнение баланса</b>\n{SEP}\n\n"
         "<blockquote><i>Выберите удобный способ оплаты. "
         "Баланс пополнится автоматически сразу после платежа.</i></blockquote>\n\n"
-        f"📉 <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
-        f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n\n"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n\n"
         "<i>Выберите способ оплаты 👇</i>"
     )
     kb = InlineKeyboardBuilder()
     for code, name in PROVIDERS.items():
-        kb.row(btn(text=f"💳 {name}", callback_data=f"topup:{code}"))
+        kb.row(btn(text=name, callback_data=f"topup:{code}", icon_custom_emoji_id=PROVIDER_ICONS[code]))
     kb.row(back_btn("finance"))
     return text, kb.as_markup()
 
@@ -667,16 +673,16 @@ async def topup_screen(user_id: int, provider: str = "xr") -> tuple[str, InlineK
         f"{EMOJI_FINANCE} <b>Пополнение через {PROVIDERS[provider]}</b>\n{SEP}\n\n"
         "<blockquote><i>Выберите сумму или введите свою — "
         "мы выставим счёт, а вы оплатите его в любой удобной криптовалюте.</i></blockquote>\n\n"
-        f"📉 <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
-        f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n"
-        f"💰 <b>Ваш баланс:</b> {money(balance)}\n\n"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(balance)}\n\n"
         "<i>Выберите сумму ниже 👇</i>"
     )
     kb = InlineKeyboardBuilder()
     kb.row(
         *[btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{provider}:{a:g}") for a in TOPUP_AMOUNTS]
     )
-    kb.row(btn(text="✏️ Другая сумма", callback_data=f"pay_custom:{provider}"))
+    kb.row(btn(text="Другая сумма", callback_data=f"pay_custom:{provider}", icon_custom_emoji_id="5197269100878907942"))
     kb.row(back_btn("topup"))
     return text, kb.as_markup()
 
@@ -744,7 +750,7 @@ async def finalize_paid(bot: Bot, invoice_id: str) -> None:
         f"<blockquote><i>Баланс пополнен автоматически. "
         f"Спасибо, что выбираете {html.escape(SHOP_NAME)}!</i></blockquote>\n\n"
         f"💵 <b>Зачислено:</b> {money(pay['amount'])}\n"
-        f"💰 <b>Ваш баланс:</b> {money(user['balance'])}\n"
+        f"{EMOJI_BALANCE} <b>Ваш баланс:</b> {money(user['balance'])}\n"
         f"🆔 <b>Счёт:</b> <code>#{html.escape(split_id(invoice_id)[1])}</code>"
     )
     kb = InlineKeyboardBuilder()
@@ -847,11 +853,11 @@ async def cb_pay_custom(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TopUp.amount)
     await state.update_data(msg_id=call.message.message_id, provider=provider)
     text = (
-        f"✏️ <b>Своя сумма</b>\n{SEP}\n\n"
+        f"{EMOJI_CUSTOM} <b>Своя сумма</b>\n{SEP}\n\n"
         "<blockquote><i>Отправьте сообщением сумму пополнения в долларах. "
         "Можно использовать дробные значения, например 7.5</i></blockquote>\n\n"
-        f"📉 <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
-        f"📈 <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}"
+        f"{EMOJI_MIN} <b>Минимум:</b> {CURRENCY}{MIN_TOPUP:g}\n"
+        f"{EMOJI_MAX} <b>Максимум:</b> {CURRENCY}{MAX_TOPUP:g}"
     )
     kb = InlineKeyboardBuilder()
     kb.row(back_btn(f"topup:{provider}"))
