@@ -42,7 +42,7 @@ REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнени
 CURRENCY = "$"
 
 # ── xRocket (оплата) ───────────────────────────────────────────
-XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMwMDgzMiIsImp0aSI6ImFwcDozMDA4MzI6MGViMmU0YjYtMmY4ZC00MzYwLWFjNWUtZWUzMTkzMTI3MTdjIiwiaWF0IjoxNzkxNjM1MzY5fQ.tuxepw0hfGRPsS42-yYoYrBbVC27PiCTrIiCyVR8aYw")
+XROCKET_API_KEY = os.getenv("XROCKET_API_KEY", "PASTE_XROCKET_API_KEY")
 XROCKET_URL = os.getenv("XROCKET_URL", "https://pay.xrocket.tg")  # для testnet укажите URL из документации xRocket
 PAY_CURRENCY = os.getenv("PAY_CURRENCY", "USDT")   # валюта счёта (1 USDT = 1 $)
 TOPUP_AMOUNTS = [1, 2, 5, 10, 25, 50, 100, 250, 500]  # кнопки быстрых сумм
@@ -282,8 +282,7 @@ async def build_menu_text(user: dict) -> str:
         f"{EMOJI_FINANCE} <b>Финансы</b>\n"
         f"├ Баланс: <b>{money(user['balance'])}</b>\n"
         f"├ Пополнено: <code>{money(user['deposited'])}</code>\n"
-        f"└ Потрачено: <code>{money(user['spent'])}</code>\n\n"
-        f"{SEP}\n"
+
         f"<i>Выберите нужный раздел ниже 👇</i>"
     )
 
