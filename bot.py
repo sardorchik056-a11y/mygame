@@ -199,6 +199,11 @@ def btn(text: str, style: str = "primary", **kwargs) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, style=style, **kwargs)
 
 
+def back_btn(callback_data: str = "menu") -> InlineKeyboardButton:
+    """Кнопка «Назад» с кастомным эмодзи."""
+    return btn(text="Назад", callback_data=callback_data, icon_custom_emoji_id="5258236805890710909")
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(btn(text="Купить", style="success", callback_data="buy", icon_custom_emoji_id="4990307318513009602"))
@@ -217,7 +222,7 @@ def back_kb(*extra: InlineKeyboardButton) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for button in extra:
         kb.row(button)
-    kb.row(btn(text="⬅️ Главное меню", callback_data="menu"))
+    kb.row(back_btn("menu"))
     return kb.as_markup()
 
 
@@ -323,7 +328,7 @@ async def cb_finance(call: CallbackQuery) -> None:
     )
     kb = InlineKeyboardBuilder()
     kb.row(btn(text="➕ Пополнить баланс", callback_data="topup"))
-    kb.row(btn(text="⬅️ Главное меню", callback_data="menu"))
+    kb.row(back_btn("menu"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
 
@@ -337,7 +342,7 @@ async def cb_topup(call: CallbackQuery) -> None:
         "баланс и реферальный бонус начислятся автоматически.</blockquote>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(btn(text="⬅️ Назад", callback_data="finance"))
+    kb.row(back_btn("finance"))
     await safe_edit(call, text, kb.as_markup())
     await call.answer()
 
@@ -347,14 +352,14 @@ async def cb_guide(call: CallbackQuery) -> None:
     text = (
         f"<b>🔖 Инструкция</b>\n{SEP}\n\n"
         f"{NUM_1} <b>Возьмите номер</b>\n"
-        "С баланса замораживается сумма. Вы получаете номер и пароль, если он есть.\n\n"
+        "<i>С баланса замораживается сумма. Вы получаете номер и пароль, если он есть.</i>\n\n"
         f"{NUM_2} <b>Подтвердите отправку</b>\n"
-        "Введите номер в MAX и нажмите «✅ Код отправлен». На это даётся <b>5 минут</b>. "
-        "Не успели — заявка сгорит, деньги вернутся.\n\n"
+        "<i>Введите номер в MAX и нажмите «✅ Код отправлен». На это даётся 5 минут. "
+        "Не успели — заявка сгорит, деньги вернутся.</i>\n\n"
         f"{NUM_3} <b>Ждите SMS</b>\n"
-        "Бот пришлёт код и пароль в течение <b>1 минуты</b>.\n\n"
+        "<i>Бот пришлёт код и пароль в течение 1 минуты.</i>\n\n"
         f"{NUM_4} <b>Введите код</b>\n"
-        "Как только код получен — средства списываются. Услуга оказана."
+        "<i>Как только код получен — средства списываются. Услуга оказана.</i>"
     )
     await safe_edit(call, text, back_kb())
     await call.answer()
