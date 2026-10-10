@@ -540,9 +540,10 @@ def menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="⛏️ Шахты",
+                    text="Шахты",
                     callback_data="menu:mine",
                     style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=mine.MINE_EMOJI[0],
                 )
             ],
         ]
