@@ -96,12 +96,10 @@ STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Останов
 IMG_TARGETS: dict[str, str] = {
     "mine": "Шахты",
     "mine_picks": "Шахты: кирки",
-    "mine_miners": "Шахты: шахтёры",
+    "mine_miners": "Шахты: все шахтёры (общее фото)",
 }
 for _i, _p in enumerate(PICKAXES):
     IMG_TARGETS[f"mine_pick_{_i}"] = f"Шахты: {_p['name']}"
-for _i, _m in enumerate(MINERS):
-    IMG_TARGETS[f"mine_miner_{_i}"] = f"Шахты: {_m['name']}"
 
 
 # ---------- Состояние и расчёты ----------
@@ -622,10 +620,17 @@ for _i in range(len(MINERS)):
     )
 
 
+def img_key(key: str) -> str:
+    """Под каким ключом хранится фото экрана: у всех экранов шахтёров оно одно."""
+    if key.startswith(("mine_miner_", "mine_give_", "mine_take_")):
+        return "mine_miners"
+    return key
+
+
 async def send_screen(bot, chat_id: int, user_id: int, key: str) -> None:
     html, kb = SCREENS[key]
     await D.send_rich_card(
-        bot, chat_id, key, lambda with_image: html(user_id, with_image), kb(user_id)
+        bot, chat_id, img_key(key), lambda with_image: html(user_id, with_image), kb(user_id)
     )
 
 
@@ -633,7 +638,7 @@ async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
     """Предпросмотр для /img: без кнопок под сообщением."""
     html, _ = SCREENS[key]
     await D.send_rich_card(
-        bot, chat_id, key, lambda with_image: html(user_id, with_image)
+        bot, chat_id, img_key(key), lambda with_image: html(user_id, with_image)
     )
 
 
