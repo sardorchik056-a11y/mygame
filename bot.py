@@ -9,12 +9,15 @@ Telegram-бот: главное меню + пополнение через xRock
     export XROCKET_API_KEY="ключ из @xrocket → Rocket Pay → Create App → API token"
     export CRYPTOBOT_API_KEY="токен из @send (или @CryptoBot) → Crypto Pay → Create App"
     export SUPPORT_USERNAME="your_support"     # без @
+    export SUPPORT_URL="https://t.me/your_support"   # ссылка кнопки «Тех поддержка»
+    export ADMIN_IDS="123456789"               # ID админов через запятую, панель — /admin
     python main.py
 """
 
 import asyncio
 import html
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -26,7 +29,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -37,6 +40,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ══════════════════════════════════════════════════════════════
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8")
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "support")
+# Ссылка кнопки «Тех поддержка» (по умолчанию — t.me/<SUPPORT_USERNAME>)
+SUPPORT_URL = os.getenv("SUPPORT_URL", f"https://t.me/{SUPPORT_USERNAME}")
+# Админы: ID через запятую, например ADMIN_IDS="123456789,987654321"
+ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
 SHOP_NAME = os.getenv("SHOP_NAME", "XYLI SHOP")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 REF_PERCENT = float(os.getenv("REF_PERCENT", "10"))  # % от пополнений реферала
@@ -60,10 +67,10 @@ MAX_TOPUP = 1000.0
 INVOICE_TTL = 3600     # срок жизни счёта, сек
 POLL_INTERVAL = 8      # как часто проверять оплату, сек
 
-# Товары каталога: код -> название и цена. Остаток хранится в БД (таблица stock).
+# Товары каталога: код -> название и цена (цены можно менять в админ-панели).
 PRODUCTS = {
     "fresh": {"title": "Новореги", "price": 0.50},
-    "warm": {"title": "Прогретые", "price": 1.50},
+    "warm": {"title": "Фишы", "price": 1.50},
 }
 
 # Статусы: (минимум покупок, название)
@@ -96,7 +103,6 @@ EMOJI_TTL = '<tg-emoji emoji-id="5386367538735104399">⌛</tg-emoji>'
 EMOJI_STATUS = '<tg-emoji emoji-id="5397782960512444700">📌</tg-emoji>'
 EMOJI_FRESH = '<tg-emoji emoji-id="5850317551090800862">⏰</tg-emoji>'
 EMOJI_WARM = '<tg-emoji emoji-id="5881806211195605908">📸</tg-emoji>'
-EMOJI_STOCK = '<tg-emoji emoji-id="6039348811363520645">📂</tg-emoji>'
 EMOJI_FINANCE = '<tg-emoji emoji-id="5402186569006210455">💱</tg-emoji>'
 
 router = Router()
@@ -139,11 +145,7 @@ async def init_db() -> None:
             )
             """
         )
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS stock (key TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0)"
-        )
-        for key in PRODUCTS:
-            await db.execute("INSERT OR IGNORE INTO stock (key, count) VALUES (?, 0)", (key,))
+        await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         await db.commit()
 
 
@@ -262,11 +264,55 @@ async def credit_payment(invoice_id: str) -> bool:
         return True
 
 
-async def get_stock(key: str) -> int:
+async def set_setting(key: str, value: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT count FROM stock WHERE key = ?", (key,)) as cur:
+        await db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await db.commit()
+
+
+async def load_settings() -> None:
+    """Подтягивает сохранённые админом цены и минимум пополнения."""
+    global MIN_TOPUP
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT key, value FROM settings") as cur:
+            rows = await cur.fetchall()
+    for key, value in rows:
+        try:
+            if key == "min_topup":
+                MIN_TOPUP = float(value)
+            elif key.startswith("price:") and key[6:] in PRODUCTS:
+                PRODUCTS[key[6:]]["price"] = float(value)
+        except ValueError:
+            logging.warning("Некорректная настройка %s=%r", key, value)
+
+
+async def find_user(ref: str) -> dict | None:
+    """Ищет пользователя по ID или @username."""
+    ref = ref.strip().lstrip("@")
+    if not ref:
+        return None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if ref.isdigit():
+            query, params = "SELECT * FROM users WHERE user_id = ?", (int(ref),)
+        else:
+            query, params = "SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (ref,)
+        async with db.execute(query, params) as cur:
             row = await cur.fetchone()
-            return row[0] if row else 0
+    return dict(row) if row else None
+
+
+async def admin_give(user_id: int, amount: float) -> float:
+    """Выдача баланса админом (без учёта в «Пополнено» и без реф. бонуса). Возвращает новый баланс."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+    user = await get_user(user_id)
+    return user["balance"]
 
 
 async def user_payments(user_id: int, limit: int = 8) -> list[dict]:
@@ -358,7 +404,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     )
     kb.row(
         btn(text="Инструкция", callback_data="guide", icon_custom_emoji_id="5366421375605040850"),
-        btn(text="Тех поддержка", callback_data="support", icon_custom_emoji_id="5238025132177369293"),
+        btn(text="Тех поддержка", url=SUPPORT_URL, icon_custom_emoji_id="5238025132177369293"),
     )
     return kb.as_markup()
 
@@ -441,12 +487,9 @@ async def cb_buy(call: CallbackQuery) -> None:
     user = await ensure_user(call)
     blocks = []
     for key, p in PRODUCTS.items():
-        stock = await get_stock(key)
-        stock_text = f"<b>{stock:,}</b> шт.".replace(",", " ")
         blocks.append(
             f"{PRODUCT_MARKS[key]} <b>{p['title']}</b>\n"
-            f"├ {EMOJI_PAY_AMOUNT} Цена: <b>{money(p['price'])}</b>\n"
-            f"└ {EMOJI_STOCK} В наличии: {stock_text}"
+            f"└ {EMOJI_PAY_AMOUNT} Цена: <b>{money(p['price'])}</b>"
         )
     text = (
         f"{EMOJI_SHOP} <b>Каталог</b>\n{SEP}\n\n"
@@ -479,9 +522,6 @@ async def cb_item(call: CallbackQuery) -> None:
         await call.answer("Товар не найден", show_alert=True)
         return
     user = await ensure_user(call)
-    if await get_stock(key) <= 0:
-        await call.answer("😔 Сейчас нет в наличии. Загляните позже.", show_alert=True)
-        return
     if user["balance"] < product["price"]:
         await call.answer(
             f"Недостаточно средств. Нужно {money(product['price'])}, на балансе {money(user['balance'])}.",
@@ -752,9 +792,9 @@ async def topup_screen(user_id: int, provider: str = "xr") -> tuple[str, InlineK
         "<i>Выберите сумму ниже 👇</i>"
     )
     kb = InlineKeyboardBuilder()
-    kb.row(
-        *[btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{provider}:{a:g}") for a in TOPUP_AMOUNTS]
-    )
+    amounts = [a for a in TOPUP_AMOUNTS if a >= MIN_TOPUP]
+    if amounts:
+        kb.row(*[btn(text=f"{CURRENCY}{a:g}", callback_data=f"pay:{provider}:{a:g}") for a in amounts])
     kb.row(btn(text="Другая сумма", callback_data=f"pay_custom:{provider}", icon_custom_emoji_id="5197269100878907942"))
     kb.row(back_btn("topup"))
     return text, kb.as_markup()
@@ -1021,19 +1061,249 @@ async def cb_guide(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data == "support")
-async def cb_support(call: CallbackQuery) -> None:
+# ══════════════════════════════════════════════════════════════
+#  АДМИН-ПАНЕЛЬ (/admin)
+# ══════════════════════════════════════════════════════════════
+class IsAdmin(BaseFilter):
+    async def __call__(self, event) -> bool:
+        return bool(event.from_user) and event.from_user.id in ADMIN_IDS
+
+
+admin_router = Router()
+admin_router.message.filter(IsAdmin())
+admin_router.callback_query.filter(IsAdmin())
+
+
+class Admin(StatesGroup):
+    give_user = State()
+    give_amount = State()
+    price = State()
+    min_topup = State()
+
+
+MAX_PRICE = 10000.0
+MAX_GIVE = 100000.0
+
+
+def parse_number(raw: str) -> float | None:
+    try:
+        value = round(float(raw.replace("$", "").replace(",", ".").strip()), 2)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def admin_panel(note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    lines = [f"├ {p['title']}: <b>{money(p['price'])}</b>" for p in PRODUCTS.values()]
+    lines.append(f"└ Мин. пополнение: <b>{money(MIN_TOPUP)}</b>")
     text = (
-        f"<b>🆘 Техническая поддержка</b>\n{SEP}\n\n"
-        "Возникла проблема или есть вопрос? Мы на связи и поможем.\n\n"
-        "🕒 Время работы: <b>ежедневно, 10:00 – 23:00</b>\n"
-        "⚡ Среднее время ответа: <b>до 15 минут</b>\n\n"
-        "<blockquote>Для быстрого решения укажите свой ID: "
-        f"<code>{call.from_user.id}</code> и опишите проблему.</blockquote>"
+        (f"{note}\n\n" if note else "")
+        + f"{EMOJI_SHOP} <b>Админ-панель</b>\n{SEP}\n\n"
+        "<blockquote><i>Управление магазином: баланс пользователей, цены и лимит пополнения.</i></blockquote>\n\n"
+        f"{EMOJI_STATS} <b>Текущие настройки</b>\n" + "\n".join(lines) + "\n\n"
+        "<i>Выберите действие ниже 👇</i>"
     )
-    contact = btn(text="💬 Написать в поддержку", url=f"https://t.me/{SUPPORT_USERNAME}")
-    await safe_edit(call, text, back_kb(contact))
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(text="Выдать баланс", style="success", callback_data="adm_give",
+               icon_custom_emoji_id="5224257782013769471"))
+    kb.row(btn(text="Изменить цены", callback_data="adm_prices", icon_custom_emoji_id="5409048419211682843"))
+    kb.row(btn(text="Мин. пополнение", callback_data="adm_min", icon_custom_emoji_id="5447183459602669338"))
+    kb.row(back_btn("menu"))
+    return text, kb.as_markup()
+
+
+def prompt_screen(title: str, hint: str, note: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    text = (
+        f"{title}\n{SEP}\n\n"
+        f"<blockquote><i>{hint}</i></blockquote>"
+        + (f"\n\n⚠️ <b>{note}</b>" if note else "")
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(back_btn("admin"))
+    return text, kb.as_markup()
+
+
+GIVE_TITLE = f"{EMOJI_BALANCE} <b>Выдача баланса</b>"
+
+
+@admin_router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = admin_panel()
+    await message.answer(text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data == "admin")
+async def cb_admin(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text, kb = admin_panel()
+    await safe_edit(call, text, kb)
     await call.answer()
+
+
+# ── выдача баланса ──
+@admin_router.callback_query(F.data == "adm_give")
+async def cb_adm_give(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Admin.give_user)
+    await state.update_data(msg_id=call.message.message_id)
+    text, kb = prompt_screen(GIVE_TITLE, "Отправьте ID или @username пользователя.")
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@admin_router.message(Admin.give_user, F.text)
+async def msg_give_user(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    target = await find_user(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if not target:
+        text, kb = prompt_screen(
+            GIVE_TITLE, "Отправьте ID или @username пользователя.", "Пользователь не найден. Он должен хотя бы раз запустить бота."
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    await state.set_state(Admin.give_amount)
+    await state.update_data(target=target["user_id"])
+    text, kb = prompt_screen(
+        GIVE_TITLE,
+        f"Пользователь: {display_name(target)} (ID {target['user_id']})\n"
+        f"Баланс сейчас: {money(target['balance'])}\n\n"
+        "Отправьте сумму в долларах, например 5 или 7.5",
+    )
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+
+
+@admin_router.message(Admin.give_amount, F.text)
+async def msg_give_amount(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    amount = parse_number(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    target = await get_user(data["target"])
+    if amount is None or not 0 < amount <= MAX_GIVE:
+        text, kb = prompt_screen(
+            GIVE_TITLE,
+            f"Пользователь: {display_name(target)} (ID {target['user_id']})\nОтправьте сумму в долларах.",
+            f"Введите число от 0.01 до {MAX_GIVE:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    new_balance = await admin_give(target["user_id"], amount)
+    await state.clear()
+    try:
+        await bot.send_message(
+            target["user_id"],
+            f"{EMOJI_BALANCE} <b>Вам начислено {money(amount)}</b>\nВаш баланс: <b>{money(new_balance)}</b>",
+        )
+    except Exception:
+        pass
+    text, kb = admin_panel(
+        f"✅ <b>Выдано {money(amount)}</b> пользователю {display_name(target)}. Новый баланс: <b>{money(new_balance)}</b>"
+    )
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+
+
+# ── цены ──
+@admin_router.callback_query(F.data == "adm_prices")
+async def cb_adm_prices(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text = (
+        f"{EMOJI_PAY_AMOUNT} <b>Цены</b>\n{SEP}\n\n"
+        "<blockquote><i>Выберите товар, цену которого нужно изменить.</i></blockquote>"
+    )
+    kb = InlineKeyboardBuilder()
+    for key, p in PRODUCTS.items():
+        kb.row(btn(text=f"{p['title']} • {money(p['price'])}", callback_data=f"adm_price:{key}",
+                   icon_custom_emoji_id=PRODUCT_ICONS.get(key)))
+    kb.row(back_btn("admin"))
+    await safe_edit(call, text, kb.as_markup())
+    await call.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm_price:"))
+async def cb_adm_price(call: CallbackQuery, state: FSMContext) -> None:
+    key = call.data.split(":", 1)[1]
+    if key not in PRODUCTS:
+        await call.answer("Товар не найден", show_alert=True)
+        return
+    await state.set_state(Admin.price)
+    await state.update_data(msg_id=call.message.message_id, key=key)
+    p = PRODUCTS[key]
+    text, kb = prompt_screen(
+        f"{EMOJI_PAY_AMOUNT} <b>Цена: {p['title']}</b>",
+        f"Сейчас: {money(p['price'])}\nОтправьте новую цену в долларах, например 0.8",
+    )
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@admin_router.message(Admin.price, F.text)
+async def msg_price(message: Message, bot: Bot, state: FSMContext) -> None:
+    data = await state.get_data()
+    key = data["key"]
+    p = PRODUCTS[key]
+    value = parse_number(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if value is None or not 0 < value <= MAX_PRICE:
+        text, kb = prompt_screen(
+            f"{EMOJI_PAY_AMOUNT} <b>Цена: {p['title']}</b>",
+            f"Сейчас: {money(p['price'])}\nОтправьте новую цену в долларах.",
+            f"Введите число от 0.01 до {MAX_PRICE:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    p["price"] = value
+    await set_setting(f"price:{key}", str(value))
+    await state.clear()
+    text, kb = admin_panel(f"✅ Цена <b>{p['title']}</b> теперь <b>{money(value)}</b>")
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+
+
+# ── минимальное пополнение ──
+MIN_TITLE = f"{EMOJI_MIN} <b>Минимальное пополнение</b>"
+
+
+@admin_router.callback_query(F.data == "adm_min")
+async def cb_adm_min(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Admin.min_topup)
+    await state.update_data(msg_id=call.message.message_id)
+    text, kb = prompt_screen(
+        MIN_TITLE, f"Сейчас: {money(MIN_TOPUP)}\nОтправьте новый минимум в долларах, например 2"
+    )
+    await safe_edit(call, text, kb)
+    await call.answer()
+
+
+@admin_router.message(Admin.min_topup, F.text)
+async def msg_min_topup(message: Message, bot: Bot, state: FSMContext) -> None:
+    global MIN_TOPUP
+    data = await state.get_data()
+    value = parse_number(message.text)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if value is None or not 0 < value <= MAX_TOPUP:
+        text, kb = prompt_screen(
+            MIN_TITLE,
+            f"Сейчас: {money(MIN_TOPUP)}\nОтправьте новый минимум в долларах.",
+            f"Введите число от 0.01 до {MAX_TOPUP:g}.",
+        )
+        await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
+        return
+    MIN_TOPUP = value
+    await set_setting("min_topup", str(value))
+    await state.clear()
+    text, kb = admin_panel(f"✅ Минимальное пополнение теперь <b>{money(value)}</b>")
+    await edit_or_send(bot, message.chat.id, data["msg_id"], text, kb)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1042,11 +1312,15 @@ async def cb_support(call: CallbackQuery) -> None:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     await init_db()
+    await load_settings()
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(router)
 
+    if not ADMIN_IDS:
+        logging.warning("ADMIN_IDS не задан — админ-панель (/admin) недоступна")
     if XROCKET_API_KEY.startswith("PASTE_"):
         logging.warning("XROCKET_API_KEY не задан — пополнение через xRocket работать не будет")
     if CRYPTOBOT_API_KEY.startswith("PASTE_"):
