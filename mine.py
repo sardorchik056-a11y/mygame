@@ -91,6 +91,8 @@ INCOME_EMOJI = ("5202018746297767789", "🪙")  # доход
 STORAGE_EMOJI = ("5854908544712707500", "📦")  # склад
 START_EMOJI = ("5906852613629941703", "🟢")    # кнопка «Запустить»
 STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Остановить»
+HIRE_EMOJI = ("5440457429147997980", "🫴")     # кнопка «Нанять»
+UNEQUIP_EMOJI = ("5210952531676504517", "❌")  # кнопка «Снять кирку»
 
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
@@ -406,37 +408,32 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     t = MINERS[i]
     have = owned(m, i)
 
-    eq = eq_of(m, i)
-    eq_text = ", ".join(
-        f"{PICKAXES[p]['icon']} {c}" for p, c in sorted(eq.items())
-    ) or "нет"
-
     rows = [
-        ("Шахтёр", t["name"]),
         ("Нанято", f"{have}/{t['max']}"),
-        (f"{_income()} Доход без кирки", f"{fmt(t['income'])} в час"),
-        (f"{_pick()} Без кирки", str(bare(m, i))),
-        (f"{_pick()} С кирками", eq_text),
-        (f"{_income()} Доход всех этого уровня", f"{fmt(miner_income(m, i))} в час"),
+        (f"{_income()} Доход одного", f"{fmt(t['income'])} в час"),
     ]
+    if have:
+        eq = eq_of(m, i)
+        picks = [f"{PICKAXES[p]['icon']} {c}" for p, c in sorted(eq.items())]
+        if bare(m, i):
+            picks.append(f"без кирки {bare(m, i)}")
+        rows.append((f"{_pick()} Кирки", ", ".join(picks)))
+        rows.append((f"{_income()} Доход уровня", f"{fmt(miner_income(m, i))} в час"))
 
     button = ""
     if have >= t["max"]:
-        info = "Все места для этого уровня заняты. Нанимай шахтёров других уровней."
+        tail = f"<p><b>{_info()} Все места этого уровня заняты.</b></p>"
     else:
         rows.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
-        info = (
-            f"Новый {t['name']} принесёт ещё {fmt(t['income'])} монет в час "
-            "без кирки. Каждый следующий этого уровня стоит дороже."
-        )
-        button = _button(f"mine:buy_miner:{i}", "Нанять")
+        tail = ""
+        button = _button(f"mine:buy_miner:{i}", "Нанять", D.custom_emoji(HIRE_EMOJI))
 
     return (
         f"{_image(with_image)}"
         f"<p><b>{t['name'].upper()}</b></p>"
         f"<blockquote><i>{t['desc']}</i></blockquote>"
         + _table(rows)
-        + f"<p><b>{_info()} {info}</b></p>"
+        + tail
         + button
     )
 
@@ -506,11 +503,12 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
 
 # ---------- Клавиатуры (под сообщением) ----------
 
-def _btn(text: str, data: str, emoji_id: str | None = None) -> InlineKeyboardButton:
+def _btn(text: str, data: str, emoji_id: str | None = None,
+         style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=text,
         callback_data=data,
-        style=ButtonStyle.PRIMARY,
+        style=style,
         icon_custom_emoji_id=emoji_id,
     )
 
@@ -553,9 +551,9 @@ def _back_to(data: str):
 def _miner_card_kb(i: int):
     def kb(user_id: int) -> InlineKeyboardMarkup:
         _, m = load(user_id)
-        row = [_btn("Выдать кирку", f"mine:give:{i}")]
+        row = [_btn("Выдать кирку", f"mine:give:{i}", PICK_EMOJI[0], ButtonStyle.SUCCESS)]
         if equipped_on(m, i) > 0:  # снимать нечего, пока кирок нет
-            row.append(_btn("Снять кирку", f"mine:take:{i}"))
+            row.append(_btn("Снять кирку", f"mine:take:{i}", UNEQUIP_EMOJI[0]))
         return InlineKeyboardMarkup(
             inline_keyboard=[row, _back_row("mine:miners")]
         )
