@@ -13,6 +13,15 @@
     У кирки одна характеристика, множитель дохода: шахтёр с киркой приносит
     в столько раз больше. Шахтёр без кирки добывает с множителем ×1.
   * У каждого типа шахтёров и у каждой кирки есть своя карточка.
+
+Удобства:
+  * прогресс-бар смены, время до конца, прогноз добычи за смену;
+  * «Собрать и запустить снова» одной кнопкой;
+  * покупка кирок ×1 / ×5 / максимум, найм шахтёров ×1 / максимум;
+  * выдача и снятие кирок: по одной или сразу все;
+  * «Авто-выдача»: сама раздаёт лучшие кирки лучшим шахтёрам;
+  * окупаемость найма и прирост дохода от кирки показаны прямо в карточках;
+  * статистика: всего добыто и сколько смен запущено.
 """
 
 import logging
@@ -82,6 +91,7 @@ MINERS = [
 
 MINER_PRICE_GROWTH = 1.35  # каждый следующий шахтёр одного типа дороже в столько раз
 START_MINER = 0            # тип шахтёра, который выдаётся бесплатно
+MAX_BULK = 99              # максимум штук за одну покупку/выдачу
 
 
 # Кастомные эмодзи: (id, запасной обычный эмодзи)
@@ -109,6 +119,7 @@ for _i, _p in enumerate(PICKAXES):
 #   "picks":  {"<кирка>": сколько куплено},
 #   "equip":  {"<тип>": {"<кирка>": сколько шахтёров этого типа её носят}},
 #   "stored": float, "ts": float, "run_start": float|None, "run_end": float|None,
+#   "total": float (всего добыто за всё время), "runs": int (сколько смен запущено),
 # }
 
 def get_mine(user: dict) -> dict:
@@ -126,6 +137,8 @@ def get_mine(user: dict) -> dict:
             "ts": time.time(),
             "run_start": None,
             "run_end": None,
+            "total": 0.0,
+            "runs": 0,
         }
         changed = True
 
@@ -147,9 +160,10 @@ def get_mine(user: dict) -> dict:
         del m["pick"]
         changed = True
 
-    for key in ("run_start", "run_end"):
+    for key, default in (("run_start", None), ("run_end", None),
+                         ("total", 0.0), ("runs", 0)):
         if key not in m:
-            m[key] = None
+            m[key] = default
             changed = True
 
     if changed:
@@ -213,34 +227,107 @@ def settle(m: dict) -> None:
     if is_running(m):
         upto = min(now, m["run_end"])
         hours = max(0.0, upto - m["ts"]) / 3600
-        m["stored"] += income_per_hour(m) * hours
+        gain = income_per_hour(m) * hours
+        m["stored"] += gain
+        m["total"] = m.get("total", 0.0) + gain
         if now >= m["run_end"]:
             m["run_start"] = None
             m["run_end"] = None
     m["ts"] = now
 
 
+def hire_cost(m: dict, i: int, n: int = 1) -> int:
+    """Сколько стоит нанять n шахтёров типа i подряд (с учётом роста цены)."""
+    have = owned(m, i)
+    n = max(0, min(n, MINERS[i]["max"] - have))
+    return sum(
+        round(MINERS[i]["price"] * MINER_PRICE_GROWTH ** (have + k)) for k in range(n)
+    )
+
+
 def miner_price(m: dict, i: int) -> int:
-    return round(MINERS[i]["price"] * MINER_PRICE_GROWTH ** owned(m, i))
+    return hire_cost(m, i, 1)
+
+
+def max_affordable_hire(m: dict, i: int, coins: int) -> int:
+    """Сколько шахтёров типа i можно нанять на coins (в пределах лимита)."""
+    n = 0
+    while n < MINERS[i]["max"] - owned(m, i) and hire_cost(m, i, n + 1) <= coins:
+        n += 1
+    return n
+
+
+def auto_equip(m: dict) -> None:
+    """Раздать все кирки так, чтобы доход был максимальным:
+    лучшие кирки достаются шахтёрам с самым большим базовым доходом."""
+    picks: list[int] = []
+    for p in sorted(range(len(PICKAXES)), key=lambda p: -PICKAXES[p]["mult"]):
+        picks += [p] * picks_owned(m, p)
+
+    equip: dict[str, dict[str, int]] = {}
+    k = 0
+    for i in sorted(range(len(MINERS)), key=lambda i: -MINERS[i]["income"]):
+        for _ in range(owned(m, i)):
+            if k >= len(picks):
+                break
+            slot = equip.setdefault(str(i), {})
+            slot[str(picks[k])] = slot.get(str(picks[k]), 0) + 1
+            k += 1
+    m["equip"] = equip
+
+
+def best_bare_gain(m: dict, p: int) -> float:
+    """Прирост дохода в час, если кирку p надеть на лучшего шахтёра без кирки."""
+    for i in sorted(range(len(MINERS)), key=lambda i: -MINERS[i]["income"]):
+        if bare(m, i) > 0:
+            return MINERS[i]["income"] * (PICKAXES[p]["mult"] - 1)
+    return 0.0
+
+
+def run_progress(m: dict) -> float:
+    """Доля пройденной смены от 0 до 1."""
+    total = m["run_end"] - m["run_start"]
+    if total <= 0:
+        return 1.0
+    return min(1.0, max(0.0, (time.time() - m["run_start"]) / total))
 
 
 def fmt(n: float) -> str:
     return f"{int(n):,}".replace(",", " ")
 
 
+def fmt_rate(n: float) -> str:
+    """Доход в час: до 100 показываем десятые, дальше целые."""
+    if n >= 100 or abs(n - round(n)) < 0.05:
+        return fmt(round(n))
+    return f"{n:.1f}".replace(".", ",")
+
+
 def fmt_mult(mult: float) -> str:
     return f"×{mult:g}"
 
 
+def fmt_bonus(mult: float) -> str:
+    return f"+{round((mult - 1) * 100):g}%"
+
+
 def fmt_dur(seconds: float) -> str:
     seconds = max(0, int(seconds))
-    hours, rest = divmod(seconds, 3600)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
     mins, secs = divmod(rest, 60)
+    if days:
+        return f"{days} д {hours} ч"
     if hours:
         return f"{hours} ч {mins} мин"
     if mins:
         return f"{mins} мин {secs} сек"
     return f"{secs} сек"
+
+
+def bar(frac: float, size: int = 10) -> str:
+    filled = round(frac * size)
+    return "▰" * filled + "▱" * (size - filled)
 
 
 def stop_wait_left(m: dict) -> float:
@@ -270,6 +357,24 @@ def _table(rows: list[tuple[str, str]], head=("Параметр", "Значен�
     return (
         "<table bordered striped>"
         f"<tr><th><b>{head[0]}</b></th><th><b>{head[1]}</b></th></tr>"
+        f"{body}"
+        "</table>"
+    )
+
+
+def _table3(rows: list[tuple[str, str, str]], head: tuple[str, str, str]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td><b>{a}</b></td>"
+        f'<td align="center"><b>{b}</b></td>'
+        f'<td align="center"><b>{c}</b></td>'
+        "</tr>"
+        for a, b, c in rows
+    )
+    return (
+        "<table bordered striped>"
+        f"<tr><th><b>{head[0]}</b></th><th><b>{head[1]}</b></th>"
+        f"<th><b>{head[2]}</b></th></tr>"
         f"{body}"
         "</table>"
     )
@@ -320,84 +425,145 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     total_picks = sum(picks_owned(m, p) for p in range(len(PICKAXES)))
     on_miners = sum(equipped_on(m, i) for i in range(len(MINERS)))
+    rate = income_per_hour(m)
+    stored = int(m["stored"])
 
+    rows: list[tuple[str, str]] = []
     if is_running(m):
+        frac = run_progress(m)
         left = m["run_end"] - time.time()
-        state = f"Работает, до конца {fmt_dur(left)}"
+        rows.append((f"{_mine()} Шахта", "Работает"))
+        rows.append(("Смена", f"{bar(frac)} {int(frac * 100)}%"))
+        rows.append(("До конца смены", fmt_dur(left)))
         wait = stop_wait_left(m)
         if wait > 0:
             status = f"Остановить шахту можно через {fmt_dur(wait)}."
         else:
             status = "Шахту можно остановить, добытое останется на складе."
         action = _button("mine:stop", "Остановить шахту", D.custom_emoji(STOP_EMOJI), "danger")
+        extra = ""
     else:
-        state = "Стоит"
-        status = (
-            "Шахтёры работают только пока шахта запущена. "
-            f"Один запуск длится {RUN_HOURS} ч."
+        if stored >= 1:
+            rows.append((f"{_mine()} Шахта", "Смена окончена"))
+            status = "Смена окончена. Забери добычу и запускай шахту снова."
+        else:
+            rows.append((f"{_mine()} Шахта", "Стоит"))
+            status = (
+                "Шахтёры работают только пока шахта запущена. "
+                f"Один запуск длится {RUN_HOURS} ч."
+            )
+        action = _button(
+            "mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI)
         )
-        action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
+        extra = (
+            _button(
+                "mine:restart", f"Собрать и запустить на {RUN_HOURS} ч",
+                D.custom_emoji(START_EMOJI),
+            )
+            if stored >= 1 else ""
+        )
+
+    rows += [
+        ("👷 Шахтёры", str(total_miners(m))),
+        (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
+        (f"{_income()} Доход", f"{fmt_rate(rate)} в час"),
+        (f"{_income()} За смену ({RUN_HOURS} ч)", fmt(rate * RUN_HOURS)),
+        (f"{_storage()} Склад", fmt(m["stored"])),
+        (f"{_coin()} Всего добыто", fmt(m.get("total", 0))),
+        ("Смен запущено", str(m.get("runs", 0))),
+    ]
 
     return (
         f"{_image(with_image)}"
         f"<p><b>{_mine()} ШАХТЫ</b></p>"
         "<blockquote><i>Запусти шахту, и шахтёры будут добывать монеты, "
         "даже пока тебя нет рядом.</i></blockquote>"
-        + _table(
-            [
-                (f"{_mine()} Шахта", state),
-                ("👷 Шахтёры", str(total_miners(m))),
-                (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
-                (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
-                (f"{_storage()} Склад", fmt(m["stored"])),
-            ]
-        )
+        + _table(rows)
         + f"<p><b>{_info()} {status}</b></p>"
         + action
-        + _button("mine:collect", "Собрать монеты", _coin())
+        + extra
+        + _button("mine:collect", f"Собрать монеты ({fmt(stored)})", _coin())
     )
 
 
 def picks_html(user_id: int, with_image: bool = False) -> str:
+    user, m = load(user_id)
+    rows = [
+        (f"{p['icon']} {p['name']}", f"{picks_owned(m, i)} шт.", f"{picks_equipped(m, i)} шт.")
+        for i, p in enumerate(PICKAXES)
+    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{_pick()} КИРКИ</b></p>"
         "<blockquote><i>Кирки покупаются сколько угодно и выдаются шахтёрам "
         "в их карточках. Шахтёр с киркой добывает больше. "
         "Нажми на кирку внизу, чтобы открыть её карточку.</i></blockquote>"
+        + _table3(rows, ("Кирка", "Куплено", "Надето"))
+        + f"<p><b>{_info()} Кнопка «Авто-выдача» сама раздаёт лучшие кирки "
+        "лучшим шахтёрам.</b></p>"
     )
 
 
 def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     p = PICKAXES[i]
+    free = picks_free(m, i)
+    gain = best_bare_gain(m, i)
+
     rows = [
         (f"{_coin()} Цена", fmt(p["price"])),
+        (f"{_income()} Множитель дохода", f"{fmt_mult(p['mult'])} ({fmt_bonus(p['mult'])})"),
         ("Куплено", str(picks_owned(m, i))),
         ("Надето на шахтёрах", str(picks_equipped(m, i))),
-        ("Свободно", str(picks_free(m, i))),
+        ("Свободно", str(free)),
     ]
+    if gain > 0:
+        rows.append(
+            (f"{_income()} Прирост на лучшем шахтёре без кирки", f"+{fmt_rate(gain)} в час")
+        )
+        info = "Выдай её шахтёру в его карточке или нажми «Авто-выдача»."
+    else:
+        info = "Свободных шахтёров без кирки нет. Найми новых, чтобы выдать эту кирку."
+
+    coins = user.get("coins", 0)
+    buttons = _button(f"mine:buy_pick:{i}:1", f"Купить 1 · {fmt(p['price'])}", p["icon"])
+    buttons += _button(f"mine:buy_pick:{i}:5", f"Купить 5 · {fmt(p['price'] * 5)}", p["icon"])
+    if coins >= p["price"] * 2:
+        buttons += _button(
+            f"mine:buy_pick:{i}:0",
+            f"Купить максимум ({min(coins // p['price'], MAX_BULK)})",
+            p["icon"],
+        )
+
     return (
         f"{_image(with_image)}"
         f"<p><b>{p['icon']} {p['name'].upper()}</b></p>"
         f"<blockquote><i>{p['desc']}</i></blockquote>"
         + _table(rows)
-        + f"<p><b>{_info()} Выдай её шахтёру в его карточке, чтобы он добывал больше.</b></p>"
-        + _button(f"mine:buy_pick:{i}:1", "Купить 1", p["icon"])
-        + _button(f"mine:buy_pick:{i}:5", "Купить 5", p["icon"])
+        + f"<p><b>{_info()} {info}</b></p>"
+        + buttons
     )
 
 
 def miners_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
+    rows = [
+        (
+            t["name"],
+            f"{owned(m, i)}/{t['max']}",
+            f"{fmt_rate(miner_income(m, i))}/ч" if owned(m, i) else "-",
+        )
+        for i, t in enumerate(MINERS)
+    ]
     return (
         f"{_image(with_image)}"
         "<p><b>ШАХТЁРЫ</b></p>"
         "<blockquote><i>У каждого уровня шахтёров свой доход, цена и лимит. "
         "Нажми на шахтёра внизу, чтобы открыть его карточку, нанять его "
         "и выдать кирки.</i></blockquote>"
-        f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
-        f"Доход шахты: {fmt(income_per_hour(m))} в час.</b></p>"
+        + _table3(rows, ("Шахтёр", "Нанято", "Доход"))
+        + f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
+        f"Доход шахты: {fmt_rate(income_per_hour(m))} в час.</b></p>"
     )
 
 
@@ -414,22 +580,31 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     rows = [
         ("Шахтёр", t["name"]),
         ("Нанято", f"{have}/{t['max']}"),
-        (f"{_income()} Доход без кирки", f"{fmt(t['income'])} в час"),
+        (f"{_income()} Доход без кирки", f"{fmt_rate(t['income'])} в час"),
         (f"{_pick()} Без кирки", str(bare(m, i))),
         (f"{_pick()} С кирками", eq_text),
-        (f"{_income()} Доход всех этого уровня", f"{fmt(miner_income(m, i))} в час"),
+        (f"{_income()} Доход всех этого уровня", f"{fmt_rate(miner_income(m, i))} в час"),
     ]
 
-    button = ""
+    buttons = ""
     if have >= t["max"]:
         info = "Все места для этого уровня заняты. Нанимай шахтёров других уровней."
     else:
-        rows.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
+        price = miner_price(m, i)
+        rows.append((f"{_coin()} Цена найма", fmt(price)))
+        rows.append(("Окупится за", f"{fmt_dur(price / t['income'] * 3600)} работы"))
         info = (
-            f"Новый {t['name']} принесёт ещё {fmt(t['income'])} монет в час "
+            f"Новый {t['name']} принесёт ещё {fmt_rate(t['income'])} монет в час "
             "без кирки. Каждый следующий этого уровня стоит дороже."
         )
-        button = _button(f"mine:buy_miner:{i}", "Нанять")
+        buttons = _button(f"mine:buy_miner:{i}:1", f"Нанять · {fmt(price)}")
+        coins = user.get("coins", 0)
+        can = max_affordable_hire(m, i, coins)
+        if can >= 2:
+            buttons += _button(
+                f"mine:buy_miner:{i}:0",
+                f"Нанять максимум ({can}) · {fmt(hire_cost(m, i, can))}",
+            )
 
     return (
         f"{_image(with_image)}"
@@ -437,7 +612,7 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
         f"<blockquote><i>{t['desc']}</i></blockquote>"
         + _table(rows)
         + f"<p><b>{_info()} {info}</b></p>"
-        + button
+        + buttons
     )
 
 
@@ -455,15 +630,14 @@ def give_html(user_id: int, i: int, with_image: bool = False) -> str:
     elif not free:
         info = "Свободных кирок нет. Купи их в разделе «Кирки»."
     else:
-        info = f"Без кирки: {bare(m, i)}. Выбери кирку внизу, она достанется одному шахтёру."
+        info = (
+            f"Без кирки: {bare(m, i)}. Нажми на кирку, чтобы выдать одну, "
+            "или «Все», чтобы выдать сколько получится."
+        )
 
     table = (
         _table(
-            [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
-                 f"{c} шт.")
-                for p, c in free
-            ],
+            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.") for p, c in free],
             head=("Свободная кирка", "Сколько"),
         )
         if free else ""
@@ -483,17 +657,15 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
 
     table = (
         _table(
-            [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
-                 f"{c} шт.")
-                for p, c in sorted(eq.items())
-            ],
+            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.")
+             for p, c in sorted(eq.items())],
             head=("Надетая кирка", "Сколько"),
         )
         if eq else ""
     )
     info = (
-        "Выбери кирку внизу, она вернётся на склад кирок."
+        "Нажми на кирку, чтобы снять одну, или «Все», чтобы снять все такие. "
+        "Снятые кирки вернутся в запас."
         if eq else "У шахтёров этого уровня нет кирок."
     )
     return (
@@ -527,6 +699,7 @@ def mine_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn("👷 Шахтёры", "mine:miners")],
+            [_btn("Авто-выдача кирок", "mine:auto"), _btn("Обновить", "mine:open")],
             _back_row("menu:back"),
         ]
     )
@@ -534,6 +707,7 @@ def mine_kb(user_id: int) -> InlineKeyboardMarkup:
 
 def picks_kb(user_id: int) -> InlineKeyboardMarkup:
     rows = _pairs([_btn(f"{p['icon']} {p['name']}", f"mine:pick:{i}") for i, p in enumerate(PICKAXES)])
+    rows.append([_btn("Авто-выдача кирок", "mine:auto")])
     rows.append(_back_row("mine:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -565,14 +739,16 @@ def _miner_card_kb(i: int):
 def _give_kb(i: int):
     def kb(user_id: int) -> InlineKeyboardMarkup:
         _, m = load(user_id)
-        buttons = []
+        rows = []
         if bare(m, i) > 0:
-            buttons = [
-                _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({picks_free(m, p)})",
-                     f"mine:give:{i}:{p}")
-                for p in range(len(PICKAXES)) if picks_free(m, p) > 0
-            ]
-        rows = _pairs(buttons)
+            for p in range(len(PICKAXES)):
+                free = picks_free(m, p)
+                if free > 0:
+                    rows.append([
+                        _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({free})",
+                             f"mine:give:{i}:{p}:1"),
+                        _btn("Все", f"mine:give:{i}:{p}:0"),
+                    ])
         rows.append(_back_row(f"mine:miner:{i}"))
         return InlineKeyboardMarkup(inline_keyboard=rows)
     return kb
@@ -581,13 +757,17 @@ def _give_kb(i: int):
 def _take_kb(i: int):
     def kb(user_id: int) -> InlineKeyboardMarkup:
         _, m = load(user_id)
-        rows = _pairs(
+        eq = sorted(eq_of(m, i).items())
+        rows = [
             [
                 _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({c})",
-                     f"mine:take:{i}:{p}")
-                for p, c in sorted(eq_of(m, i).items())
+                     f"mine:take:{i}:{p}:1"),
+                _btn("Все", f"mine:take:{i}:{p}:0"),
             ]
-        )
+            for p, c in eq
+        ]
+        if len(eq) > 1:
+            rows.append([_btn("Снять все кирки", f"mine:takeall:{i}")])
         rows.append(_back_row(f"mine:miner:{i}"))
         return InlineKeyboardMarkup(inline_keyboard=rows)
     return kb
@@ -676,6 +856,12 @@ def _valid(callback: CallbackQuery, *sizes: int) -> list[int] | None:
     return nums
 
 
+def _count(nums: list[int], pos: int, default: int = 1) -> int | None:
+    """Количество из callback_data (0 = «максимум»). None, если число кривое."""
+    n = nums[pos] if len(nums) > pos else default
+    return n if 0 <= n <= MAX_BULK else None
+
+
 # ---------- Хендлеры ----------
 
 @router.callback_query(F.data.in_({"menu:mine", "mine:open"}))
@@ -722,6 +908,14 @@ async def on_miner_card(callback: CallbackQuery):
         await _show(callback, f"mine_miner_{nums[0]}")
 
 
+def _start_run(m: dict) -> None:
+    now = time.time()
+    m["run_start"] = now
+    m["run_end"] = now + RUN_HOURS * 3600
+    m["ts"] = now
+    m["runs"] = m.get("runs", 0) + 1
+
+
 @router.callback_query(F.data == "mine:start")
 async def on_start(callback: CallbackQuery):
     user = await _require_user(callback)
@@ -737,12 +931,36 @@ async def on_start(callback: CallbackQuery):
         await callback.answer("В шахте нет ни одного шахтёра.", show_alert=True)
         return
 
-    now = time.time()
-    m["run_start"] = now
-    m["run_end"] = now + RUN_HOURS * 3600
-    m["ts"] = now
+    _start_run(m)
     D.save_users()
     await callback.answer(f"Шахта запущена на {RUN_HOURS} ч!")
+    await _show(callback, "mine")
+
+
+@router.callback_query(F.data == "mine:restart")
+async def on_restart(callback: CallbackQuery):
+    """Забрать добычу со склада и сразу запустить новую смену."""
+    user = await _require_user(callback)
+    if user is None:
+        return
+    m = get_mine(user)
+    settle(m)
+
+    if is_running(m):
+        await callback.answer("Шахта уже работает.", show_alert=True)
+        return
+    if total_miners(m) < 1:
+        await callback.answer("В шахте нет ни одного шахтёра.", show_alert=True)
+        return
+
+    gain = int(m["stored"])
+    m["stored"] -= gain
+    user["coins"] += gain
+    _start_run(m)
+    D.save_users()
+    await callback.answer(
+        f"Собрано монет: {fmt(gain)}. Шахта запущена на {RUN_HOURS} ч!"
+    )
     await _show(callback, "mine")
 
 
@@ -800,14 +1018,23 @@ async def on_buy_pick(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
-    nums = _ints(callback)
-    if not nums or len(nums) != 2 or not 0 <= nums[0] < len(PICKAXES) or not 1 <= nums[1] <= 10:
+    nums = _valid(callback, len(PICKAXES))
+    n = _count(nums, 1) if nums else None
+    if nums is None or n is None:
         await callback.answer()
         return
-    i, n = nums
+    i = nums[0]
 
     m = get_mine(user)
     p = PICKAXES[i]
+    if n == 0:  # «максимум»: сколько хватает монет
+        n = min(user["coins"] // p["price"], MAX_BULK)
+        if n < 1:
+            await callback.answer(
+                f"Не хватает монет: {fmt(p['price'] - user['coins'])}", show_alert=True
+            )
+            return
+
     cost = p["price"] * n
     if user["coins"] < cost:
         await callback.answer(
@@ -822,13 +1049,14 @@ async def on_buy_pick(callback: CallbackQuery):
     await _show(callback, f"mine_pick_{i}")
 
 
-@router.callback_query(F.data.regexp(r"^mine:buy_miner:\d+$"))
+@router.callback_query(F.data.regexp(r"^mine:buy_miner:\d+(:\d+)?$"))
 async def on_buy_miner(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
     nums = _valid(callback, len(MINERS))
-    if not nums:
+    n = _count(nums, 1) if nums else None
+    if nums is None or n is None:
         await callback.answer()
         return
     i = nums[0]
@@ -841,7 +1069,17 @@ async def on_buy_miner(callback: CallbackQuery):
         await callback.answer("Лимит шахтёров этого уровня достигнут.", show_alert=True)
         return
 
-    price = miner_price(m, i)
+    if n == 0:  # «максимум»
+        n = max_affordable_hire(m, i, user["coins"])
+        if n < 1:
+            await callback.answer(
+                f"Не хватает монет: {fmt(miner_price(m, i) - user['coins'])}",
+                show_alert=True,
+            )
+            return
+    n = min(n, t["max"] - owned(m, i))
+
+    price = hire_cost(m, i, n)
     if user["coins"] < price:
         await callback.answer(
             f"Не хватает монет: {fmt(price - user['coins'])}", show_alert=True
@@ -849,13 +1087,38 @@ async def on_buy_miner(callback: CallbackQuery):
         return
 
     user["coins"] -= price
-    m["miners"][str(i)] = owned(m, i) + 1
+    m["miners"][str(i)] = owned(m, i) + n
     D.save_users()
-    await callback.answer(f"Нанят: {t['name']}! Теперь их {owned(m, i)}.")
+    await callback.answer(f"Нанят: {t['name']} ×{n}! Теперь их {owned(m, i)}.")
     await _show(callback, f"mine_miner_{i}")
 
 
 # --- Выдать / снять кирку ---
+
+@router.callback_query(F.data == "mine:auto")
+async def on_auto(callback: CallbackQuery):
+    """Раздать все кирки оптимально: лучшие лучшим шахтёрам."""
+    user = await _require_user(callback)
+    if user is None:
+        return
+    m = get_mine(user)
+    settle(m)  # доход меняется: сначала фиксируем добычу по старому
+
+    if not any(picks_owned(m, p) for p in range(len(PICKAXES))):
+        await callback.answer("У тебя пока нет кирок. Купи их в разделе «Кирки».", show_alert=True)
+        return
+
+    before = income_per_hour(m)
+    auto_equip(m)
+    after = income_per_hour(m)
+    D.save_users()
+    if after > before:
+        text = f"Кирки розданы. Доход: {fmt_rate(before)} → {fmt_rate(after)} в час"
+    else:
+        text = "Кирки уже раздаются лучшим образом."
+    await callback.answer(text)
+    await _show(callback, "mine")
+
 
 @router.callback_query(F.data.regexp(r"^mine:give:\d+$"))
 async def on_give_open(callback: CallbackQuery):
@@ -877,16 +1140,17 @@ async def on_take_open(callback: CallbackQuery):
         await _show(callback, f"mine_take_{nums[0]}")
 
 
-@router.callback_query(F.data.regexp(r"^mine:give:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^mine:give:\d+:\d+(:\d+)?$"))
 async def on_give(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
     nums = _valid(callback, len(MINERS), len(PICKAXES))
-    if not nums:
+    n = _count(nums, 2) if nums else None
+    if nums is None or n is None:
         await callback.answer()
         return
-    i, p = nums
+    i, p = nums[0], nums[1]
 
     m = get_mine(user)
     settle(m)  # доход меняется: сначала фиксируем добычу по старому
@@ -900,35 +1164,65 @@ async def on_give(callback: CallbackQuery):
         await callback.answer("Свободных кирок такого вида нет.", show_alert=True)
         return
 
+    limit = min(bare(m, i), picks_free(m, p))
+    k = limit if n == 0 else min(n, limit)
+
     slot = m["equip"].setdefault(str(i), {})
-    slot[str(p)] = int(slot.get(str(p), 0)) + 1
+    slot[str(p)] = int(slot.get(str(p), 0)) + k
     D.save_users()
-    await callback.answer(f"{MINERS[i]['name']} получил: {PICKAXES[p]['name']}")
+    await callback.answer(f"{MINERS[i]['name']} получил: {PICKAXES[p]['name']} ×{k}")
     await _show(callback, f"mine_give_{i}")
 
 
-@router.callback_query(F.data.regexp(r"^mine:take:\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^mine:take:\d+:\d+(:\d+)?$"))
 async def on_take(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
     nums = _valid(callback, len(MINERS), len(PICKAXES))
-    if not nums:
+    n = _count(nums, 2) if nums else None
+    if nums is None or n is None:
         await callback.answer()
         return
-    i, p = nums
+    i, p = nums[0], nums[1]
 
     m = get_mine(user)
     settle(m)
 
     slot = m["equip"].get(str(i), {})
-    if int(slot.get(str(p), 0)) <= 0:
+    have = int(slot.get(str(p), 0))
+    if have <= 0:
         await callback.answer("Такой кирки у этих шахтёров нет.", show_alert=True)
         return
 
-    slot[str(p)] -= 1
+    k = have if n == 0 else min(n, have)
+    slot[str(p)] = have - k
     if slot[str(p)] <= 0:
         del slot[str(p)]
     D.save_users()
-    await callback.answer(f"Снято: {PICKAXES[p]['name']}. Она вернулась в запас.")
+    await callback.answer(f"Снято: {PICKAXES[p]['name']} ×{k}. Она вернулась в запас.")
+    await _show(callback, f"mine_take_{i}")
+
+
+@router.callback_query(F.data.regexp(r"^mine:takeall:\d+$"))
+async def on_take_all(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    nums = _valid(callback, len(MINERS))
+    if not nums:
+        await callback.answer()
+        return
+    i = nums[0]
+
+    m = get_mine(user)
+    settle(m)
+
+    if equipped_on(m, i) <= 0:
+        await callback.answer("У этих шахтёров нет кирок.", show_alert=True)
+        return
+
+    m["equip"][str(i)] = {}
+    D.save_users()
+    await callback.answer("Все кирки сняты и вернулись в запас.")
     await _show(callback, f"mine_take_{i}")
