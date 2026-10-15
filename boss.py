@@ -47,7 +47,7 @@ def setup(**deps) -> None:
     """Передаём модулю функции и данные из main.py.
 
     Нужны: get_user, save_users, send_rich_card, custom_emoji, COIN_EMOJI,
-    INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats, pet_images.
+    INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats, pet_images, STAT_EMOJI.
     """
     for name, value in deps.items():
         setattr(D, name, value)
@@ -63,7 +63,7 @@ BOSS_STORY = (
 )
 BOSS_SHORT = "Ксарвог"
 BOSS_EPITHET = "Пожиратель Миров"
-BOSS_ICON = "👹"
+BOSS_EMOJI = ("5228962845672096235", "😈")  # кастомный эмодзи босса
 
 BOSS_MAX_HP = 100_000
 BOSS_DEF = 20            # обычный урон делится на (1 + защита/100); «пробивающие» навыки её игнорируют
@@ -382,6 +382,15 @@ def _button(data: str, label: str, emoji: str = "", style: str = "success") -> s
     )
 
 
+def _boss_icon() -> str:
+    return D.custom_emoji(BOSS_EMOJI)
+
+
+def _hp_icon() -> str:
+    """Тот же эмодзи здоровья, что и в характеристиках питомца."""
+    return D.custom_emoji(D.STAT_EMOJI["hp"])
+
+
 def _info() -> str:
     return D.custom_emoji(D.INFO_EMOJI)
 
@@ -454,7 +463,7 @@ def feed_push(kind: str, uid: str, name: str, **extra) -> None:
 def _head(sub: str = "") -> str:
     """Шапка как у карточек питомцев: имя · статус, пустая строка, подзаголовок."""
     return (
-        f"<p><b>{escape(BOSS_SHORT.upper())} · МИРОВОЙ БОСС</b>"
+        f"<p><b>{_boss_icon()} {escape(BOSS_SHORT.upper())} · МИРОВОЙ БОСС</b>"
         + (f"<br>&nbsp;<br>{sub}" if sub else "")
         + "</p>"
     )
@@ -493,7 +502,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         )
     else:
         sub = (
-            f"<b>❤️ {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b><br>"
+            f"<b>{_hp_icon()} {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b><br>"
             f"<b>{hp_bar()} {hp_ratio() * 100:.1f}%</b>"
         )
 
@@ -515,7 +524,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         )
         pet_part = (
             f"<p><b>{escape(pet_name.upper())} · ТВОЙ ПИТОМЕЦ</b><br>&nbsp;<br>"
-            f"<b>❤️ {int(hp)} / {mx}</b><br>"
+            f"<b>{_hp_icon()} {int(hp)} / {mx}</b><br>"
             f"<b>{bar(hp / mx)} {hp / mx * 100:.0f}%</b>{state}</p>"
         )
         stats += [
@@ -545,7 +554,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
                     crit = " ⚡" if e["crit"] else ""
                     out = " · без сил" if e["hp"] <= 0 else ""
                     lines.append(
-                        f"{BOSS_ICON} Босс ударил {pet} · "
+                        f"{_boss_icon()} Босс ударил {pet} · "
                         f"<b>−{fmt(e['dmg'])}</b> HP{crit}{out}"
                     )
         feed = "<blockquote>" + "<br>".join(lines) + "</blockquote>"
@@ -802,7 +811,7 @@ async def on_top(callback: CallbackQuery):
 async def _notify_rewards(bot, rewards: dict[str, dict[str, int]], killer: str) -> None:
     for uid, r in rewards.items():
         text = (
-            f"<b>{BOSS_ICON} {escape(BOSS_SHORT)} повержен!</b>\n\n"
+            f"<b>{_boss_icon()} {escape(BOSS_SHORT)} повержен!</b>\n\n"
             f"<i>Последний удар нанёс {escape(killer)}.</i>\n"
             f"<b>Твоя награда:</b> {_coin()} {fmt(r['coins'])}  "
             f"🥩 {r['meat']}  🥭 {r['fruit']}"
