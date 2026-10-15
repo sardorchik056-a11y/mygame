@@ -23,6 +23,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+import boss
 import mine
 
 BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
@@ -382,6 +383,7 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
+        f"{boss.skills_block(pet_key)}"
         f"{buttons}"
     )
 
@@ -436,6 +438,7 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
+        + boss.skills_block(user["pet"])
         # Кнопка прямо в теле сообщения (Bot API 10.3); на макс. уровне её нет
         + (
             ""
@@ -514,6 +517,13 @@ def menu_kb() -> InlineKeyboardMarkup:
                     callback_data="menu:mine",
                     style=ButtonStyle.PRIMARY,
                     icon_custom_emoji_id=mine.MINE_EMOJI[0],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👹 Босс",
+                    callback_data="menu:boss",
+                    style=ButtonStyle.DANGER,
                 )
             ],
         ]
@@ -628,6 +638,7 @@ IMG_TARGETS: dict[str, str] = {
     "menu": "Меню",
     "stock": "Запасы",
     **mine.IMG_TARGETS,
+    **boss.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -776,6 +787,10 @@ async def img_receive(message: Message, state: FSMContext):
         await mine.send_preview(
             message.bot, message.chat.id, message.from_user.id, pet_key
         )
+    elif pet_key in boss.IMG_TARGETS:
+        await boss.send_preview(
+            message.bot, message.chat.id, message.from_user.id, pet_key
+        )
     elif pet_key == "stock":
         await send_rich_card(
             message.bot,
@@ -807,6 +822,20 @@ mine.setup(
     BACK_EMOJI_ID=BACK_EMOJI_ID,
 )
 dp.include_router(mine.router)
+
+# Раздел «Босс» живёт в boss.py
+boss.setup(
+    get_user=get_user,
+    save_users=save_users,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    COIN_EMOJI=COIN_EMOJI,
+    INFO_EMOJI=INFO_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    PETS=PETS,
+    pet_stats=pet_stats,
+)
+dp.include_router(boss.router)
 
 
 # ---------- Хендлеры ----------
