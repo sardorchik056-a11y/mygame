@@ -311,9 +311,42 @@ def skills_block(pet_key: str) -> str:
 
 # ---------- Экраны ----------
 
+# Результат последней атаки каждого игрока (показывается в окне босса)
+LAST_RESULT: dict[str, str] = {}
+
+
 def boss_html(user_id: int, with_image: bool = False) -> str:
+    """Первое окно: описание босса, правила и награды. Здоровья босса здесь нет."""
+    tick()
+    rules = (
+        "Босс один на всех игроков. Бей его навыками своего питомца: "
+        "чем больше урона нанесёшь, тем больше получишь, когда он падёт. "
+        f"После победы босс возрождается через {RESPAWN_MIN} мин."
+    )
+    rows = [
+        (f"{_coin()} Монеты", fmt(REWARD_COINS)),
+        ("🥩 Мясо", fmt(REWARD_MEAT)),
+        ("🥭 Фрукты", fmt(REWARD_FRUIT)),
+        ("🎯 Бонус за последний удар",
+         f"{fmt(LAST_HIT_COINS)} монет, {LAST_HIT_MEAT} мяса, {LAST_HIT_FRUIT} фруктов"),
+    ]
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{BOSS_ICON} {escape(BOSS_NAME.upper())}</b></p>"
+        f"<blockquote><i>{escape(BOSS_STORY)}</i></blockquote>"
+        f"<p><b>{_info()} {escape(rules)}</b></p>"
+        "<p><b>Награда за победу</b></p>"
+        + _table(rows, head=("Что", "Сколько"))
+        + "<p><i>Награда делится между всеми бойцами по доле нанесённого урона.</i></p>"
+        + _button("boss:skills", "Атаковать", "⚔️", "danger")
+    )
+
+
+def skills_html(user_id: int, with_image: bool = False) -> str:
+    """Окно боя: здоровье босса, навыки питомца (кнопки под сообщением)."""
     tick()
     uid = str(user_id)
+    user = D.get_user(user_id)
     mine_dmg = int(boss["dmg"].get(uid, 0))
     place = place_of(uid)
 
@@ -326,10 +359,7 @@ def boss_html(user_id: int, with_image: bool = False) -> str:
         )
     else:
         state = "Жив"
-        status = (
-            "Бей навыками своего питомца. Здоровье босса общее, "
-            "чем больше урона нанесёшь, тем больше награда."
-        )
+        status = "Выбери навык внизу и бей. Здоровье босса общее для всех игроков."
 
     rows = [
         (f"{BOSS_ICON} Состояние", state),
@@ -338,54 +368,43 @@ def boss_html(user_id: int, with_image: bool = False) -> str:
         ("👥 Бойцов", str(len(boss["dmg"]))),
         ("⚔️ Твой урон", fmt(mine_dmg)),
         ("🏅 Твоё место", str(place) if place else "—"),
-        ("☠️ Побед над боссом", str(boss["kills"])),
     ]
+
+    skills_part = ""
+    if user is not None:
+        skills = skills_of(user)
+        srows = []
+        for i, sk in enumerate(skills):
+            left = cd_left(user, i)
+            srows.append(
+                (f"{sk['icon']} {escape(sk['name'])}",
+                 "готов" if left <= 0 else f"через {fmt_dur(left)}")
+            )
+        details = "".join(
+            f"<p><b>{sk['icon']} {escape(sk['name'])}</b> "
+            f"· {sk['hits']} уд. × {sk['mult']:g}"
+            f"{', пробивает защиту' if sk.get('pierce') else ''}"
+            f"{', +шанс крита' if sk.get('crit') else ''}"
+            f"{', +% здоровья босса' if sk.get('pct') else ''}"
+            f"<br><i>{escape(sk['desc'])}</i> Откат {fmt_dur(sk['cd'])}.</p>"
+            for sk in skills
+        )
+        skills_part = (
+            "<p><b>Навыки питомца</b></p>"
+            + _table(srows, head=("Навык", "Готовность"))
+            + details
+        )
+
+    last = LAST_RESULT.get(uid)
+    last_part = f"<p><b>⚔️ {escape(last)}</b></p>" if last else ""
+
     return (
         f"{_image(with_image)}"
         f"<p><b>{BOSS_ICON} {escape(BOSS_NAME.upper())}</b></p>"
-        f"<blockquote><i>{escape(BOSS_STORY)}</i></blockquote>"
         + _table(rows)
+        + last_part
+        + skills_part
         + f"<p><b>{_info()} {status}</b></p>"
-        + _button("boss:skills", "Атаковать", "⚔️", "danger")
-    )
-
-
-def skills_html(user_id: int, with_image: bool = False) -> str:
-    tick()
-    user = D.get_user(user_id)
-    if user is None:
-        return f"{_image(with_image)}<p><b>Сначала выбери питомца: /start</b></p>"
-
-    skills = skills_of(user)
-    rows = []
-    for i, s in enumerate(skills):
-        left = cd_left(user, i)
-        rows.append(
-            (f"{s['icon']} {escape(s['name'])}",
-             "готов" if left <= 0 else f"через {fmt_dur(left)}")
-        )
-
-    details = "".join(
-        f"<p><b>{s['icon']} {escape(s['name'])}</b> "
-        f"· {s['hits']} уд. × {s['mult']:g}"
-        f"{', пробивает защиту' if s.get('pierce') else ''}"
-        f"{', +шанс крита' if s.get('crit') else ''}"
-        f"{', +% здоровья босса' if s.get('pct') else ''}"
-        f"<br><i>{escape(s['desc'])}</i> Откат {fmt_dur(s['cd'])}.</p>"
-        for s in skills
-    )
-
-    if is_dead():
-        info = "Босс повержен, дождись возрождения."
-    else:
-        info = f"Босс: {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)} здоровья. Выбери навык внизу."
-
-    return (
-        f"{_image(with_image)}"
-        f"<p><b>⚔️ НАВЫКИ ПИТОМЦА</b></p>"
-        + _table(rows, head=("Навык", "Готовность"))
-        + details
-        + f"<p><b>{_info()} {info}</b></p>"
     )
 
 
@@ -438,23 +457,24 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def boss_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("🏆 Топ игроков", "boss:top"), _btn("🔄 Обновить", "boss:open")],
+            [_btn("🏆 Топ игроков", "boss:top")],
             _back_row("menu:back"),
         ]
     )
 
 
 def skills_kb(user_id: int) -> InlineKeyboardMarkup:
-    user = D.get_user(user_id)
     rows = []
+    user = D.get_user(user_id)
     if user is not None:
-        for i, s in enumerate(skills_of(user)):
+        for i, sk in enumerate(skills_of(user)):
             left = cd_left(user, i)
-            label = f"{s['icon']} {s['name']}" + (f" · {fmt_dur(left)}" if left > 0 else "")
+            label = f"{sk['icon']} {sk['name']}" + (f" · {fmt_dur(left)}" if left > 0 else "")
             rows.append(
                 [_btn(label, f"boss:hit:{i}",
                       style=ButtonStyle.DANGER if left <= 0 else ButtonStyle.PRIMARY)]
             )
+    rows.append([_btn("🏆 Топ игроков", "boss:top"), _btn("🔄 Обновить", "boss:skills")])
     rows.append(_back_row("boss:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -586,6 +606,7 @@ async def on_hit(callback: CallbackQuery):
     text = f"{skill['name']}: {fmt(dealt)} урона"
     if crits:
         text += f" (критов: {crits})"
+    LAST_RESULT[uid] = text
 
     if boss["hp"] <= 0:
         boss["hp"] = 0
