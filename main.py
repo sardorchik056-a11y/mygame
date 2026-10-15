@@ -527,9 +527,10 @@ def menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="👹 Босс",
+                    text="Босс",
                     callback_data="menu:boss",
                     style=ButtonStyle.DANGER,
+                    icon_custom_emoji_id=boss.BOSS_EMOJI[0],
                 )
             ],
         ]
@@ -842,6 +843,7 @@ boss.setup(
     PETS=PETS,
     pet_stats=pet_stats,
     pet_images=pet_images,
+    STAT_EMOJI=STAT_EMOJI,
 )
 dp.include_router(boss.router)
 
