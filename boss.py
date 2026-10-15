@@ -398,28 +398,18 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
     ]
 
     if FEED:
-        body = ""
+        lines = []
         for e in FEED:
             who = "Ты" if e["uid"] == uid else escape(e["name"])
             if e["kill"]:
-                what, dmg = "☠️ добил босса", f"{fmt(e['dmg'])}"
+                lines.append(f"☠️ <b>{who}</b> добил босса")
             else:
-                what = f"{e['icon']} {escape(e['skill'])}"
-                dmg = fmt(e["dmg"]) + (" ⚡" if e["crit"] else "")
-            body += (
-                "<tr>"
-                f"<td><b>{who}</b></td>"
-                f'<td align="center"><b>{what}</b></td>'
-                f'<td align="center"><b>{dmg}</b></td>'
-                "</tr>"
-            )
-        feed = (
-            "<table bordered striped>"
-            "<tr><th><b>Боец</b></th><th><b>Навык</b></th><th><b>Урон</b></th></tr>"
-            f"{body}"
-            "</table>"
-            "<p><i>⚡ крит. Лента обновляется сама.</i></p>"
-        )
+                crit = " ⚡" if e["crit"] else ""
+                lines.append(
+                    f"{e['icon']} <b>{who}</b> · {escape(e['skill'])} · "
+                    f"<b>{fmt(e['dmg'])}</b> урона{crit}"
+                )
+        feed = "<p>" + "<br>".join(lines) + "</p>"
     else:
         feed = "<p><i>Пока тихо. Нанеси первый удар.</i></p>"
 
@@ -427,7 +417,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         f"{_image(with_image)}"
         + _head(sub)
         + _table(stats)
-        + "<p><b>Бой идёт</b></p>"
+        + "<p><b>Лента боя</b></p>"
         + feed
     )
 
@@ -714,7 +704,6 @@ async def on_hit(callback: CallbackQuery):
 
     # Своё окно обновляем сразу на месте, окна остальных бойцов через общий цикл
     _watch(callback.from_user.id, callback.message.chat.id, callback.message.message_id)
-    if not await _edit_battle(callback.bot, callback.from_user.id,
-                              VIEWERS[callback.from_user.id]):
-        await _show(callback, "boss_skills")
+    await _edit_battle(callback.bot, callback.from_user.id,
+                       VIEWERS[callback.from_user.id])
     _mark_dirty(callback.bot)
