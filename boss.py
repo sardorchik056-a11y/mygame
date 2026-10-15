@@ -84,8 +84,8 @@ TOP_SIZE = 10
 
 # «Лайв»-окно боя
 FEED_SIZE = 8         # сколько последних ударов показывать в ленте
-LIVE_INTERVAL = 2.0   # не чаще раза в столько секунд обновляем окна всех бойцов
-VIEW_TTL = 15 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
+LIVE_INTERVAL = 300   # окна остальных бойцов обновляются не чаще раза в 5 минут
+VIEW_TTL = 30 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
 
 # Врождённые навыки питомцев (ключи питомцев как в PETS в main.py).
 # mult  — множитель атаки за один удар
@@ -409,9 +409,9 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
                     f"{e['icon']} <b>{who}</b> · {escape(e['skill'])} · "
                     f"<b>{fmt(e['dmg'])}</b> урона{crit}"
                 )
-        feed = "<p>" + "<br>".join(lines) + "</p>"
+        feed = "<blockquote>" + "<br>".join(lines) + "</blockquote>"
     else:
-        feed = "<p><i>Пока тихо. Нанеси первый удар.</i></p>"
+        feed = "<blockquote><i>Пока тихо. Нанеси первый удар.</i></blockquote>"
 
     return (
         f"{_image(with_image)}"
@@ -530,6 +530,7 @@ async def _require_user(callback: CallbackQuery) -> dict | None:
 # {user_id: {"chat": id, "msg": id, "ts": время последнего действия}}
 VIEWERS: dict[int, dict] = {}
 _dirty = False
+_last_push = 0.0
 _task: asyncio.Task | None = None
 
 
@@ -564,19 +565,20 @@ async def _edit_battle(bot, user_id: int, v: dict) -> bool:
 
 
 async def _live_loop(bot) -> None:
-    """Раз в LIVE_INTERVAL секунд обновляет окна всех, кто сейчас в бою."""
-    global _dirty
+    """Обновляет окна всех, кто в бою, но не чаще раза в LIVE_INTERVAL секунд."""
+    global _dirty, _last_push
     while True:
-        await asyncio.sleep(LIVE_INTERVAL)
+        await asyncio.sleep(5)
         now = time.time()
         for uid, v in list(VIEWERS.items()):
             if now - v["ts"] > VIEW_TTL:
                 VIEWERS.pop(uid, None)
         if not VIEWERS:
             return
-        if not _dirty:
+        if not _dirty or now - _last_push < LIVE_INTERVAL:
             continue
         _dirty = False
+        _last_push = now
         for uid, v in list(VIEWERS.items()):
             if not await _edit_battle(bot, uid, v):
                 VIEWERS.pop(uid, None)
