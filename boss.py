@@ -82,8 +82,19 @@ LAST_HIT_FRUIT = 20
 
 TOP_SIZE = 10
 
+# Ответные удары босса по питомцу
+BOSS_HIT_PCT = (0.07, 0.13)  # доля максимального HP питомца за удар босса
+BOSS_CRIT_CHANCE = 0.10      # шанс, что удар босса критический
+BOSS_CRIT_MULT = 1.5
+ARMOR_K = 200                # смягчение урона защитой: защита / (защита + ARMOR_K)
+ARMOR_MAX = 0.5              # защита режет урон не больше, чем на 50%
+DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
+DODGE_MAX = 0.4              # уворот не чаще 40%
+REGEN_PCT_PER_MIN = 5        # питомец восстанавливает столько % HP в минуту
+MIN_FIGHT_PCT = 0.25         # без сил (HP ниже 25%) в бой не пустят
+
 # «Лайв»-окно боя
-FEED_SIZE = 8         # сколько последних ударов показывать в ленте
+FEED_SIZE = 10        # сколько последних событий показывать в ленте
 LIVE_INTERVAL = 300   # окна остальных бойцов обновляются не чаще раза в 5 минут
 VIEW_TTL = 30 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
 
@@ -199,7 +210,7 @@ def fmt_dur(seconds: float) -> str:
     if hours:
         return f"{hours} ч {mins} мин"
     if mins:
-        return f"{mins} мин {secs} сек"
+        return f"{mins} мин {secs} сек" if secs else f"{mins} мин"
     return f"{secs} сек"
 
 
@@ -207,10 +218,15 @@ def hp_ratio() -> float:
     return max(0.0, boss["hp"] / BOSS_MAX_HP)
 
 
-def hp_bar(width: int = 10) -> str:
+def bar(ratio: float, width: int = 10) -> str:
     """Шкала в скобках: [▰▰▰▰▰▰▱▱▱▱]."""
-    filled = 0 if boss["hp"] <= 0 else max(1, round(hp_ratio() * width))
+    ratio = max(0.0, min(1.0, ratio))
+    filled = 0 if ratio <= 0 else max(1, round(ratio * width))
     return "[" + "▰" * filled + "▱" * (width - filled) + "]"
+
+
+def hp_bar(width: int = 10) -> str:
+    return bar(hp_ratio(), width)
 
 
 def skills_of(user: dict) -> list[dict]:
@@ -220,6 +236,64 @@ def skills_of(user: dict) -> list[dict]:
 def cd_left(user: dict, i: int) -> float:
     last = user.get("boss_cd", {}).get(str(i), 0)
     return max(0.0, last + skills_of(user)[i]["cd"] - time.time())
+
+
+# ---------- Питомец в бою: здоровье, скорость, ответные удары босса ----------
+
+def _stats_of(user: dict) -> dict:
+    return D.pet_stats(D.PETS[user["pet"]], user["level"])
+
+
+def pet_max_hp(user: dict) -> int:
+    return max(1, _stats_of(user)["hp"])
+
+
+def pet_hp(user: dict) -> float:
+    """Текущее здоровье питомца с учётом восстановления со временем."""
+    mx = pet_max_hp(user)
+    cur = user.get("boss_hp")
+    if cur is None:
+        return float(mx)
+    passed = max(0.0, time.time() - user.get("boss_hp_ts", time.time()))
+    return min(float(mx), cur + mx * REGEN_PCT_PER_MIN / 100 * passed / 60)
+
+
+def _set_pet_hp(user: dict, hp: float) -> None:
+    user["boss_hp"] = max(0.0, hp)
+    user["boss_hp_ts"] = time.time()
+
+
+def pet_ready_in(user: dict) -> float:
+    """Через сколько секунд питомец снова сможет драться (0, если уже может)."""
+    mx = pet_max_hp(user)
+    need = mx * MIN_FIGHT_PCT - pet_hp(user)
+    if need <= 0:
+        return 0.0
+    return need / (mx * REGEN_PCT_PER_MIN / 100 / 60)
+
+
+def dodge_chance(user: dict) -> float:
+    spd = _stats_of(user)["spd"]
+    return min(DODGE_MAX, spd / (spd + DODGE_K))
+
+
+def boss_strike(user: dict) -> dict:
+    """Босс отвечает на атаку: бьёт питомца. Скорость даёт шанс увернуться."""
+    hp = pet_hp(user)
+    if random.random() < dodge_chance(user):
+        _set_pet_hp(user, hp)
+        return {"dodge": True, "dmg": 0, "crit": False, "hp": hp}
+
+    df = _stats_of(user)["def"]
+    dmg = pet_max_hp(user) * random.uniform(*BOSS_HIT_PCT)
+    dmg *= 1 - min(ARMOR_MAX, df / (df + ARMOR_K))
+    crit = random.random() < BOSS_CRIT_CHANCE
+    if crit:
+        dmg *= BOSS_CRIT_MULT
+    dmg = max(1, round(dmg))
+    hp = max(0.0, hp - dmg)
+    _set_pet_hp(user, hp)
+    return {"dodge": False, "dmg": dmg, "crit": crit, "hp": hp}
 
 
 def roll_attack(user: dict, skill: dict) -> tuple[int, list[tuple[int, bool]]]:
@@ -320,13 +394,50 @@ def _image(with_image: bool) -> str:
     return '<img src="tg://photo?id=pet"/>' if with_image else ""
 
 
-def skills_block(pet_key: str) -> str:
-    """Таблица навыков питомца: для карточек питомцев в main.py."""
-    rows = [
-        (f"{s['icon']} {escape(s['name'])}", escape(s["desc"]))
-        for s in PET_SKILLS[pet_key]
-    ]
-    return "<p><b>Врождённые навыки</b></p>" + _table(rows, head=("Навык", "Описание"))
+def skill_note(sk: dict) -> str:
+    """Особенность навыка словами (пусто, если её нет)."""
+    notes = []
+    if sk.get("pierce"):
+        notes.append("пробивает защиту босса")
+    if sk.get("crit"):
+        notes.append(f"+{round(sk['crit'] * 100)}% к шансу крита")
+    if sk.get("pct"):
+        notes.append(f"+{round(sk['pct'] * 100)}% текущего здоровья босса")
+    return ", ".join(notes)
+
+
+def pet_skills_html(pet_key: str, with_image: bool = False) -> str:
+    """Отдельный экран навыков питомца (открывается кнопкой «Навыки» на карточке)."""
+    pet = D.PETS[pet_key]
+    skills = PET_SKILLS[pet_key]
+
+    rows = "".join(
+        "<tr>"
+        f"<td><b>{sk['icon']} {escape(sk['name'])}</b></td>"
+        f'<td align="center"><b>{sk["hits"]} × {sk["mult"]:g}</b></td>'
+        f'<td align="center"><b>{fmt_dur(sk["cd"])}</b></td>'
+        "</tr>"
+        for sk in skills
+    )
+    lines = []
+    for sk in skills:
+        note = skill_note(sk)
+        lines.append(
+            f"<b>{sk['icon']} {escape(sk['name'])}</b><br>"
+            f"<i>{escape(sk['desc'])}{(' Ещё: ' + note + '.') if note else ''}</i>"
+        )
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{escape(pet['name'].upper())} · НАВЫКИ</b>"
+        "<br>&nbsp;<br>"
+        "<b>Врождённые навыки для боя с боссом</b></p>"
+        "<table bordered striped>"
+        "<tr><th><b>Навык</b></th><th><b>Удары</b></th><th><b>Откат</b></th></tr>"
+        f"{rows}"
+        "</table>"
+        "<p><i>Удары: сколько раз бьёт × множитель атаки питомца.</i></p>"
+        "<blockquote>" + "<br>&nbsp;<br>".join(lines) + "</blockquote>"
+    )
 
 
 # ---------- Экраны ----------
@@ -335,12 +446,9 @@ def skills_block(pet_key: str) -> str:
 FEED: deque = deque(maxlen=FEED_SIZE)
 
 
-def feed_push(uid: str, name: str, skill: dict | None, dmg: int, crit: bool, kill: bool) -> None:
-    FEED.appendleft({
-        "uid": uid, "name": name, "dmg": dmg, "crit": crit, "kill": kill,
-        "icon": skill["icon"] if skill else "☠️",
-        "skill": skill["name"] if skill else "",
-    })
+def feed_push(kind: str, uid: str, name: str, **extra) -> None:
+    """kind: hit (удар игрока), strike (ответ босса), kill (босс повержен)."""
+    FEED.appendleft({"kind": kind, "uid": uid, "name": name, **extra})
 
 
 def _head(sub: str = "") -> str:
@@ -395,18 +503,51 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         ("Твоё место", str(place) if place else "—"),
     ]
 
+    pet_part = ""
+    user = D.get_user(user_id)
+    if user is not None:
+        pet_name = D.PETS[user["pet"]]["name"]
+        mx, hp = pet_max_hp(user), pet_hp(user)
+        spd = _stats_of(user)["spd"]
+        wait = pet_ready_in(user)
+        state = (
+            f"<br><i>Без сил, вернётся в бой через {fmt_dur(wait)}</i>" if wait > 0 else ""
+        )
+        pet_part = (
+            f"<p><b>{escape(pet_name.upper())} · ТВОЙ ПИТОМЕЦ</b><br>&nbsp;<br>"
+            f"<b>❤️ {int(hp)} / {mx}</b><br>"
+            f"<b>{bar(hp / mx)} {hp / mx * 100:.0f}%</b>{state}</p>"
+        )
+        stats += [
+            ("Скорость", str(spd)),
+            ("Уворот", f"{dodge_chance(user) * 100:.0f}%"),
+        ]
+
     if FEED:
         lines = []
         for e in FEED:
-            who = "Ты" if e["uid"] == uid else escape(e["name"])
-            if e["kill"]:
+            mine = e["uid"] == uid
+            who = "Ты" if mine else escape(e["name"])
+            if e["kind"] == "kill":
                 lines.append(f"☠️ <b>{who}</b> добил босса")
-            else:
+            elif e["kind"] == "hit":
                 crit = " ⚡" if e["crit"] else ""
                 lines.append(
                     f"{e['icon']} <b>{who}</b> · {escape(e['skill'])} · "
                     f"<b>{fmt(e['dmg'])}</b> урона{crit}"
                 )
+            else:  # strike: ответ босса
+                pet = "твоего питомца" if mine else f"питомца {escape(e['name'])}"
+                if e["dodge"]:
+                    owner = "Твой питомец" if mine else f"Питомец {escape(e['name'])}"
+                    lines.append(f"💨 {owner} увернулся от босса")
+                else:
+                    crit = " ⚡" if e["crit"] else ""
+                    out = " · без сил" if e["hp"] <= 0 else ""
+                    lines.append(
+                        f"{BOSS_ICON} Босс ударил {pet} · "
+                        f"<b>−{fmt(e['dmg'])}</b> HP{crit}{out}"
+                    )
         feed = "<blockquote>" + "<br>".join(lines) + "</blockquote>"
     else:
         feed = "<blockquote><i>Пока тихо. Нанеси первый удар.</i></blockquote>"
@@ -414,6 +555,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
     return (
         f"{_image(with_image)}"
         + _head(sub)
+        + pet_part
         + _table(stats)
         + "<p><b>Лента боя</b></p>"
         + feed
@@ -621,6 +763,34 @@ async def on_skills(callback: CallbackQuery):
     await _show(callback, "boss_skills")
 
 
+@router.callback_query(F.data.regexp(r"^pskills:(prof|sel:\w+)$"))
+async def on_pet_skills(callback: CallbackQuery):
+    """Кнопка «Навыки» на карточке питомца (выбор) или в профиле."""
+    parts = callback.data.split(":")
+    if parts[1] == "prof":
+        user = await _require_user(callback)
+        if user is None:
+            return
+        pet_key, back = user["pet"], "menu:pet"
+    else:
+        pet_key = parts[2]
+        if pet_key not in PET_SKILLS:
+            await callback.answer("Неизвестный питомец", show_alert=True)
+            return
+        back = f"pet:view:{pet_key}"
+
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logging.warning("Не удалось удалить сообщение: %s", e)
+    await D.send_rich_card(
+        callback.bot, callback.message.chat.id, pet_key,
+        lambda with_image: pet_skills_html(pet_key, with_image),
+        InlineKeyboardMarkup(inline_keyboard=[_back_row(back)]),
+    )
+
+
 @router.callback_query(F.data == "boss:top")
 async def on_top(callback: CallbackQuery):
     if await _require_user(callback) is None:
@@ -667,6 +837,15 @@ async def on_hit(callback: CallbackQuery):
         )
         return
 
+    wait = pet_ready_in(user)
+    if wait > 0:
+        await callback.answer(
+            f"{D.PETS[user['pet']]['name']} без сил. "
+            f"Вернётся в бой через {fmt_dur(wait)}.",
+            show_alert=True,
+        )
+        return
+
     left = cd_left(user, i)
     if left > 0:
         await callback.answer(
@@ -689,15 +868,27 @@ async def on_hit(callback: CallbackQuery):
     if crits:
         text += f" · крит ×{crits}" if len(hits) > 1 else " · КРИТ"
 
-    feed_push(uid, boss["names"][uid], skill, dealt, crits > 0, False)
+    name = boss["names"][uid]
+    feed_push("hit", uid, name, icon=skill["icon"], skill=skill["name"],
+              dmg=dealt, crit=crits > 0)
 
     if boss["hp"] <= 0:
         boss["hp"] = 0
-        feed_push(uid, boss["names"][uid], None, dealt, False, True)
+        feed_push("kill", uid, name)
         rewards = finish_boss(boss["names"][uid])
         await callback.answer(text + ". Босс повержен!", show_alert=True)
         asyncio.create_task(_notify_rewards(callback.bot, rewards, boss["names"][uid]))
     else:
+        # Босс жив: отвечает ударом по питомцу
+        strike = boss_strike(user)
+        feed_push("strike", uid, name, dmg=strike["dmg"], crit=strike["crit"],
+                  dodge=strike["dodge"], hp=strike["hp"])
+        if strike["dodge"]:
+            text += "\nПитомец увернулся"
+        else:
+            text += f"\nБосс ударил: −{strike['dmg']} HP"
+            if strike["hp"] <= 0:
+                text += ". Питомец без сил"
         D.save_users()
         save_boss()
         await callback.answer(text)
