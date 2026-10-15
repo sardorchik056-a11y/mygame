@@ -16,6 +16,7 @@
 """
 
 import asyncio
+from collections import deque
 import json
 import logging
 import random
@@ -26,7 +27,15 @@ from types import SimpleNamespace
 
 from aiogram import F, Router
 from aiogram.enums import ButtonStyle
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputRichMessage,
+    InputRichMessageMedia,
+)
 
 router = Router()
 
@@ -38,7 +47,7 @@ def setup(**deps) -> None:
     """Передаём модулю функции и данные из main.py.
 
     Нужны: get_user, save_users, send_rich_card, custom_emoji, COIN_EMOJI,
-    INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats.
+    INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats, pet_images.
     """
     for name, value in deps.items():
         setattr(D, name, value)
@@ -72,6 +81,11 @@ LAST_HIT_MEAT = 20
 LAST_HIT_FRUIT = 20
 
 TOP_SIZE = 10
+
+# «Лайв»-окно боя
+FEED_SIZE = 8         # сколько последних ударов показывать в ленте
+LIVE_INTERVAL = 2.0   # не чаще раза в столько секунд обновляем окна всех бойцов
+VIEW_TTL = 15 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
 
 # Врождённые навыки питомцев (ключи питомцев как в PETS в main.py).
 # mult  — множитель атаки за один удар
@@ -201,18 +215,6 @@ def hp_bar(width: int = 10) -> str:
     return color * filled + "⬛" * (width - filled)
 
 
-def skill_tag(sk: dict) -> str:
-    """Короткая сводка навыка для таблицы: «4 × 0.6», «1 × 1.4 · пробой»."""
-    tag = f"{sk['hits']} × {sk['mult']:g}"
-    if sk.get("pierce"):
-        tag += " · пробой"
-    if sk.get("crit"):
-        tag += " · крит"
-    if sk.get("pct"):
-        tag += f" · +{round(sk['pct'] * 100)}% HP"
-    return tag
-
-
 def skills_of(user: dict) -> list[dict]:
     return PET_SKILLS[user["pet"]]
 
@@ -331,8 +333,16 @@ def skills_block(pet_key: str) -> str:
 
 # ---------- Экраны ----------
 
-# Результат последней атаки каждого игрока (показывается в окне боя)
-LAST_RESULT: dict[str, str] = {}
+# Лента последних ударов всех игроков (общая, для «лайв»-окна)
+FEED: deque = deque(maxlen=FEED_SIZE)
+
+
+def feed_push(uid: str, name: str, skill: dict | None, dmg: int, crit: bool, kill: bool) -> None:
+    FEED.appendleft({
+        "uid": uid, "name": name, "dmg": dmg, "crit": crit, "kill": kill,
+        "icon": skill["icon"] if skill else "☠️",
+        "skill": skill["name"] if skill else "",
+    })
 
 
 def _head(sub: str = "") -> str:
@@ -347,12 +357,6 @@ def _head(sub: str = "") -> str:
 def boss_html(user_id: int, with_image: bool = False) -> str:
     """Первое окно: кто это, как всё устроено и что можно получить."""
     tick()
-    how = [
-        ("Босс", "один на всех"),
-        ("Урон", "общий, считается каждому"),
-        ("Награда", "по доле твоего урона"),
-        ("Возрождение", f"через {RESPAWN_MIN} мин"),
-    ]
     reward = [
         (f"{_coin()} Монеты", fmt(REWARD_COINS)),
         ("🥩 Мясо", fmt(REWARD_MEAT)),
@@ -364,8 +368,6 @@ def boss_html(user_id: int, with_image: bool = False) -> str:
         f"{_image(with_image)}"
         + _head(f"<b>{escape(BOSS_EPITHET)}</b>")
         + f"<blockquote><i>{escape(BOSS_STORY)}</i></blockquote>"
-        + "<p><b>Как это работает</b></p>"
-        + _table(how)
         + "<p><b>Награда за победу</b></p>"
         + _table(reward, head=("Ресурс", "Всего на всех"))
         + _button("boss:skills", "Атаковать", "⚔️", "danger")
@@ -373,15 +375,14 @@ def boss_html(user_id: int, with_image: bool = False) -> str:
 
 
 def skills_html(user_id: int, with_image: bool = False) -> str:
-    """Окно боя: здоровье босса, твоя статистика и навыки питомца."""
+    """Окно боя: здоровье босса, твоя статистика и лента ударов других игроков."""
     tick()
     uid = str(user_id)
-    user = D.get_user(user_id)
     place = place_of(uid)
 
     if is_dead():
         sub = (
-            f"<b>☠️ Повержен</b><br>"
+            "<b>☠️ Повержен</b><br>"
             f"<i>Вернётся через {fmt_dur(boss['dead_until'] - time.time())}</i>"
         )
     else:
@@ -396,44 +397,38 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         ("Твоё место", str(place) if place else "—"),
     ]
 
-    last = LAST_RESULT.get(uid)
-    last_part = (
-        f"<blockquote><i>Последняя атака: {escape(last)}</i></blockquote>" if last else ""
-    )
-
-    skills_part = ""
-    if user is not None:
-        rows = []
-        for i, sk in enumerate(skills_of(user)):
-            left = cd_left(user, i)
-            rows.append((
-                f"{sk['icon']} {escape(sk['name'])}",
-                escape(skill_tag(sk)),
-                "✅ готов" if left <= 0 else f"⏳ {fmt_dur(left)}",
-            ))
-        body = "".join(
-            "<tr>"
-            f"<td><b>{n}</b></td>"
-            f'<td align="center"><b>{t}</b></td>'
-            f'<td align="center"><b>{st}</b></td>'
-            "</tr>"
-            for n, t, st in rows
-        )
-        skills_part = (
-            "<p><b>Навыки питомца</b></p>"
+    if FEED:
+        body = ""
+        for e in FEED:
+            who = "Ты" if e["uid"] == uid else escape(e["name"])
+            if e["kill"]:
+                what, dmg = "☠️ добил босса", f"{fmt(e['dmg'])}"
+            else:
+                what = f"{e['icon']} {escape(e['skill'])}"
+                dmg = fmt(e["dmg"]) + (" ⚡" if e["crit"] else "")
+            body += (
+                "<tr>"
+                f"<td><b>{who}</b></td>"
+                f'<td align="center"><b>{what}</b></td>'
+                f'<td align="center"><b>{dmg}</b></td>'
+                "</tr>"
+            )
+        feed = (
             "<table bordered striped>"
-            "<tr><th><b>Навык</b></th><th><b>Удар</b></th><th><b>Статус</b></th></tr>"
+            "<tr><th><b>Боец</b></th><th><b>Навык</b></th><th><b>Урон</b></th></tr>"
             f"{body}"
             "</table>"
-            "<p><i>Удар: сколько раз × множитель атаки. «Пробой» игнорирует защиту босса.</i></p>"
+            "<p><i>⚡ крит. Лента обновляется сама.</i></p>"
         )
+    else:
+        feed = "<p><i>Пока тихо. Нанеси первый удар.</i></p>"
 
     return (
         f"{_image(with_image)}"
         + _head(sub)
-        + last_part
         + _table(stats)
-        + skills_part
+        + "<p><b>Бой идёт</b></p>"
+        + feed
     )
 
 
@@ -503,7 +498,6 @@ def skills_kb(user_id: int) -> InlineKeyboardMarkup:
             else:
                 label, style = f"{sk['icon']} {sk['name']}", ButtonStyle.DANGER
             rows.append([_btn(label, f"boss:hit:{i}", style=style)])
-    rows.append([_btn("🏆 Топ", "boss:top"), _btn("🔄 Обновить", "boss:skills")])
     rows.append(_back_row("boss:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -521,9 +515,9 @@ SCREENS = {
 }
 
 
-async def send_screen(bot, chat_id: int, user_id: int, key: str) -> None:
+async def send_screen(bot, chat_id: int, user_id: int, key: str):
     html, kb = SCREENS[key]
-    await D.send_rich_card(
+    return await D.send_rich_card(
         bot, chat_id, key, lambda with_image: html(user_id, with_image), kb(user_id)
     )
 
@@ -541,13 +535,82 @@ async def _require_user(callback: CallbackQuery) -> dict | None:
     return user
 
 
+# ---------- «Лайв»: окна боя обновляются, когда бьют другие ----------
+
+# {user_id: {"chat": id, "msg": id, "ts": время последнего действия}}
+VIEWERS: dict[int, dict] = {}
+_dirty = False
+_task: asyncio.Task | None = None
+
+
+def _watch(user_id: int, chat_id: int, message_id: int) -> None:
+    VIEWERS[user_id] = {"chat": chat_id, "msg": message_id, "ts": time.time()}
+
+
+async def _edit_battle(bot, user_id: int, v: dict) -> bool:
+    """Обновляет окно боя игрока на месте. False, если окно больше не обновить."""
+    file_id = D.pet_images.get("boss_skills")
+    kwargs = {"html": skills_html(user_id, bool(file_id))}
+    if file_id:
+        kwargs["media"] = [
+            InputRichMessageMedia(id="pet", media=InputMediaPhoto(media=file_id))
+        ]
+    try:
+        await bot.edit_message_text(
+            chat_id=v["chat"],
+            message_id=v["msg"],
+            rich_message=InputRichMessage(**kwargs),
+            reply_markup=skills_kb(user_id),
+        )
+        return True
+    except TelegramBadRequest as e:
+        if "not modified" in str(e).lower():
+            return True
+        logging.info("Окно боя %s не обновить: %s", user_id, e)
+        return False
+    except Exception as e:
+        logging.warning("Ошибка обновления окна боя %s: %s", user_id, e)
+        return False
+
+
+async def _live_loop(bot) -> None:
+    """Раз в LIVE_INTERVAL секунд обновляет окна всех, кто сейчас в бою."""
+    global _dirty
+    while True:
+        await asyncio.sleep(LIVE_INTERVAL)
+        now = time.time()
+        for uid, v in list(VIEWERS.items()):
+            if now - v["ts"] > VIEW_TTL:
+                VIEWERS.pop(uid, None)
+        if not VIEWERS:
+            return
+        if not _dirty:
+            continue
+        _dirty = False
+        for uid, v in list(VIEWERS.items()):
+            if not await _edit_battle(bot, uid, v):
+                VIEWERS.pop(uid, None)
+            await asyncio.sleep(0.05)
+
+
+def _mark_dirty(bot) -> None:
+    global _dirty, _task
+    _dirty = True
+    if _task is None or _task.done():
+        _task = asyncio.create_task(_live_loop(bot))
+
+
 async def _show(callback: CallbackQuery, key: str) -> None:
     """Старое сообщение удаляем, присылаем новое."""
+    uid = callback.from_user.id
     try:
         await callback.message.delete()
     except Exception as e:
         logging.warning("Не удалось удалить сообщение: %s", e)
-    await send_screen(callback.bot, callback.message.chat.id, callback.from_user.id, key)
+    VIEWERS.pop(uid, None)
+    msg = await send_screen(callback.bot, callback.message.chat.id, uid, key)
+    if key == "boss_skills" and msg is not None:
+        _watch(uid, msg.chat.id, msg.message_id)
 
 
 # ---------- Хендлеры ----------
@@ -635,10 +698,12 @@ async def on_hit(callback: CallbackQuery):
     text = f"{skill['name']} · {fmt(dealt)} урона"
     if crits:
         text += f" · крит ×{crits}" if len(hits) > 1 else " · КРИТ"
-    LAST_RESULT[uid] = text
+
+    feed_push(uid, boss["names"][uid], skill, dealt, crits > 0, False)
 
     if boss["hp"] <= 0:
         boss["hp"] = 0
+        feed_push(uid, boss["names"][uid], None, dealt, False, True)
         rewards = finish_boss(boss["names"][uid])
         await callback.answer(text + ". Босс повержен!", show_alert=True)
         asyncio.create_task(_notify_rewards(callback.bot, rewards, boss["names"][uid]))
@@ -647,4 +712,9 @@ async def on_hit(callback: CallbackQuery):
         save_boss()
         await callback.answer(text)
 
-    await _show(callback, "boss_skills")
+    # Своё окно обновляем сразу на месте, окна остальных бойцов через общий цикл
+    _watch(callback.from_user.id, callback.message.chat.id, callback.message.message_id)
+    if not await _edit_battle(callback.bot, callback.from_user.id,
+                              VIEWERS[callback.from_user.id]):
+        await _show(callback, "boss_skills")
+    _mark_dirty(callback.bot)
