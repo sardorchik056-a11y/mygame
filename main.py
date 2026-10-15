@@ -26,7 +26,7 @@ from aiogram.types import (
 import boss
 import mine
 
-BOT_TOKEN = "8867617327:AAEexHahy7SVXP9C_gzA6KgrgqjwEr8t7HI"
+BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
 
 # Telegram ID админов (свой ID можно узнать у @userinfobot)
 ADMIN_IDS: set[int] = {8118184388}
@@ -361,6 +361,10 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
     # Кнопка прямо в теле сообщения (Bot API 10.3); в предпросмотре админа её нет
     buttons = "" if preview else (
         "<tg-button-row>"
+        f'<tg-button type="callback_data" data="pskills:sel:{pet_key}" '
+        'style="primary">⚔️ Навыки</tg-button>'
+        "</tg-button-row>"
+        "<tg-button-row>"
         f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
         'style="success">Выбрать</tg-button>'
         "</tg-button-row>"
@@ -383,7 +387,6 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        f"{boss.skills_block(pet_key)}"
         f"{buttons}"
     )
 
@@ -438,8 +441,11 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>{custom_emoji(SKILL_EMOJI)} Способность: "
         f"{escape(pet['skill'])}</b></p>"
         f"<p><i>{escape(pet['skill_desc'])}</i></p>"
-        + boss.skills_block(user["pet"])
-        # Кнопка прямо в теле сообщения (Bot API 10.3); на макс. уровне её нет
+        # Кнопки прямо в теле сообщения (Bot API 10.3); «Прокачать» на макс. уровне нет
+        + "<tg-button-row>"
+        '<tg-button type="callback_data" data="pskills:prof" '
+        'style="primary">⚔️ Навыки</tg-button>'
+        "</tg-button-row>"
         + (
             ""
             if level >= MAX_LEVEL
