@@ -208,11 +208,9 @@ def hp_ratio() -> float:
 
 
 def hp_bar(width: int = 10) -> str:
-    """Цветная шкала: зелёная, жёлтая, красная в зависимости от остатка."""
-    ratio = hp_ratio()
-    filled = 0 if boss["hp"] <= 0 else max(1, round(ratio * width))
-    color = "🟩" if ratio > 0.5 else "🟨" if ratio > 0.25 else "🟥"
-    return color * filled + "⬛" * (width - filled)
+    """Шкала в скобках: [▰▰▰▰▰▰▱▱▱▱]."""
+    filled = 0 if boss["hp"] <= 0 else max(1, round(hp_ratio() * width))
+    return "[" + "▰" * filled + "▱" * (width - filled) + "]"
 
 
 def skills_of(user: dict) -> list[dict]:
