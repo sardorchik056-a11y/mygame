@@ -589,13 +589,14 @@ async def send_rich_card(
     pet_key: str,
     build_html,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
-    """Отправляет rich-сообщение; если у питомца есть фото, ставит его сверху."""
+):
+    """Отправляет rich-сообщение; если у питомца есть фото, ставит его сверху.
+    Возвращает отправленное сообщение (нужно «живым» окнам босса)."""
     file_id = pet_images.get(pet_key)
 
     if file_id:
         try:
-            await bot.send_rich_message(
+            return await bot.send_rich_message(
                 chat_id=chat_id,
                 rich_message=InputRichMessage(
                     html=build_html(True),
@@ -612,7 +613,7 @@ async def send_rich_card(
             # Например, file_id устарел: показываем без фото
             logging.warning("Не удалось отправить фото %s: %s", pet_key, e)
 
-    await bot.send_rich_message(
+    return await bot.send_rich_message(
         chat_id=chat_id,
         rich_message=InputRichMessage(html=build_html(False)),
         reply_markup=reply_markup,
@@ -834,6 +835,7 @@ boss.setup(
     BACK_EMOJI_ID=BACK_EMOJI_ID,
     PETS=PETS,
     pet_stats=pet_stats,
+    pet_images=pet_images,
 )
 dp.include_router(boss.router)
 
