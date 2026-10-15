@@ -26,7 +26,7 @@ from aiogram.types import (
 import boss
 import mine
 
-BOT_TOKEN = "8712603440:AAF7bO-ED3SB_sZV1w2T3ZEnkAZ52iWqSJ8"
+BOT_TOKEN = "8867617327:AAEexHahy7SVXP9C_gzA6KgrgqjwEr8t7HI"
 
 # Telegram ID админов (свой ID можно узнать у @userinfobot)
 ADMIN_IDS: set[int] = {8118184388}
