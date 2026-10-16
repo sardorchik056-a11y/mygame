@@ -101,6 +101,7 @@ START_EMOJI = ("5906852613629941703", "🟢")    # кнопка «Запусти
 STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Остановить»
 PROGRESS_EMOJI = ("5341498088408234504", "💯")  # прогресс
 TIMER_EMOJI = ("5382194935057372936", "⏱")      # до конца
+HOURGLASS_EMOJI = ("5386367538735104399", "⌛")  # длительность запуска
 HIRE_EMOJI = ("5440457429147997980", "🫴")     # кнопка «Нанять»
 UNEQUIP_EMOJI = ("5210952531676504517", "❌")  # кнопка «Снять кирку»
 
@@ -363,7 +364,7 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         left = max(0.0, m["run_end"] - now)
         done = (now - m["run_start"]) / (RUN_HOURS * 3600)
         state_rows = [
-            (f"{_mine()} Шахта", "Работает 🟢"),
+            (f"{_mine()} Шахта", f"Работает {D.custom_emoji(START_EMOJI)}"),
             (f"{D.custom_emoji(PROGRESS_EMOJI)} Прогресс", _bar(done)),
             (f"{D.custom_emoji(TIMER_EMOJI)} До конца", fmt_dur(left)),
         ]
@@ -375,8 +376,8 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         action = _button("mine:stop", "Остановить шахту", D.custom_emoji(STOP_EMOJI), "danger")
     else:
         state_rows = [
-            (f"{_mine()} Шахта", "Стоит 🔴"),
-            ("🕓 Длительность запуска", f"{RUN_HOURS} ч"),
+            (f"{_mine()} Шахта", f"Стоит {D.custom_emoji(STOP_EMOJI)}"),
+            (f"{D.custom_emoji(HOURGLASS_EMOJI)} Длительность запуска", f"{RUN_HOURS} ч"),
         ]
         action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
 
@@ -397,7 +398,7 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         + _tree(farm_rows, "Хозяйство")
         + _gap()
         + action
-        + _button("mine:collect", "Собрать монеты", _coin())
+        + _button("mine:collect", f"Собрать ({fmt(m['stored'])})", _coin())
     )
 
 
