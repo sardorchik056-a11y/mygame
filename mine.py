@@ -340,6 +340,11 @@ def _image(with_image: bool) -> str:
     return '<img src="tg://photo?id=pet"/>' if with_image else ""
 
 
+def _gap() -> str:
+    """Пустая строка-отступ между блоками."""
+    return "<p>&nbsp;</p>"
+
+
 def _note(text: str) -> str:
     return f"<p><b>{_info()} {text}</b></p>"
 
@@ -389,8 +394,10 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         "<blockquote><i>Запусти шахту, и шахтёры будут добывать монеты, "
         "даже пока тебя нет рядом.</i></blockquote>"
         + _tree(state_rows, "Состояние")
+        + _gap()
         + _tree(farm_rows, "Хозяйство")
         + _note(status)
+        + _gap()
         + action
         + _button("mine:collect", "Собрать монеты", _coin())
     )
@@ -469,7 +476,7 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     if have < t["max"]:
         stats.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
 
-    blocks = _tree(stats, "Характеристики")
+    blocks = _tree(stats, "Общее положение")
 
     if have:
         eq = eq_of(m, i)
