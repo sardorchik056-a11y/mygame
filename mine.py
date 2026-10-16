@@ -269,20 +269,36 @@ def load(user_id: int) -> tuple[dict, dict]:
     return user, m
 
 
-def _table(rows: list[tuple[str, str]], head=("Параметр", "Значение")) -> str:
-    body = "".join(
-        "<tr>"
-        f"<td><b>{label}</b></td>"
-        f'<td align="center"><b>{value}</b></td>'
-        "</tr>"
-        for label, value in rows
-    )
-    return (
-        "<table bordered striped>"
-        f"<tr><th><b>{head[0]}</b></th><th><b>{head[1]}</b></th></tr>"
-        f"{body}"
-        "</table>"
-    )
+# ---------- Оформление: рамочки-«деревья» вместо таблиц ----------
+
+def _tree(rows: list, title: str = "") -> str:
+    """Блок с рамочкой ├ └. Строка: (подпись, значение) или
+    (подпись, значение, [вложенные (подпись, значение)])."""
+    lines = []
+    for n, row in enumerate(rows):
+        label, value = row[0], row[1]
+        kids = row[2] if len(row) > 2 else []
+        last = n == len(rows) - 1
+        mark = "└" if last else "├"
+        line = f"{mark} {label}"
+        if value != "":
+            line += f": <b>{value}</b>"
+        lines.append(line)
+        pad = "&nbsp;&nbsp;&nbsp;" if last else "│&nbsp;&nbsp;"
+        for k, (kl, kv) in enumerate(kids):
+            kmark = "└" if k == len(kids) - 1 else "├"
+            kline = f"{pad}{kmark} {kl}"
+            if kv != "":
+                kline += f": <b>{kv}</b>"
+            lines.append(kline)
+    head = f"<b>{title}</b><br>" if title else ""
+    return f"<p>{head}{'<br>'.join(lines)}</p>"
+
+
+def _bar(frac: float, size: int = 10) -> str:
+    frac = min(1.0, max(0.0, frac))
+    filled = round(frac * size)
+    return "▰" * filled + "▱" * (size - filled) + f" {int(frac * 100)}%"
 
 
 def _button(data: str, label: str, emoji: str = "", style: str = "success") -> str:
@@ -324,6 +340,10 @@ def _image(with_image: bool) -> str:
     return '<img src="tg://photo?id=pet"/>' if with_image else ""
 
 
+def _note(text: str) -> str:
+    return f"<p><b>{_info()} {text}</b></p>"
+
+
 # ---------- Экраны ----------
 
 def mine_html(user_id: int, with_image: bool = False) -> str:
@@ -332,67 +352,86 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
     on_miners = sum(equipped_on(m, i) for i in range(len(MINERS)))
 
     if is_running(m):
-        left = m["run_end"] - time.time()
-        state = f"Работает, до конца {fmt_dur(left)}"
+        now = time.time()
+        left = max(0.0, m["run_end"] - now)
+        done = (now - m["run_start"]) / (RUN_HOURS * 3600)
+        state_rows = [
+            (f"{_mine()} Шахта", "Работает 🟢"),
+            ("⏳ Прогресс", _bar(done)),
+            ("🕓 До конца", fmt_dur(left)),
+        ]
         wait = stop_wait_left(m)
         if wait > 0:
             status = f"Остановить шахту можно через {fmt_dur(wait)}."
+            state_rows.append(("🔒 Остановка", f"через {fmt_dur(wait)}"))
         else:
             status = "Шахту можно остановить, добытое останется на складе."
+            state_rows.append(("🔓 Остановка", "доступна"))
         action = _button("mine:stop", "Остановить шахту", D.custom_emoji(STOP_EMOJI), "danger")
     else:
-        state = "Стоит"
-        status = (
-            "Шахтёры работают только пока шахта запущена. "
-            f"Один запуск длится {RUN_HOURS} ч."
-        )
+        state_rows = [
+            (f"{_mine()} Шахта", "Стоит 🔴"),
+            ("🕓 Длительность запуска", f"{RUN_HOURS} ч"),
+        ]
+        status = "Шахтёры работают только пока шахта запущена."
         action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
+
+    farm_rows = [
+        ("👷 Шахтёры", str(total_miners(m))),
+        (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
+        (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
+        (f"{_storage()} Склад", fmt(m["stored"])),
+    ]
 
     return (
         f"{_image(with_image)}"
         f"<p><b>{_mine()} ШАХТЫ</b></p>"
         "<blockquote><i>Запусти шахту, и шахтёры будут добывать монеты, "
         "даже пока тебя нет рядом.</i></blockquote>"
-        + _table(
-            [
-                (f"{_mine()} Шахта", state),
-                ("👷 Шахтёры", str(total_miners(m))),
-                (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
-                (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
-                (f"{_storage()} Склад", fmt(m["stored"])),
-            ]
-        )
-        + f"<p><b>{_info()} {status}</b></p>"
+        + _tree(state_rows, "Состояние")
+        + _tree(farm_rows, "Хозяйство")
+        + _note(status)
         + action
         + _button("mine:collect", "Собрать монеты", _coin())
     )
 
 
 def picks_html(user_id: int, with_image: bool = False) -> str:
+    user, m = load(user_id)
+    rows = [
+        (f"{p['icon']} {p['name']}",
+         f"{fmt_mult(p['mult'])} · {picks_owned(m, i)} шт.")
+        for i, p in enumerate(PICKAXES)
+    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{_pick()} КИРКИ</b></p>"
         "<blockquote><i>Кирки покупаются сколько угодно и выдаются шахтёрам "
-        "в их карточках. Шахтёр с киркой добывает больше. "
-        "Нажми на кирку внизу, чтобы открыть её карточку.</i></blockquote>"
+        "в их карточках. Шахтёр с киркой добывает больше.</i></blockquote>"
+        + _tree(rows, "Арсенал")
+        + _note("Нажми на кирку внизу, чтобы открыть её карточку.")
     )
 
 
 def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     p = PICKAXES[i]
-    rows = [
+    stats = [
+        ("📈 Множитель дохода", fmt_mult(p["mult"])),
         (f"{_coin()} Цена", fmt(p["price"])),
-        ("Куплено", str(picks_owned(m, i))),
-        ("Надето на шахтёрах", str(picks_equipped(m, i))),
-        ("Свободно", str(picks_free(m, i))),
+    ]
+    have = [
+        ("🎒 Куплено", str(picks_owned(m, i))),
+        ("🛠 Надето на шахтёрах", str(picks_equipped(m, i))),
+        ("📦 Свободно", str(picks_free(m, i))),
     ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{p['icon']} {p['name'].upper()}</b></p>"
         f"<blockquote><i>{p['desc']}</i></blockquote>"
-        + _table(rows)
-        + f"<p><b>{_info()} Выдай её шахтёру в его карточке, чтобы он добывал больше.</b></p>"
+        + _tree(stats, "Характеристики")
+        + _tree(have, "Твой запас")
+        + _note("Выдай её шахтёру в его карточке, чтобы он добывал больше.")
         + _button(f"mine:buy_pick:{i}:1", "Купить 1", p["icon"])
         + _button(f"mine:buy_pick:{i}:5", "Купить 5", p["icon"])
     )
@@ -400,14 +439,21 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
 
 def miners_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
+    rows = [
+        (f"👷 {t['name']}", f"{owned(m, i)}/{t['max']} · {fmt(t['income'])} в час")
+        for i, t in enumerate(MINERS)
+    ]
+    summary = [
+        ("👷 Всего шахтёров", str(total_miners(m))),
+        (f"{_income()} Доход шахты", f"{fmt(income_per_hour(m))} в час"),
+    ]
     return (
         f"{_image(with_image)}"
-        "<p><b>ШАХТЁРЫ</b></p>"
-        "<blockquote><i>У каждого уровня шахтёров свой доход, цена и лимит. "
-        "Нажми на шахтёра внизу, чтобы открыть его карточку, нанять его "
-        "и выдать кирки.</i></blockquote>"
-        f"<p><b>{_info()} Всего шахтёров: {total_miners(m)}. "
-        f"Доход шахты: {fmt(income_per_hour(m))} в час.</b></p>"
+        f"<p><b>👷 ШАХТЁРЫ</b></p>"
+        "<blockquote><i>У каждого уровня шахтёров свой доход, цена и лимит.</i></blockquote>"
+        + _tree(summary, "Итого")
+        + _tree(rows, "Все уровни")
+        + _note("Нажми на шахтёра внизу, чтобы нанять его и выдать кирки.")
     )
 
 
@@ -416,31 +462,39 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     t = MINERS[i]
     have = owned(m, i)
 
-    rows = [
-        ("Нанято", f"{have}/{t['max']}"),
+    stats = [
+        ("👥 Нанято", f"{have}/{t['max']}"),
         (f"{_income()} Доход одного", f"{fmt(t['income'])} в час"),
     ]
+    if have < t["max"]:
+        stats.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
+
+    blocks = _tree(stats, "Характеристики")
+
     if have:
         eq = eq_of(m, i)
-        picks = [f"{PICKAXES[p]['icon']} {c}" for p, c in sorted(eq.items())]
+        kids = [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.")
+                for p, c in sorted(eq.items())]
         if bare(m, i):
-            picks.append(f"без кирки {bare(m, i)}")
-        rows.append((f"{_pick()} Кирки", ", ".join(picks)))
-        rows.append((f"{_income()} Доход уровня", f"{fmt(miner_income(m, i))} в час"))
+            kids.append(("🤲 Без кирки", f"{bare(m, i)} шт."))
+        work = [
+            (f"{_pick()} Кирки", "", kids),
+            (f"{_income()} Доход уровня", f"{fmt(miner_income(m, i))} в час"),
+        ]
+        blocks += _tree(work, "Смена")
 
     button = ""
     if have >= t["max"]:
-        tail = f"<p><b>{_info()} Все места этого уровня заняты.</b></p>"
+        tail = _note("Все места этого уровня заняты.")
     else:
-        rows.append((f"{_coin()} Цена найма", fmt(miner_price(m, i))))
         tail = ""
         button = _button(f"mine:buy_miner:{i}", "Нанять", D.custom_emoji(HIRE_EMOJI))
 
     return (
         f"{_image(with_image)}"
-        f"<p><b>{t['name'].upper()}</b></p>"
+        f"<p><b>👷 {t['name'].upper()}</b></p>"
         f"<blockquote><i>{t['desc']}</i></blockquote>"
-        + _table(rows)
+        + blocks
         + tail
         + button
     )
@@ -462,22 +516,18 @@ def give_html(user_id: int, i: int, with_image: bool = False) -> str:
     else:
         info = f"Без кирки: {bare(m, i)}. Выбери кирку внизу, она достанется одному шахтёру."
 
-    table = (
-        _table(
-            [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
-                 f"{c} шт.")
-                for p, c in free
-            ],
-            head=("Свободная кирка", "Сколько"),
+    tree = (
+        _tree(
+            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.") for p, c in free],
+            "Свободные кирки",
         )
         if free else ""
     )
     return (
         f"{_image(with_image)}"
-        f"<p><b>ВЫДАТЬ КИРКУ: {t['name'].upper()}</b></p>"
-        + table
-        + f"<p><b>{_info()} {info}</b></p>"
+        f"<p><b>{_pick()} ВЫДАТЬ КИРКУ: {t['name'].upper()}</b></p>"
+        + tree
+        + _note(info)
     )
 
 
@@ -486,14 +536,11 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
     t = MINERS[i]
     eq = eq_of(m, i)
 
-    table = (
-        _table(
-            [
-                (f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}",
-                 f"{c} шт.")
-                for p, c in sorted(eq.items())
-            ],
-            head=("Надетая кирка", "Сколько"),
+    tree = (
+        _tree(
+            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.")
+             for p, c in sorted(eq.items())],
+            "Надетые кирки",
         )
         if eq else ""
     )
@@ -503,9 +550,9 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
     )
     return (
         f"{_image(with_image)}"
-        f"<p><b>СНЯТЬ КИРКУ: {t['name'].upper()}</b></p>"
-        + table
-        + f"<p><b>{_info()} {info}</b></p>"
+        f"<p><b>{_pick()} СНЯТЬ КИРКУ: {t['name'].upper()}</b></p>"
+        + tree
+        + _note(info)
     )
 
 
