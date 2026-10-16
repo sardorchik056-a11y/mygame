@@ -99,6 +99,8 @@ INCOME_EMOJI = ("5202018746297767789", "🪙")  # доход
 STORAGE_EMOJI = ("5854908544712707500", "📦")  # склад
 START_EMOJI = ("5906852613629941703", "🟢")    # кнопка «Запустить»
 STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Остановить»
+PROGRESS_EMOJI = ("5341498088408234504", "💯")  # прогресс
+TIMER_EMOJI = ("5382194935057372936", "⏱")      # до конца
 HIRE_EMOJI = ("5440457429147997980", "🫴")     # кнопка «Нанять»
 UNEQUIP_EMOJI = ("5210952531676504517", "❌")  # кнопка «Снять кирку»
 
@@ -362,23 +364,20 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         done = (now - m["run_start"]) / (RUN_HOURS * 3600)
         state_rows = [
             (f"{_mine()} Шахта", "Работает 🟢"),
-            ("⏳ Прогресс", _bar(done)),
-            ("🕓 До конца", fmt_dur(left)),
+            (f"{D.custom_emoji(PROGRESS_EMOJI)} Прогресс", _bar(done)),
+            (f"{D.custom_emoji(TIMER_EMOJI)} До конца", fmt_dur(left)),
         ]
         wait = stop_wait_left(m)
         if wait > 0:
-            status = f"Остановить шахту можно через {fmt_dur(wait)}."
-            state_rows.append(("🔒 Остановка", f"через {fmt_dur(wait)}"))
+            state_rows.append((f"{D.custom_emoji(STOP_EMOJI)} Остановка", f"через {fmt_dur(wait)}"))
         else:
-            status = "Шахту можно остановить, добытое останется на складе."
-            state_rows.append(("🔓 Остановка", "доступна"))
+            state_rows.append((f"{D.custom_emoji(STOP_EMOJI)} Остановка", "доступна"))
         action = _button("mine:stop", "Остановить шахту", D.custom_emoji(STOP_EMOJI), "danger")
     else:
         state_rows = [
             (f"{_mine()} Шахта", "Стоит 🔴"),
             ("🕓 Длительность запуска", f"{RUN_HOURS} ч"),
         ]
-        status = "Шахтёры работают только пока шахта запущена."
         action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
 
     farm_rows = [
@@ -396,7 +395,6 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
         + _tree(state_rows, "Состояние")
         + _gap()
         + _tree(farm_rows, "Хозяйство")
-        + _note(status)
         + _gap()
         + action
         + _button("mine:collect", "Собрать монеты", _coin())
@@ -446,10 +444,6 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
 
 def miners_html(user_id: int, with_image: bool = False) -> str:
     user, m = load(user_id)
-    rows = [
-        (f"👷 {t['name']}", f"{owned(m, i)}/{t['max']} · {fmt(t['income'])} в час")
-        for i, t in enumerate(MINERS)
-    ]
     summary = [
         ("👷 Всего шахтёров", str(total_miners(m))),
         (f"{_income()} Доход шахты", f"{fmt(income_per_hour(m))} в час"),
@@ -459,7 +453,6 @@ def miners_html(user_id: int, with_image: bool = False) -> str:
         f"<p><b>👷 ШАХТЁРЫ</b></p>"
         "<blockquote><i>У каждого уровня шахтёров свой доход, цена и лимит.</i></blockquote>"
         + _tree(summary, "Итого")
-        + _tree(rows, "Все уровни")
         + _note("Нажми на шахтёра внизу, чтобы нанять его и выдать кирки.")
     )
 
