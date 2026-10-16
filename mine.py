@@ -101,6 +101,9 @@ START_EMOJI = ("5906852613629941703", "🟢")    # кнопка «Запусти
 STOP_EMOJI = ("5907027122446145395", "🔴")     # кнопка «Остановить»
 PROGRESS_EMOJI = ("5341498088408234504", "💯")  # прогресс
 TIMER_EMOJI = ("5382194935057372936", "⏱")      # до конца
+MULT_EMOJI = ("5256110225848543598", "✖️")      # множитель дохода
+BOUGHT_EMOJI = ("5377660214096974712", "🛍")    # куплено
+EQUIPPED_EMOJI = ("5262832270573582269", "✅")  # надето
 HOURGLASS_EMOJI = ("5339151799314034719", "⏳")  # длительность запуска
 HIRE_EMOJI = ("5440457429147997980", "🫴")     # кнопка «Нанять»
 UNEQUIP_EMOJI = ("5210952531676504517", "❌")  # кнопка «Снять кирку»
@@ -403,18 +406,11 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
 
 
 def picks_html(user_id: int, with_image: bool = False) -> str:
-    user, m = load(user_id)
-    rows = [
-        (f"{p['icon']} {p['name']}",
-         f"{fmt_mult(p['mult'])} · {picks_owned(m, i)} шт.")
-        for i, p in enumerate(PICKAXES)
-    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{_pick()} КИРКИ</b></p>"
         "<blockquote><i>Кирки покупаются сколько угодно и выдаются шахтёрам "
         "в их карточках. Шахтёр с киркой добывает больше.</i></blockquote>"
-        + _tree(rows, "Арсенал")
     )
 
 
@@ -422,23 +418,23 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     user, m = load(user_id)
     p = PICKAXES[i]
     stats = [
-        ("📈 Множитель дохода", fmt_mult(p["mult"])),
+        (f"{D.custom_emoji(MULT_EMOJI)} Множитель дохода", fmt_mult(p["mult"])),
         (f"{_coin()} Цена", fmt(p["price"])),
     ]
     have = [
-        ("🎒 Куплено", str(picks_owned(m, i))),
-        ("🛠 Надето на шахтёрах", str(picks_equipped(m, i))),
-        ("📦 Свободно", str(picks_free(m, i))),
+        (f"{D.custom_emoji(BOUGHT_EMOJI)} Куплено", str(picks_owned(m, i))),
+        (f"{D.custom_emoji(EQUIPPED_EMOJI)} Надето на шахтёрах", str(picks_equipped(m, i))),
+        (f"{_storage()} Свободно", str(picks_free(m, i))),
     ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{p['icon']} {p['name'].upper()}</b></p>"
         f"<blockquote><i>{p['desc']}</i></blockquote>"
         + _tree(stats, "Характеристики")
+        + _gap()
         + _tree(have, "Твой запас")
-        + _note("Выдай её шахтёру в его карточке, чтобы он добывал больше.")
-        + _button(f"mine:buy_pick:{i}:1", "Купить 1", p["icon"])
-        + _button(f"mine:buy_pick:{i}:5", "Купить 5", p["icon"])
+        + _gap()
+        + _button(f"mine:buy_pick:{i}:1", "Приобрести", _coin())
     )
 
 
