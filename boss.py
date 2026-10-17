@@ -372,6 +372,37 @@ def _table(rows: list[tuple[str, str]], head=("Параметр", "Значен�
     )
 
 
+def _tree(rows: list, title: str = "") -> str:
+    """Блок с рамочкой ├ └. Строка: (подпись, значение) или
+    (подпись, значение, [вложенные (подпись, значение)])."""
+    lines = []
+    for n, row in enumerate(rows):
+        label, value = row[0], row[1]
+        kids = row[2] if len(row) > 2 else []
+        last = n == len(rows) - 1
+        line = f"{'└' if last else '├'} {label}"
+        if value != "":
+            line += f": <b>{value}</b>"
+        lines.append(line)
+        pad = "&nbsp;&nbsp;&nbsp;" if last else "│&nbsp;&nbsp;"
+        for k, (kl, kv) in enumerate(kids):
+            kline = f"{pad}{'└' if k == len(kids) - 1 else '├'} {kl}"
+            if kv != "":
+                kline += f": <b>{kv}</b>"
+            lines.append(kline)
+    head = f"<b>{title}</b><br>" if title else ""
+    return f"<p>{head}{'<br>'.join(lines)}</p>"
+
+
+def _gap() -> str:
+    """Пустая строка-отступ между блоками."""
+    return "<p>&nbsp;</p>"
+
+
+def _stat_icon(key: str) -> str:
+    return D.custom_emoji(D.STAT_EMOJI[key])
+
+
 def _button(data: str, label: str, emoji: str = "", style: str = "success") -> str:
     text = f"{emoji} {label}".strip()
     return (
@@ -445,6 +476,7 @@ def pet_skills_html(pet_key: str, with_image: bool = False) -> str:
         f"{rows}"
         "</table>"
         "<p><i>Удары: сколько раз бьёт × множитель атаки питомца.</i></p>"
+        "<p><b>Описание навыков</b></p>"
         "<blockquote>" + "<br>&nbsp;<br>".join(lines) + "</blockquote>"
     )
 
@@ -472,19 +504,29 @@ def _head(sub: str = "") -> str:
 def boss_html(user_id: int, with_image: bool = False) -> str:
     """Первое окно: кто это, как всё устроено и что можно получить."""
     tick()
+    about = [
+        (f"{_hp_icon()} Здоровье", fmt(BOSS_MAX_HP)),
+        (f"{_stat_icon('def')} Защита", str(BOSS_DEF)),
+        ("⏳ Возрождение", f"через {fmt_dur(RESPAWN_MIN * 60)}"),
+    ]
     reward = [
         (f"{_coin()} Монеты", fmt(REWARD_COINS)),
         ("🥩 Мясо", fmt(REWARD_MEAT)),
         ("🥭 Фрукты", fmt(REWARD_FRUIT)),
-        ("🎯 Последний удар",
-         f"+{fmt(LAST_HIT_COINS)} · +{LAST_HIT_MEAT} · +{LAST_HIT_FRUIT}"),
+        ("🎯 Последний удар", "", [
+            (f"{_coin()} Монеты", f"+{fmt(LAST_HIT_COINS)}"),
+            ("🥩 Мясо", f"+{LAST_HIT_MEAT}"),
+            ("🥭 Фрукты", f"+{LAST_HIT_FRUIT}"),
+        ]),
     ]
     return (
         f"{_image(with_image)}"
         + _head(f"<b>{escape(BOSS_EPITHET)}</b>")
         + f"<blockquote><i>{escape(BOSS_STORY)}</i></blockquote>"
-        + "<p><b>Награда за победу</b></p>"
-        + _table(reward, head=("Ресурс", "Всего на всех"))
+        + _tree(about, "О боссе")
+        + _gap()
+        + _tree(reward, "Награда за победу (делится по доле урона)")
+        + _gap()
         + _button("boss:skills", "Атаковать", "⚔️", "danger")
     )
 
@@ -507,10 +549,11 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         )
 
     stats = [
-        ("Бойцов", str(len(boss["dmg"]))),
-        ("Твой урон", fmt(boss["dmg"].get(uid, 0))),
-        ("Твоё место", str(place) if place else "—"),
+        ("👥 Бойцов", str(len(boss["dmg"]))),
+        ("💥 Твой урон", fmt(boss["dmg"].get(uid, 0))),
+        ("🏆 Твоё место", str(place) if place else "—"),
     ]
+    pet_rows: list = []
 
     pet_part = ""
     user = D.get_user(user_id)
@@ -519,18 +562,17 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         mx, hp = pet_max_hp(user), pet_hp(user)
         spd = _stats_of(user)["spd"]
         wait = pet_ready_in(user)
-        state = (
-            f"<br><i>Без сил, вернётся в бой через {fmt_dur(wait)}</i>" if wait > 0 else ""
-        )
         pet_part = (
             f"<p><b>{escape(pet_name.upper())} · ТВОЙ ПИТОМЕЦ</b><br>&nbsp;<br>"
             f"<b>{_hp_icon()} {int(hp)} / {mx}</b><br>"
-            f"<b>{bar(hp / mx)} {hp / mx * 100:.0f}%</b>{state}</p>"
+            f"<b>{bar(hp / mx)} {hp / mx * 100:.0f}%</b></p>"
         )
-        stats += [
-            ("Скорость", str(spd)),
-            ("Уворот", f"{dodge_chance(user) * 100:.0f}%"),
+        pet_rows = [
+            (f"{_stat_icon('spd')} Скорость", str(spd)),
+            ("💨 Уворот", f"{dodge_chance(user) * 100:.0f}%"),
         ]
+        if wait > 0:
+            pet_rows.append(("😴 Без сил", f"вернётся через {fmt_dur(wait)}"))
 
     if FEED:
         lines = []
@@ -565,7 +607,10 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         f"{_image(with_image)}"
         + _head(sub)
         + pet_part
-        + _table(stats)
+        + (_tree(pet_rows) if pet_rows else "")
+        + _gap()
+        + _tree(stats, "Бой")
+        + _gap()
         + "<p><b>Лента боя</b></p>"
         + feed
     )
@@ -592,15 +637,20 @@ def top_html(user_id: int, with_image: bool = False) -> str:
     else:
         body = "<p><i>Пока никто не ударил босса. Стань первым.</i></p>"
     tail = (
-        f"<i>Твоё место: {me} · урон {fmt(boss['dmg'][uid])}</i>"
-        if me else "<i>Ты ещё не бил босса.</i>"
+        _tree([
+            ("🏆 Твоё место", str(me)),
+            ("💥 Твой урон", fmt(boss["dmg"][uid])),
+        ], "Твой результат")
+        if me else "<p><i>Ты ещё не бил босса.</i></p>"
     )
     return (
         f"{_image(with_image)}"
         + "<p><b>ТОП БОЙЦОВ</b><br>&nbsp;<br>"
-        + f"<b>{escape(BOSS_SHORT)} · {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b></p>"
+        + f"<b>{_hp_icon()} {escape(BOSS_SHORT)} · {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b><br>"
+        + f"<b>{hp_bar()} {hp_ratio() * 100:.1f}%</b></p>"
         + body
-        + f"<p>{tail}</p>"
+        + _gap()
+        + tail
     )
 
 
