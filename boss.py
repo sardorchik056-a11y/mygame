@@ -94,7 +94,8 @@ REGEN_PCT_PER_MIN = 5        # питомец восстанавливает с�
 MIN_FIGHT_PCT = 0.25         # без сил (HP ниже 25%) в бой не пустят
 
 # «Лайв»-окно боя
-FEED_SIZE = 10        # сколько последних событий показывать в ленте
+FEED_SIZE = 10        # сколько последних событий хранить
+FEED_SHOW = 3         # сколько последних событий показывать в ленте боя
 LIVE_INTERVAL = 300   # окна остальных бойцов обновляются не чаще раза в 5 минут
 VIEW_TTL = 30 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
 
@@ -576,7 +577,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
 
     if FEED:
         lines = []
-        for e in FEED:
+        for e in list(FEED)[:FEED_SHOW]:
             mine = e["uid"] == uid
             who = "Ты" if mine else escape(e["name"])
             if e["kind"] == "kill":
@@ -609,7 +610,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         + pet_part
         + (_tree(pet_rows) if pet_rows else "")
         + _gap()
-        + _tree(stats, "Бой")
+        + _table(stats, head=("Бой", "Значение"))
         + _gap()
         + "<p><b>Лента боя</b></p>"
         + feed
