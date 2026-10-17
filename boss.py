@@ -64,6 +64,9 @@ BOSS_STORY = (
 BOSS_SHORT = "Ксарвог"
 BOSS_EPITHET = "Пожиратель Миров"
 BOSS_EMOJI = ("5228962845672096235", "😈")  # кастомный эмодзи босса
+FIGHTERS_EMOJI = ("6032609071373226027", "👥")  # бойцов
+BLOOD_EMOJI = ("5269535069550162819", "🩸")     # урон
+PLACE_EMOJI = ("5413566144986503832", "🏆")     # место
 
 BOSS_MAX_HP = 100_000
 BOSS_DEF = 20            # обычный урон делится на (1 + защита/100); «пробивающие» навыки её игнорируют
@@ -83,20 +86,17 @@ LAST_HIT_FRUIT = 20
 TOP_SIZE = 10
 
 # Ответные удары босса по питомцу
-BOSS_HIT_PCT = (0.07, 0.13)  # доля максимального HP питомца за удар босса
-BOSS_CRIT_CHANCE = 0.10      # шанс, что удар босса критический
-BOSS_CRIT_MULT = 1.5
-ARMOR_K = 200                # смягчение урона защитой: защита / (защита + ARMOR_K)
-ARMOR_MAX = 0.5              # защита режет урон не больше, чем на 50%
+BOSS_HIT_PCT = (0.08, 0.25)  # доля максимального HP питомца за один удар босса (8-25%)
+BOSS_STRIKE_INTERVAL = 60    # раз в сколько секунд босс бьёт по всем бойцам
 DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
 DODGE_MAX = 0.4              # уворот не чаще 40%
-REGEN_PCT_PER_MIN = 5        # питомец восстанавливает столько % HP в минуту
+REGEN_PCT_PER_MIN = 10       # +10% HP в минуту: полностью питомец восстанавливается за 10 минут
 MIN_FIGHT_PCT = 0.25         # без сил (HP ниже 25%) в бой не пустят
 
 # «Лайв»-окно боя
 FEED_SIZE = 10        # сколько последних событий хранить
 FEED_SHOW = 3         # сколько последних событий показывать в ленте боя
-LIVE_INTERVAL = 300   # окна остальных бойцов обновляются не чаще раза в 5 минут
+LIVE_INTERVAL = 60    # окна остальных бойцов обновляются не чаще раза в минуту
 VIEW_TTL = 30 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
 
 # Врождённые навыки питомцев (ключи питомцев как в PETS в main.py).
@@ -239,7 +239,7 @@ def cd_left(user: dict, i: int) -> float:
     return max(0.0, last + skills_of(user)[i]["cd"] - time.time())
 
 
-# ---------- Питомец в бою: здоровье, скорость, ответные удары босса ----------
+# ---------- Питомец в бою: здоровье, скорость, удары босса ----------
 
 def _stats_of(user: dict) -> dict:
     return D.pet_stats(D.PETS[user["pet"]], user["level"])
@@ -279,22 +279,16 @@ def dodge_chance(user: dict) -> float:
 
 
 def boss_strike(user: dict) -> dict:
-    """Босс отвечает на атаку: бьёт питомца. Скорость даёт шанс увернуться."""
+    """Удар босса по питомцу: 8-25% от максимального HP. Скорость даёт шанс увернуться."""
     hp = pet_hp(user)
     if random.random() < dodge_chance(user):
         _set_pet_hp(user, hp)
-        return {"dodge": True, "dmg": 0, "crit": False, "hp": hp}
+        return {"dodge": True, "dmg": 0, "hp": hp}
 
-    df = _stats_of(user)["def"]
-    dmg = pet_max_hp(user) * random.uniform(*BOSS_HIT_PCT)
-    dmg *= 1 - min(ARMOR_MAX, df / (df + ARMOR_K))
-    crit = random.random() < BOSS_CRIT_CHANCE
-    if crit:
-        dmg *= BOSS_CRIT_MULT
-    dmg = max(1, round(dmg))
+    dmg = max(1, round(pet_max_hp(user) * random.uniform(*BOSS_HIT_PCT)))
     hp = max(0.0, hp - dmg)
     _set_pet_hp(user, hp)
-    return {"dodge": False, "dmg": dmg, "crit": crit, "hp": hp}
+    return {"dodge": False, "dmg": dmg, "hp": hp}
 
 
 def roll_attack(user: dict, skill: dict) -> tuple[int, list[tuple[int, bool]]]:
@@ -488,8 +482,13 @@ def pet_skills_html(pet_key: str, with_image: bool = False) -> str:
 FEED: deque = deque(maxlen=FEED_SIZE)
 
 
+def nick_of(u) -> str:
+    """Ник в телеграме (@name), а если его нет, то имя."""
+    return f"@{u.username}" if u.username else (u.first_name or "Игрок")
+
+
 def feed_push(kind: str, uid: str, name: str, **extra) -> None:
-    """kind: hit (удар игрока), strike (ответ босса), kill (босс повержен)."""
+    """kind: hit (удар игрока), wave (босс ударил по бойцам), kill (босс повержен)."""
     FEED.appendleft({"kind": kind, "uid": uid, "name": name, **extra})
 
 
@@ -550,9 +549,9 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         )
 
     stats = [
-        ("👥 Бойцов", str(len(boss["dmg"]))),
-        ("💥 Твой урон", fmt(boss["dmg"].get(uid, 0))),
-        ("🏆 Твоё место", str(place) if place else "—"),
+        (f"{D.custom_emoji(FIGHTERS_EMOJI)} Бойцов", str(len(boss["dmg"]))),
+        (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(boss["dmg"].get(uid, 0))),
+        (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(place) if place else "—"),
     ]
     pet_rows: list = []
 
@@ -576,30 +575,23 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
             pet_rows.append(("😴 Без сил", f"вернётся через {fmt_dur(wait)}"))
 
     if FEED:
+        blood = D.custom_emoji(BLOOD_EMOJI)
         lines = []
         for e in list(FEED)[:FEED_SHOW]:
-            mine = e["uid"] == uid
-            who = "Ты" if mine else escape(e["name"])
+            who = escape(e["name"])
             if e["kind"] == "kill":
-                lines.append(f"☠️ <b>{who}</b> добил босса")
+                lines.append(f"<i>☠️ {who} добил босса</i>")
             elif e["kind"] == "hit":
                 crit = " ⚡" if e["crit"] else ""
                 lines.append(
-                    f"{e['icon']} <b>{who}</b> · {escape(e['skill'])} · "
-                    f"<b>{fmt(e['dmg'])}</b> урона{crit}"
+                    f"<i>{e['icon']} {who} · {escape(e['skill'])} · "
+                    f"{fmt(e['dmg'])} {blood}{crit}</i>"
                 )
-            else:  # strike: ответ босса
-                pet = "твоего питомца" if mine else f"питомца {escape(e['name'])}"
-                if e["dodge"]:
-                    owner = "Твой питомец" if mine else f"Питомец {escape(e['name'])}"
-                    lines.append(f"💨 {owner} увернулся от босса")
-                else:
-                    crit = " ⚡" if e["crit"] else ""
-                    out = " · без сил" if e["hp"] <= 0 else ""
-                    lines.append(
-                        f"{_boss_icon()} Босс ударил {pet} · "
-                        f"<b>−{fmt(e['dmg'])}</b> HP{crit}{out}"
-                    )
+            else:  # wave: босс ударил по всем бойцам
+                text = f"{_boss_icon()} Босс ударил по бойцам: {e['hit']}"
+                if e["dodged"]:
+                    text += f" · увернулись: {e['dodged']}"
+                lines.append(f"<i>{text}</i>")
         feed = "<blockquote>" + "<br>".join(lines) + "</blockquote>"
     else:
         feed = "<blockquote><i>Пока тихо. Нанеси первый удар.</i></blockquote>"
@@ -639,8 +631,8 @@ def top_html(user_id: int, with_image: bool = False) -> str:
         body = "<p><i>Пока никто не ударил босса. Стань первым.</i></p>"
     tail = (
         _tree([
-            ("🏆 Твоё место", str(me)),
-            ("💥 Твой урон", fmt(boss["dmg"][uid])),
+            (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(me)),
+            (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(boss["dmg"][uid])),
         ], "Твой результат")
         if me else "<p><i>Ты ещё не бил босса.</i></p>"
     )
@@ -678,16 +670,15 @@ def boss_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def skills_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Три навыка в один ряд, только эмодзи: зелёная кнопка = готов, красная = перезарядка."""
     user = D.get_user(user_id)
     rows = []
     if user is not None:
+        row = []
         for i, sk in enumerate(skills_of(user)):
-            left = cd_left(user, i)
-            if left > 0:
-                label, style = f"⏳ {sk['name']} · {fmt_dur(left)}", ButtonStyle.PRIMARY
-            else:
-                label, style = f"{sk['icon']} {sk['name']}", ButtonStyle.DANGER
-            rows.append([_btn(label, f"boss:hit:{i}", style=style)])
+            style = ButtonStyle.DANGER if cd_left(user, i) > 0 else ButtonStyle.SUCCESS
+            row.append(_btn(sk["icon"], f"boss:hit:{i}", style=style))
+        rows.append(row)
     rows.append(_back_row("boss:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -785,6 +776,42 @@ async def _live_loop(bot) -> None:
             await asyncio.sleep(0.05)
 
 
+_strike_task: asyncio.Task | None = None
+
+
+async def _strike_loop(bot) -> None:
+    """Раз в BOSS_STRIKE_INTERVAL секунд босс бьёт по питомцам всех бойцов."""
+    while True:
+        await asyncio.sleep(BOSS_STRIKE_INTERVAL)
+        try:
+            tick()
+            if is_dead() or not boss["dmg"]:
+                continue
+            hit = dodged = 0
+            for uid in list(boss["dmg"]):
+                user = D.get_user(int(uid))
+                if user is None or pet_hp(user) <= 0:
+                    continue  # питомец уже без сил, добивать некого
+                if boss_strike(user)["dodge"]:
+                    dodged += 1
+                else:
+                    hit += 1
+            if hit or dodged:
+                feed_push("wave", "", "", hit=hit, dodged=dodged)
+                D.save_users()
+                save_boss()
+                _mark_dirty(bot)
+        except Exception as e:
+            logging.warning("Ошибка удара босса: %s", e)
+
+
+def start_strikes(bot) -> None:
+    """Запускает фоновые удары босса (можно вызвать при старте бота, повторно безопасно)."""
+    global _strike_task
+    if _strike_task is None or _strike_task.done():
+        _strike_task = asyncio.create_task(_strike_loop(bot))
+
+
 def _mark_dirty(bot) -> None:
     global _dirty, _task
     _dirty = True
@@ -812,6 +839,7 @@ async def on_open(callback: CallbackQuery):
     if await _require_user(callback) is None:
         return
     await callback.answer()
+    start_strikes(callback.bot)
     await _show(callback, "boss")
 
 
@@ -820,6 +848,7 @@ async def on_skills(callback: CallbackQuery):
     if await _require_user(callback) is None:
         return
     await callback.answer()
+    start_strikes(callback.bot)
     await _show(callback, "boss_skills")
 
 
@@ -919,7 +948,7 @@ async def on_hit(callback: CallbackQuery):
 
     boss["hp"] -= dealt
     boss["dmg"][uid] = int(boss["dmg"].get(uid, 0)) + dealt
-    boss["names"][uid] = callback.from_user.first_name or "Игрок"
+    boss["names"][uid] = nick_of(callback.from_user)
     boss["last_uid"] = uid
     user.setdefault("boss_cd", {})[str(i)] = time.time()
 
@@ -939,20 +968,11 @@ async def on_hit(callback: CallbackQuery):
         await callback.answer(text + ". Босс повержен!", show_alert=True)
         asyncio.create_task(_notify_rewards(callback.bot, rewards, boss["names"][uid]))
     else:
-        # Босс жив: отвечает ударом по питомцу
-        strike = boss_strike(user)
-        feed_push("strike", uid, name, dmg=strike["dmg"], crit=strike["crit"],
-                  dodge=strike["dodge"], hp=strike["hp"])
-        if strike["dodge"]:
-            text += "\nПитомец увернулся"
-        else:
-            text += f"\nБосс ударил: −{strike['dmg']} HP"
-            if strike["hp"] <= 0:
-                text += ". Питомец без сил"
         D.save_users()
         save_boss()
         await callback.answer(text)
 
+    start_strikes(callback.bot)
     # Своё окно обновляем сразу на месте, окна остальных бойцов через общий цикл
     _watch(callback.from_user.id, callback.message.chat.id, callback.message.message_id)
     await _edit_battle(callback.bot, callback.from_user.id,
