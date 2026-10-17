@@ -67,6 +67,7 @@ BOSS_EMOJI = ("5228962845672096235", "😈")  # кастомный эмодзи 
 FIGHTERS_EMOJI = ("6032609071373226027", "👥")  # бойцов
 BLOOD_EMOJI = ("5269535069550162819", "🩸")     # урон
 PLACE_EMOJI = ("5413566144986503832", "🏆")     # место
+ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атаковать»
 
 BOSS_MAX_HP = 100_000
 BOSS_DEF = 20            # обычный урон делится на (1 + защита/100); «пробивающие» навыки её игнорируют
@@ -88,6 +89,8 @@ TOP_SIZE = 10
 # Ответные удары босса по питомцу
 BOSS_HIT_PCT = (0.08, 0.25)  # доля максимального HP питомца за один удар босса (8-25%)
 BOSS_STRIKE_INTERVAL = 60    # раз в сколько секунд босс бьёт по всем бойцам
+WEAK_MIN = 0.35              # сила и скорость раненого питомца падают плавно до 35% от обычных
+                             # (полная форма при 100% HP, минимум при HP = MIN_FIGHT_PCT и ниже)
 DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
 DODGE_MAX = 0.4              # уворот не чаще 40%
 REGEN_PCT_PER_MIN = 10       # +10% HP в минуту: полностью питомец восстанавливается за 10 минут
@@ -273,8 +276,21 @@ def pet_ready_in(user: dict) -> float:
     return need / (mx * REGEN_PCT_PER_MIN / 100 / 60)
 
 
+def pet_form(user: dict) -> float:
+    """Боевая форма питомца: 1.0 при полном HP, плавно падает до WEAK_MIN.
+    Чем меньше здоровья, тем слабее урон и скорость."""
+    share = pet_hp(user) / pet_max_hp(user)
+    t = (share - MIN_FIGHT_PCT) / (1 - MIN_FIGHT_PCT)
+    return WEAK_MIN + (1 - WEAK_MIN) * max(0.0, min(1.0, t))
+
+
+def pet_speed(user: dict) -> int:
+    """Скорость с учётом ранений."""
+    return max(1, round(_stats_of(user)["spd"] * pet_form(user)))
+
+
 def dodge_chance(user: dict) -> float:
-    spd = _stats_of(user)["spd"]
+    spd = pet_speed(user)
     return min(DODGE_MAX, spd / (spd + DODGE_K))
 
 
@@ -294,7 +310,7 @@ def boss_strike(user: dict) -> dict:
 def roll_attack(user: dict, skill: dict) -> tuple[int, list[tuple[int, bool]]]:
     """Считает урон навыка. Возвращает (общий урон, [(урон удара, крит)])."""
     stats = D.pet_stats(D.PETS[user["pet"]], user["level"])
-    atk, luck = stats["atk"], stats["luck"]
+    atk, luck = stats["atk"] * pet_form(user), stats["luck"]
     crit_chance = min(CRIT_MAX, luck / 400 + skill.get("crit", 0.0))
 
     hits: list[tuple[int, bool]] = []
@@ -527,7 +543,7 @@ def boss_html(user_id: int, with_image: bool = False) -> str:
         + _gap()
         + _tree(reward, "Награда за победу (делится по доле урона)")
         + _gap()
-        + _button("boss:skills", "Атаковать", "⚔️", "danger")
+        + _button("boss:skills", "Атаковать", D.custom_emoji(ATTACK_EMOJI), "danger")
     )
 
 
@@ -560,7 +576,9 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
     if user is not None:
         pet_name = D.PETS[user["pet"]]["name"]
         mx, hp = pet_max_hp(user), pet_hp(user)
-        spd = _stats_of(user)["spd"]
+        spd = pet_speed(user)
+        base_spd = _stats_of(user)["spd"]
+        form = pet_form(user)
         wait = pet_ready_in(user)
         pet_part = (
             f"<p><b>{escape(pet_name.upper())} · ТВОЙ ПИТОМЕЦ</b><br>&nbsp;<br>"
@@ -568,7 +586,8 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
             f"<b>{bar(hp / mx)} {hp / mx * 100:.0f}%</b></p>"
         )
         pet_rows = [
-            (f"{_stat_icon('spd')} Скорость", str(spd)),
+            (f"{D.custom_emoji(ATTACK_EMOJI)} Сила", f"{form * 100:.0f}%"),
+            (f"{_stat_icon('spd')} Скорость", f"{spd} / {base_spd}"),
             ("💨 Уворот", f"{dodge_chance(user) * 100:.0f}%"),
         ]
         if wait > 0:
@@ -663,21 +682,33 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def boss_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("🏆 Топ бойцов", "boss:top")],
+            [_btn("Топ бойцов", "boss:top", PLACE_EMOJI[0])],
             _back_row("menu:back"),
         ]
     )
 
 
+def _short_dur(seconds: float) -> str:
+    secs = max(1, int(seconds + 0.999))
+    mins, rest = divmod(secs, 60)
+    if mins:
+        return f"{mins}м {rest}с" if rest else f"{mins}м"
+    return f"{secs}с"
+
+
 def skills_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Три навыка в один ряд, только эмодзи: зелёная кнопка = готов, красная = перезарядка."""
+    """Три навыка в один ряд. Зелёная: готов (только эмодзи). Красная: перезарядка («🔥 · 7с»)."""
     user = D.get_user(user_id)
     rows = []
     if user is not None:
         row = []
         for i, sk in enumerate(skills_of(user)):
-            style = ButtonStyle.DANGER if cd_left(user, i) > 0 else ButtonStyle.SUCCESS
-            row.append(_btn(sk["icon"], f"boss:hit:{i}", style=style))
+            left = cd_left(user, i)
+            if left > 0:
+                label, style = f"{sk['icon']} · {_short_dur(left)}", ButtonStyle.DANGER
+            else:
+                label, style = sk["icon"], ButtonStyle.SUCCESS
+            row.append(_btn(label, f"boss:hit:{i}", style=style))
         rows.append(row)
     rows.append(_back_row("boss:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
