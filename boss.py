@@ -1,18 +1,21 @@
-"""Раздел «Босс»: один общий босс на всех игроков.
+"""Раздел «Босс»: три вида боссов, у каждого свой запас здоровья и награды.
 
 Модуль самостоятельный, как mine.py: main.py не импортирует, нужные функции
 передаются один раз через boss.setup(...).
 
 Как это работает:
-  * Босс один на весь бот, у него BOSS_MAX_HP здоровья. Бьют его все игроки,
-    урон каждого записывается (файл boss.json рядом с ботом).
+  * Виды боссов: обычные (100 тыс. HP), сложные (500 тыс. HP), безумные (5 млн HP).
+    Одновременно живут до 10 обычных, 5 сложных и 2 безумных (BOSS_TYPES).
+  * Сначала игрок выбирает вид, потом конкретного босса из списка, и только потом
+    видит его карточку и может атаковать. Состояние всех боссов лежит в boss.json.
   * У каждого питомца 3 врождённых навыка (PET_SKILLS). У навыка свой откат,
     он считается у каждого игрока отдельно.
-  * Урон = атака питомца (с учётом уровня) × множитель навыка, есть шанс крита
-    (зависит от удачи). Часть навыков пробивает защиту босса.
+  * Урон = атака питомца (с учётом уровня и здоровья) × множитель навыка, есть шанс
+    крита. Часть навыков пробивает защиту босса.
   * Когда босс падает, награду получают все, кто его бил, пропорционально
     нанесённому урону. Тот, кто добил, получает ещё и бонус.
-  * Через RESPAWN_MIN минут босс возрождается с полным здоровьем.
+  * Каждую минуту боссы бьют питомцев своих бойцов. Урон по питомцам у всех
+    боссов одинаковый (BOSS_HIT_PCT). Через respawn_min минут убитый босс возрождается.
 """
 
 import asyncio
@@ -55,40 +58,71 @@ def setup(**deps) -> None:
 
 # ---------- Баланс ----------
 
-BOSS_NAME = "Ксарвог, Пожиратель Миров"
-BOSS_STORY = (
-    "Ксарвог выполз из трещины между мирами и с тех пор не знает сна. "
-    "Он питается силой чужих питомцев, а его шкура крепче любой брони. "
-    "Один он неуязвим, но все вместе вы справитесь."
-)
-BOSS_SHORT = "Ксарвог"
-BOSS_EPITHET = "Пожиратель Миров"
 BOSS_EMOJI = ("5228962845672096235", "😈")  # кастомный эмодзи босса
 FIGHTERS_EMOJI = ("6032609071373226027", "👥")  # бойцов
 BLOOD_EMOJI = ("5269535069550162819", "🩸")     # урон
 PLACE_EMOJI = ("5413566144986503832", "🏆")     # место
 ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атаковать»
 
-BOSS_MAX_HP = 100_000
-BOSS_DEF = 20            # обычный урон делится на (1 + защита/100); «пробивающие» навыки её игнорируют
+# Виды боссов. Отличаются здоровьем, защитой, наградой, временем возрождения и тем,
+# сколько боссов вида может жить одновременно (slots). Урон боссов по питомцам
+# у всех видов одинаковый (BOSS_HIT_PCT ниже).
+#   hp          здоровье одного босса
+#   slots       сколько боссов этого вида одновременно
+#   def         обычный урон делится на (1 + защита/100); «пробивающие» навыки её игнорируют
+#   respawn_min через сколько минут после смерти босс возрождается
+#   reward      награда за убийство, делится между всеми по доле урона
+#   last        бонус тому, кто нанёс последний удар
+#   names       имена боссов (по одному на каждое место, длина = slots)
+BOSS_TYPES: dict[str, dict] = {
+    "normal": {
+        "title": "Обычные", "one": "Обычный", "icon": "🟢",
+        "hp": 100_000, "slots": 10, "def": 10, "respawn_min": 30,
+        "reward": {"coins": 20_000, "meat": 100, "fruit": 100},
+        "last": {"coins": 2_000, "meat": 10, "fruit": 10},
+        "story": (
+            "Твари из глубоких пещер. Живут стаями и нападают на каждого, "
+            "кто забредёт на их территорию. Хороший выбор для разминки."
+        ),
+        "names": [
+            "Грогх", "Мракон", "Шипоспин", "Гнилозуб", "Каменный Тролль",
+            "Болотный Душитель", "Костолом", "Ржавый Голем", "Тёмный Паук", "Ядовитый Слизень",
+        ],
+    },
+    "hard": {
+        "title": "Сложные", "one": "Сложный", "icon": "🟠",
+        "hp": 500_000, "slots": 5, "def": 20, "respawn_min": 60,
+        "reward": {"coins": 120_000, "meat": 600, "fruit": 600},
+        "last": {"coins": 12_000, "meat": 60, "fruit": 60},
+        "story": (
+            "Закалённые чудовища с толстой шкурой и дурным нравом. "
+            "Одному питомцу они не по зубам, собирайте целый отряд."
+        ),
+        "names": ["Рагна Громовая", "Ледяной Страж", "Пепельный Дракон", "Кровавая Королева", "Железный Палач"],
+    },
+    "insane": {
+        "title": "Безумные", "one": "Безумный", "icon": "🔴",
+        "hp": 5_000_000, "slots": 2, "def": 35, "respawn_min": 120,
+        "reward": {"coins": 1_500_000, "meat": 6_000, "fruit": 6_000},
+        "last": {"coins": 150_000, "meat": 600, "fruit": 600},
+        "story": (
+            "Они выползли из трещины между мирами и с тех пор не знают сна. "
+            "Питаются силой чужих питомцев, а их шкура крепче любой брони. "
+            "Один неуязвим, но все вместе вы справитесь."
+        ),
+        "names": ["Ксарвог, Пожиратель Миров", "Нихаррот, Тень Бездны"],
+    },
+}
+TYPE_ORDER = list(BOSS_TYPES)
+
 CRIT_MULT = 2.0          # во сколько раз крит сильнее
 CRIT_MAX = 0.6           # шанс крита не выше
-RESPAWN_MIN = 60         # через сколько минут после смерти босс возрождается
-
-# Награда за убийство делится между всеми по доле нанесённого урона
-REWARD_COINS = 50_000
-REWARD_MEAT = 300
-REWARD_FRUIT = 300
-# Бонус тому, кто нанёс последний удар
-LAST_HIT_COINS = 5_000
-LAST_HIT_MEAT = 20
-LAST_HIT_FRUIT = 20
 
 TOP_SIZE = 10
 
-# Ответные удары босса по питомцу
+# Удары боссов по питомцам (одинаковые у всех видов)
 BOSS_HIT_PCT = (0.08, 0.25)  # доля максимального HP питомца за один удар босса (8-25%)
-BOSS_STRIKE_INTERVAL = 60    # раз в сколько секунд босс бьёт по всем бойцам
+BOSS_STRIKE_INTERVAL = 60    # раз в сколько секунд боссы бьют по своим бойцам
 WEAK_MIN = 0.35              # сила и скорость раненого питомца падают плавно до 35% от обычных
                              # (полная форма при 100% HP, минимум при HP = MIN_FIGHT_PCT и ниже)
 DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
@@ -98,7 +132,7 @@ MIN_FIGHT_PCT = 0.15         # HP ниже 15%: питомец уходит на
 RESUME_PCT = 0.80            # вернуться в бой можно, когда HP снова 80% и выше
 
 # «Лайв»-окно боя
-FEED_SIZE = 10        # сколько последних событий хранить
+FEED_SIZE = 10        # сколько последних событий хранить (у каждого босса своя лента)
 FEED_SHOW = 3         # сколько последних событий показывать в ленте боя
 LIVE_INTERVAL = 60    # окна остальных бойцов обновляются не чаще раза в минуту
 VIEW_TTL = 30 * 60    # окно перестаёт обновляться, если игрок давно ничего не нажимал
@@ -139,67 +173,115 @@ PET_SKILLS: dict[str, list[dict]] = {
 
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
-    "boss": "Босс",
+    "boss": "Босс: выбор вида",
+    "boss_list": "Босс: список боссов",
+    "boss_info": "Босс: карточка",
     "boss_skills": "Босс: навыки",
     "boss_top": "Босс: топ игроков",
 }
 
 
-# ---------- Состояние босса (общее для всех) ----------
+# ---------- Состояние боссов (общее для всех) ----------
 
 BOSS_FILE = Path(__file__).with_name("boss.json")
 
 
-def _fresh(kills: int = 0) -> dict:
+def all_ids(btype: str | None = None) -> list[str]:
+    """Идентификаторы боссов вида «normal:0», «normal:1», ..."""
+    types = [btype] if btype else TYPE_ORDER
+    return [f"{t}:{n}" for t in types for n in range(BOSS_TYPES[t]["slots"])]
+
+
+def type_of(bid: str) -> str:
+    return bid.split(":")[0]
+
+
+def cfg(bid: str) -> dict:
+    return BOSS_TYPES[type_of(bid)]
+
+
+def name_of(bid: str) -> str:
+    return cfg(bid)["names"][int(bid.split(":")[1])]
+
+
+def _fresh(btype: str, kills: int = 0) -> dict:
     return {
-        "hp": BOSS_MAX_HP,
+        "hp": BOSS_TYPES[btype]["hp"],
         "dmg": {},           # {"user_id": нанесённый урон}
-        "names": {},         # {"user_id": имя для топа}
+        "names": {},         # {"user_id": ник для топа}
         "dead_until": None,  # когда возродится, если босс убит
         "kills": kills,      # сколько раз босса уже убивали
-        "killer": None,      # имя того, кто добил в последний раз
+        "killer": None,      # ник того, кто добил в последний раз
+        "last_uid": None,
     }
 
 
-def _load() -> dict:
+def _load() -> dict[str, dict]:
     try:
         data = json.loads(BOSS_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
-        return _fresh()
-    base = _fresh()
-    base.update(data)
-    return base
+        data = {}
+    saved = data.get("bosses")
+    if saved is None and "hp" in data:  # старый формат: один босс, он становится первым обычным
+        saved = {"normal:0": data}
+    saved = saved or {}
+
+    result: dict[str, dict] = {}
+    for bid in all_ids():
+        base = _fresh(type_of(bid))
+        base.update({k: v for k, v in saved.get(bid, {}).items() if k in base})
+        base["hp"] = min(base["hp"], cfg(bid)["hp"])
+        result[bid] = base
+    return result
 
 
-boss: dict = _load()
+BOSSES: dict[str, dict] = _load()
 
 
 def save_boss() -> None:
-    BOSS_FILE.write_text(json.dumps(boss, ensure_ascii=False, indent=2), encoding="utf-8")
+    BOSS_FILE.write_text(
+        json.dumps({"bosses": BOSSES}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
-def is_dead() -> bool:
-    return boss["dead_until"] is not None
+def is_dead(bid: str) -> bool:
+    return BOSSES[bid]["dead_until"] is not None
 
 
 def tick() -> None:
-    """Возродить босса, если время пришло."""
-    if is_dead() and time.time() >= boss["dead_until"]:
-        kills = boss["kills"]
-        boss.clear()
-        boss.update(_fresh(kills))
+    """Возродить всех боссов, у которых вышло время."""
+    now = time.time()
+    changed = False
+    for bid, b in list(BOSSES.items()):
+        if b["dead_until"] is not None and now >= b["dead_until"]:
+            BOSSES[bid] = _fresh(type_of(bid), b["kills"])
+            changed = True
+    if changed:
         save_boss()
 
 
-def ranking() -> list[tuple[str, int]]:
-    return sorted(boss["dmg"].items(), key=lambda kv: kv[1], reverse=True)
+def alive_count(btype: str) -> int:
+    return sum(1 for bid in all_ids(btype) if not is_dead(bid))
 
 
-def place_of(uid: str) -> int | None:
-    for n, (u, _) in enumerate(ranking(), start=1):
+def ranking(bid: str) -> list[tuple[str, int]]:
+    return sorted(BOSSES[bid]["dmg"].items(), key=lambda kv: kv[1], reverse=True)
+
+
+def place_of(bid: str, uid: str) -> int | None:
+    for n, (u, _) in enumerate(ranking(bid), start=1):
         if u == uid:
             return n
     return None
+
+
+def resolve(ref: str) -> str:
+    """Из ссылки (id босса, вид или пусто) делает id существующего босса."""
+    if ref in BOSSES:
+        return ref
+    btype = ref if ref in BOSS_TYPES else TYPE_ORDER[0]
+    ids = all_ids(btype)
+    return next((b for b in ids if not is_dead(b)), ids[0])
 
 
 # ---------- Расчёты ----------
@@ -219,8 +301,8 @@ def fmt_dur(seconds: float) -> str:
     return f"{secs} сек"
 
 
-def hp_ratio() -> float:
-    return max(0.0, boss["hp"] / BOSS_MAX_HP)
+def hp_ratio(bid: str) -> float:
+    return max(0.0, BOSSES[bid]["hp"] / cfg(bid)["hp"])
 
 
 def bar(ratio: float, width: int = 10) -> str:
@@ -230,8 +312,8 @@ def bar(ratio: float, width: int = 10) -> str:
     return "[" + "▰" * filled + "▱" * (width - filled) + "]"
 
 
-def hp_bar(width: int = 10) -> str:
-    return bar(hp_ratio(), width)
+def hp_bar(bid: str, width: int = 10) -> str:
+    return bar(hp_ratio(bid), width)
 
 
 def skills_of(user: dict) -> list[dict]:
@@ -322,17 +404,18 @@ def boss_strike(user: dict) -> dict:
     return {"dodge": False, "dmg": dmg, "hp": hp}
 
 
-def roll_attack(user: dict, skill: dict) -> tuple[int, list[tuple[int, bool]]]:
+def roll_attack(user: dict, skill: dict, bid: str) -> tuple[int, list[tuple[int, bool]]]:
     """Считает урон навыка. Возвращает (общий урон, [(урон удара, крит)])."""
     stats = D.pet_stats(D.PETS[user["pet"]], user["level"])
     atk, luck = stats["atk"] * pet_form(user), stats["luck"]
     crit_chance = min(CRIT_MAX, luck / 400 + skill.get("crit", 0.0))
+    defense = cfg(bid)["def"]
 
     hits: list[tuple[int, bool]] = []
     for _ in range(skill["hits"]):
         dmg = atk * skill["mult"] * random.uniform(0.9, 1.1)
         if not skill.get("pierce"):
-            dmg *= 100 / (100 + BOSS_DEF)
+            dmg *= 100 / (100 + defense)
         crit = random.random() < crit_chance
         if crit:
             dmg *= CRIT_MULT
@@ -340,41 +423,41 @@ def roll_attack(user: dict, skill: dict) -> tuple[int, list[tuple[int, bool]]]:
 
     total = sum(d for d, _ in hits)
     if skill.get("pct"):
-        total += min(round(boss["hp"] * skill["pct"]), round(atk * 4))
+        total += min(round(BOSSES[bid]["hp"] * skill["pct"]), round(atk * 4))
     return total, hits
 
 
-def finish_boss(killer_name: str) -> dict[str, dict[str, int]]:
+def finish_boss(bid: str, killer_name: str) -> dict[str, dict[str, int]]:
     """Босс убит: выдаём награды, ставим время возрождения.
     Возвращает {user_id: {"coins":..., "meat":..., "fruit":..., "last": 0/1}}."""
-    total = sum(boss["dmg"].values()) or 1
+    b, c = BOSSES[bid], cfg(bid)
+    total = sum(b["dmg"].values()) or 1
     rewards: dict[str, dict[str, int]] = {}
-    last_uid = boss.get("last_uid")
 
-    for uid, dmg in boss["dmg"].items():
+    for uid, dmg in b["dmg"].items():
         user = D.get_user(int(uid))
         if user is None:
             continue
         share = dmg / total
         r = {
-            "coins": max(1, round(REWARD_COINS * share)),
-            "meat": max(1, round(REWARD_MEAT * share)),
-            "fruit": max(1, round(REWARD_FRUIT * share)),
+            "coins": max(1, round(c["reward"]["coins"] * share)),
+            "meat": max(1, round(c["reward"]["meat"] * share)),
+            "fruit": max(1, round(c["reward"]["fruit"] * share)),
             "last": 0,
         }
-        if uid == last_uid:
-            r["coins"] += LAST_HIT_COINS
-            r["meat"] += LAST_HIT_MEAT
-            r["fruit"] += LAST_HIT_FRUIT
+        if uid == b.get("last_uid"):
+            r["coins"] += c["last"]["coins"]
+            r["meat"] += c["last"]["meat"]
+            r["fruit"] += c["last"]["fruit"]
             r["last"] = 1
         user["coins"] += r["coins"]
         user["meat"] += r["meat"]
         user["fruit"] += r["fruit"]
         rewards[uid] = r
 
-    boss["dead_until"] = time.time() + RESPAWN_MIN * 60
-    boss["kills"] += 1
-    boss["killer"] = killer_name
+    b["dead_until"] = time.time() + c["respawn_min"] * 60
+    b["kills"] += 1
+    b["killer"] = killer_name
     D.save_users()
     save_boss()
     return rewards
@@ -393,6 +476,23 @@ def _table(rows: list[tuple[str, str]], head=("Параметр", "Значен�
     return (
         "<table bordered striped>"
         f"<tr><th><b>{head[0]}</b></th><th><b>{head[1]}</b></th></tr>"
+        f"{body}"
+        "</table>"
+    )
+
+
+def _table_n(head: tuple, rows: list[tuple]) -> str:
+    """Таблица с любым числом колонок: первая слева, остальные по центру."""
+    body = "".join(
+        "<tr>"
+        + f"<td><b>{r[0]}</b></td>"
+        + "".join(f'<td align="center"><b>{c}</b></td>' for c in r[1:])
+        + "</tr>"
+        for r in rows
+    )
+    return (
+        "<table bordered striped>"
+        "<tr>" + "".join(f"<th><b>{h}</b></th>" for h in head) + "</tr>"
         f"{body}"
         "</table>"
     )
@@ -509,8 +609,12 @@ def pet_skills_html(pet_key: str, with_image: bool = False) -> str:
 
 # ---------- Экраны ----------
 
-# Лента последних ударов всех игроков (общая, для «лайв»-окна)
-FEED: deque = deque(maxlen=FEED_SIZE)
+# Ленты последних ударов, у каждого босса своя (для «лайв»-окна)
+FEEDS: dict[str, deque] = {}
+
+
+def _feed(bid: str) -> deque:
+    return FEEDS.setdefault(bid, deque(maxlen=FEED_SIZE))
 
 
 def nick_of(u) -> str:
@@ -518,70 +622,139 @@ def nick_of(u) -> str:
     return f"@{u.username}" if u.username else (u.first_name or "Игрок")
 
 
-def feed_push(kind: str, uid: str, name: str, **extra) -> None:
+def feed_push(bid: str, kind: str, uid: str, name: str, **extra) -> None:
     """kind: hit (удар игрока), wave (босс ударил по бойцам), kill (босс повержен)."""
-    FEED.appendleft({"kind": kind, "uid": uid, "name": name, **extra})
+    _feed(bid).appendleft({"kind": kind, "uid": uid, "name": name, **extra})
 
 
-def _head(sub: str = "") -> str:
-    """Шапка как у карточек питомцев: имя · статус, пустая строка, подзаголовок."""
+def _head(bid: str, sub: str = "") -> str:
+    """Шапка как у карточек питомцев: имя · вид, пустая строка, подзаголовок."""
+    c = cfg(bid)
     return (
-        f"<p><b>{_boss_icon()} {escape(BOSS_SHORT.upper())} · МИРОВОЙ БОСС</b>"
+        f"<p><b>{_boss_icon()} {escape(name_of(bid).upper())} · {c['one'].upper()} БОСС</b>"
         + (f"<br>&nbsp;<br>{sub}" if sub else "")
         + "</p>"
     )
 
 
-def boss_html(user_id: int, with_image: bool = False) -> str:
-    """Первое окно: кто это, как всё устроено и что можно получить."""
-    tick()
-    about = [
-        (f"{_hp_icon()} Здоровье", fmt(BOSS_MAX_HP)),
-        (f"{_stat_icon('def')} Защита", str(BOSS_DEF)),
-        ("⏳ Возрождение", f"через {fmt_dur(RESPAWN_MIN * 60)}"),
-    ]
+def _reward_tree(c: dict) -> str:
     reward = [
-        (f"{_coin()} Монеты", fmt(REWARD_COINS)),
-        ("🥩 Мясо", fmt(REWARD_MEAT)),
-        ("🥭 Фрукты", fmt(REWARD_FRUIT)),
+        (f"{_coin()} Монеты", fmt(c["reward"]["coins"])),
+        ("🥩 Мясо", fmt(c["reward"]["meat"])),
+        ("🥭 Фрукты", fmt(c["reward"]["fruit"])),
         ("🎯 Последний удар", "", [
-            (f"{_coin()} Монеты", f"+{fmt(LAST_HIT_COINS)}"),
-            ("🥩 Мясо", f"+{LAST_HIT_MEAT}"),
-            ("🥭 Фрукты", f"+{LAST_HIT_FRUIT}"),
+            (f"{_coin()} Монеты", f"+{fmt(c['last']['coins'])}"),
+            ("🥩 Мясо", f"+{c['last']['meat']}"),
+            ("🥭 Фрукты", f"+{c['last']['fruit']}"),
         ]),
+    ]
+    return _tree(reward, "Награда за победу (делится по доле урона)")
+
+
+def boss_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
+    """Первое окно: выбор вида босса."""
+    tick()
+    rows = [
+        (f"{BOSS_TYPES[t]['icon']} {BOSS_TYPES[t]['title']}",
+         f"{alive_count(t)}/{BOSS_TYPES[t]['slots']}",
+         fmt(BOSS_TYPES[t]["hp"]))
+        for t in TYPE_ORDER
+    ]
+    rewards = [
+        (f"{BOSS_TYPES[t]['icon']} {BOSS_TYPES[t]['title']}",
+         f"{fmt(BOSS_TYPES[t]['reward']['coins'])} {_coin()}")
+        for t in TYPE_ORDER
     ]
     return (
         f"{_image(with_image)}"
-        + _head(f"<b>{escape(BOSS_EPITHET)}</b>")
-        + f"<blockquote><i>{escape(BOSS_STORY)}</i></blockquote>"
-        + _tree(about, "О боссе")
+        f"<p><b>{_boss_icon()} МИРОВЫЕ БОССЫ</b><br>&nbsp;<br><b>Выбери, с кем сразиться</b></p>"
+        "<blockquote><i>Чем сложнее босс, тем богаче награда. "
+        "Урон боссов по питомцам у всех одинаковый.</i></blockquote>"
+        + _table_n(("Вид", "Живых", "Здоровье"), rows)
         + _gap()
-        + _tree(reward, "Награда за победу (делится по доле урона)")
-        + _gap()
-        + _button("boss:skills", "Атаковать", D.custom_emoji(ATTACK_EMOJI), "danger")
+        + _tree(rewards, "Награда за победу (делится по доле урона)")
     )
 
 
-def skills_html(user_id: int, with_image: bool = False) -> str:
+def boss_list_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
+    """Список боссов выбранного вида."""
+    tick()
+    t = ref if ref in BOSS_TYPES else TYPE_ORDER[0]
+    c = BOSS_TYPES[t]
+    about = [
+        (f"{_hp_icon()} Здоровье", fmt(c["hp"])),
+        (f"{_stat_icon('def')} Защита", str(c["def"])),
+        ("⏳ Возрождение", f"через {fmt_dur(c['respawn_min'] * 60)}"),
+        (f"{_coin()} Награда", fmt(c["reward"]["coins"])),
+    ]
+    fighters = D.custom_emoji(FIGHTERS_EMOJI)
+    rows = []
+    for bid in all_ids(t):
+        b = BOSSES[bid]
+        if is_dead(bid):
+            rows.append((f"☠️ {escape(name_of(bid))}",
+                         f"вернётся через {fmt_dur(b['dead_until'] - time.time())}"))
+        else:
+            rows.append((escape(name_of(bid)),
+                         f"{hp_ratio(bid) * 100:.0f}% {fighters} {len(b['dmg'])}"))
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{c['icon']} {c['title'].upper()} БОССЫ</b><br>&nbsp;<br><b>Выбери босса</b></p>"
+        f"<blockquote><i>{escape(c['story'])}</i></blockquote>"
+        + _tree(about, "Характеристики")
+        + _gap()
+        + _tree(rows, f"Боссы (живых {alive_count(t)} из {c['slots']})")
+    )
+
+
+def boss_info_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
+    """Карточка конкретного босса: кто это и что можно получить."""
+    tick()
+    bid = resolve(ref)
+    c, b = cfg(bid), BOSSES[bid]
+    if is_dead(bid):
+        status = ("☠️ Статус", f"повержен, вернётся через {fmt_dur(b['dead_until'] - time.time())}")
+    else:
+        status = (f"{_hp_icon()} Здоровье", f"{fmt(b['hp'])} / {fmt(c['hp'])}")
+    about = [
+        status,
+        (f"{_stat_icon('def')} Защита", str(c["def"])),
+        ("⏳ Возрождение", f"через {fmt_dur(c['respawn_min'] * 60)}"),
+    ]
+    return (
+        f"{_image(with_image)}"
+        + _head(bid, f"<b>{c['icon']} {c['one']} босс</b>")
+        + f"<blockquote><i>{escape(c['story'])}</i></blockquote>"
+        + _tree(about, "О боссе")
+        + _gap()
+        + _reward_tree(c)
+        + _gap()
+        + _button(f"boss:skills:{bid}", "Атаковать", D.custom_emoji(ATTACK_EMOJI), "danger")
+    )
+
+
+def skills_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     """Окно боя: здоровье босса, твоя статистика и лента ударов других игроков."""
     tick()
+    bid = resolve(ref)
+    c, b = cfg(bid), BOSSES[bid]
     uid = str(user_id)
-    place = place_of(uid)
+    place = place_of(bid, uid)
 
-    if is_dead():
+    if is_dead(bid):
         sub = (
             "<b>☠️ Повержен</b><br>"
-            f"<i>Вернётся через {fmt_dur(boss['dead_until'] - time.time())}</i>"
+            f"<i>Вернётся через {fmt_dur(b['dead_until'] - time.time())}</i>"
         )
     else:
         sub = (
-            f"<b>{_hp_icon()} {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b><br>"
-            f"<b>{hp_bar()} {hp_ratio() * 100:.1f}%</b>"
+            f"<b>{_hp_icon()} {fmt(b['hp'])} / {fmt(c['hp'])}</b><br>"
+            f"<b>{hp_bar(bid)} {hp_ratio(bid) * 100:.1f}%</b>"
         )
 
     stats = [
-        (f"{D.custom_emoji(FIGHTERS_EMOJI)} Бойцов", str(len(boss["dmg"]))),
-        (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(boss["dmg"].get(uid, 0))),
+        (f"{D.custom_emoji(FIGHTERS_EMOJI)} Бойцов", str(len(b["dmg"]))),
+        (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(b["dmg"].get(uid, 0))),
         (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(place) if place else "—"),
     ]
     pet_rows: list = []
@@ -608,10 +781,11 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
         if wait > 0:
             pet_rows.append(("😴 Отдыхает", f"вернётся в бой через {fmt_dur(wait)}"))
 
-    if FEED:
+    feed_items = list(_feed(bid))[:FEED_SHOW]
+    if feed_items:
         blood = D.custom_emoji(BLOOD_EMOJI)
         lines = []
-        for e in list(FEED)[:FEED_SHOW]:
+        for e in feed_items:
             who = escape(e["name"])
             if e["kind"] == "kill":
                 lines.append(f"<i>☠️ {who} добил босса</i>")
@@ -621,7 +795,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
                     f"<i>{e['icon']} {who} · {escape(e['skill'])} · "
                     f"{fmt(e['dmg'])} {blood}{crit}</i>"
                 )
-            else:  # wave: босс ударил по всем бойцам
+            else:  # wave: босс ударил по бойцам
                 text = f"{_boss_icon()} Босс ударил по бойцам: {e['hit']}"
                 if e["dodged"]:
                     text += f" · увернулись: {e['dodged']}"
@@ -632,7 +806,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
 
     return (
         f"{_image(with_image)}"
-        + _head(sub)
+        + _head(bid, sub)
         + pet_part
         + (_tree(pet_rows) if pet_rows else "")
         + _gap()
@@ -643,22 +817,24 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
     )
 
 
-def top_html(user_id: int, with_image: bool = False) -> str:
+def top_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     tick()
+    bid = resolve(ref)
+    c, b = cfg(bid), BOSSES[bid]
     uid = str(user_id)
-    rank = ranking()
-    total = sum(boss["dmg"].values()) or 1
+    rank = ranking(bid)
+    total = sum(b["dmg"].values()) or 1
 
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     rows = [
         (
             f"{medals.get(n, str(n) + '.')} "
-            f"{escape(str(boss['names'].get(u, 'Игрок')))}",
+            f"{escape(str(b['names'].get(u, 'Игрок')))}",
             f"{fmt(d)} · {d / total * 100:.1f}%",
         )
         for n, (u, d) in enumerate(rank[:TOP_SIZE], start=1)
     ]
-    me = place_of(uid)
+    me = place_of(bid, uid)
     if rows:
         body = _table(rows, head=("Игрок", "Урон · доля"))
     else:
@@ -666,15 +842,15 @@ def top_html(user_id: int, with_image: bool = False) -> str:
     tail = (
         _tree([
             (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(me)),
-            (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(boss["dmg"][uid])),
+            (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(b["dmg"][uid])),
         ], "Твой результат")
         if me else "<p><i>Ты ещё не бил босса.</i></p>"
     )
     return (
         f"{_image(with_image)}"
-        + "<p><b>ТОП БОЙЦОВ</b><br>&nbsp;<br>"
-        + f"<b>{_hp_icon()} {escape(BOSS_SHORT)} · {fmt(boss['hp'])} / {fmt(BOSS_MAX_HP)}</b><br>"
-        + f"<b>{hp_bar()} {hp_ratio() * 100:.1f}%</b></p>"
+        + f"<p><b>ТОП БОЙЦОВ</b><br>&nbsp;<br><b>{_boss_icon()} {escape(name_of(bid))} · {c['one']}</b><br>"
+        + f"<b>{_hp_icon()} {fmt(b['hp'])} / {fmt(c['hp'])}</b><br>"
+        + f"<b>{hp_bar(bid)} {hp_ratio(bid) * 100:.1f}%</b></p>"
         + body
         + _gap()
         + tail
@@ -694,11 +870,39 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
     return [_btn("Назад", data, D.BACK_EMOJI_ID)]
 
 
-def boss_kb(user_id: int) -> InlineKeyboardMarkup:
+def boss_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
+    """Выбор вида босса."""
+    rows = [
+        [_btn(f"{BOSS_TYPES[t]['icon']} {BOSS_TYPES[t]['title']} · "
+              f"{alive_count(t)}/{BOSS_TYPES[t]['slots']}", f"boss:list:{t}")]
+        for t in TYPE_ORDER
+    ]
+    rows.append(_back_row("menu:back"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def list_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
+    """Боссы выбранного вида: кнопки по две в ряд."""
+    t = ref if ref in BOSS_TYPES else TYPE_ORDER[0]
+    buttons = []
+    for bid in all_ids(t):
+        if is_dead(bid):
+            buttons.append(_btn(f"☠️ {name_of(bid).split(',')[0]}", f"boss:info:{bid}",
+                                style=ButtonStyle.DANGER))
+        else:
+            buttons.append(_btn(f"{name_of(bid).split(',')[0]} · {hp_ratio(bid) * 100:.0f}%",
+                                f"boss:info:{bid}", style=ButtonStyle.SUCCESS))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(_back_row("boss:open"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def info_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
+    bid = resolve(ref)
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("Топ бойцов", "boss:top", PLACE_EMOJI[0])],
-            _back_row("menu:back"),
+            [_btn("Топ бойцов", f"boss:top:{bid}", PLACE_EMOJI[0])],
+            _back_row(f"boss:list:{type_of(bid)}"),
         ]
     )
 
@@ -711,8 +915,9 @@ def _short_dur(seconds: float) -> str:
     return f"{secs}с"
 
 
-def skills_kb(user_id: int) -> InlineKeyboardMarkup:
+def skills_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
     """Три навыка в один ряд. Зелёная: готов (только эмодзи). Красная: перезарядка («🔥 · 7с»)."""
+    bid = resolve(ref)
     user = D.get_user(user_id)
     rows = []
     if user is not None:
@@ -723,36 +928,38 @@ def skills_kb(user_id: int) -> InlineKeyboardMarkup:
                 label, style = f"{sk['icon']} · {_short_dur(left)}", ButtonStyle.DANGER
             else:
                 label, style = sk["icon"], ButtonStyle.SUCCESS
-            row.append(_btn(label, f"boss:hit:{i}", style=style))
+            row.append(_btn(label, f"boss:hit:{bid}:{i}", style=style))
         rows.append(row)
-    rows.append(_back_row("boss:open"))
+    rows.append(_back_row(f"boss:info:{bid}"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def top_kb(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[_back_row("boss:open")])
+def top_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[_back_row(f"boss:info:{resolve(ref)}")])
 
 
 # ---------- Отправка ----------
 
 SCREENS = {
     "boss": (boss_html, boss_kb),
+    "boss_list": (boss_list_html, list_kb),
+    "boss_info": (boss_info_html, info_kb),
     "boss_skills": (skills_html, skills_kb),
     "boss_top": (top_html, top_kb),
 }
 
 
-async def send_screen(bot, chat_id: int, user_id: int, key: str):
+async def send_screen(bot, chat_id: int, user_id: int, key: str, ref: str = ""):
     html, kb = SCREENS[key]
     return await D.send_rich_card(
-        bot, chat_id, key, lambda with_image: html(user_id, with_image), kb(user_id)
+        bot, chat_id, key, lambda with_image: html(user_id, with_image, ref), kb(user_id, ref)
     )
 
 
 async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
     """Предпросмотр для /img: без кнопок под сообщением."""
     html, _ = SCREENS[key]
-    await D.send_rich_card(bot, chat_id, key, lambda with_image: html(user_id, with_image))
+    await D.send_rich_card(bot, chat_id, key, lambda with_image: html(user_id, with_image, ""))
 
 
 async def _require_user(callback: CallbackQuery) -> dict | None:
@@ -764,21 +971,21 @@ async def _require_user(callback: CallbackQuery) -> dict | None:
 
 # ---------- «Лайв»: окна боя обновляются, когда бьют другие ----------
 
-# {user_id: {"chat": id, "msg": id, "ts": время последнего действия}}
+# {user_id: {"chat": id, "msg": id, "bid": босс, "ts": время последнего действия}}
 VIEWERS: dict[int, dict] = {}
-_dirty = False
+_dirty: set[str] = set()   # у каких боссов что-то изменилось
 _last_push = 0.0
 _task: asyncio.Task | None = None
 
 
-def _watch(user_id: int, chat_id: int, message_id: int) -> None:
-    VIEWERS[user_id] = {"chat": chat_id, "msg": message_id, "ts": time.time()}
+def _watch(user_id: int, chat_id: int, message_id: int, bid: str) -> None:
+    VIEWERS[user_id] = {"chat": chat_id, "msg": message_id, "bid": bid, "ts": time.time()}
 
 
 async def _edit_battle(bot, user_id: int, v: dict) -> bool:
     """Обновляет окно боя игрока на месте. False, если окно больше не обновить."""
     file_id = D.pet_images.get("boss_skills")
-    kwargs = {"html": skills_html(user_id, bool(file_id))}
+    kwargs = {"html": skills_html(user_id, bool(file_id), v["bid"])}
     if file_id:
         kwargs["media"] = [
             InputRichMessageMedia(id="pet", media=InputMediaPhoto(media=file_id))
@@ -788,7 +995,7 @@ async def _edit_battle(bot, user_id: int, v: dict) -> bool:
             chat_id=v["chat"],
             message_id=v["msg"],
             rich_message=InputRichMessage(**kwargs),
-            reply_markup=skills_kb(user_id),
+            reply_markup=skills_kb(user_id, v["bid"]),
         )
         return True
     except TelegramBadRequest as e:
@@ -802,7 +1009,7 @@ async def _edit_battle(bot, user_id: int, v: dict) -> bool:
 
 
 async def _live_loop(bot) -> None:
-    """Обновляет окна всех, кто в бою, но не чаще раза в LIVE_INTERVAL секунд."""
+    """Обновляет окна бойцов тех боссов, где что-то изменилось, не чаще раза в LIVE_INTERVAL."""
     global _dirty, _last_push
     while True:
         await asyncio.sleep(5)
@@ -814,9 +1021,11 @@ async def _live_loop(bot) -> None:
             return
         if not _dirty or now - _last_push < LIVE_INTERVAL:
             continue
-        _dirty = False
+        bids, _dirty = _dirty, set()
         _last_push = now
         for uid, v in list(VIEWERS.items()):
+            if v["bid"] not in bids:
+                continue
             if not await _edit_battle(bot, uid, v):
                 VIEWERS.pop(uid, None)
             await asyncio.sleep(0.05)
@@ -826,46 +1035,58 @@ _strike_task: asyncio.Task | None = None
 
 
 async def _strike_loop(bot) -> None:
-    """Раз в BOSS_STRIKE_INTERVAL секунд босс бьёт по питомцам всех бойцов."""
+    """Раз в BOSS_STRIKE_INTERVAL секунд каждый босс бьёт по питомцам своих бойцов.
+    Питомец получает не больше одного удара в минуту, даже если бьётся с несколькими боссами."""
     while True:
         await asyncio.sleep(BOSS_STRIKE_INTERVAL)
         try:
             tick()
-            if is_dead() or not boss["dmg"]:
-                continue
-            hit = dodged = 0
-            for uid in list(boss["dmg"]):
-                user = D.get_user(int(uid))
-                if user is None or is_resting(user):
-                    continue  # питомец восстанавливается: босс его не трогает
-                if boss_strike(user)["dodge"]:
-                    dodged += 1
-                else:
-                    hit += 1
-            if hit or dodged:
-                feed_push("wave", "", "", hit=hit, dodged=dodged)
+            results: dict[str, bool | None] = {}  # uid -> увернулся? None: питомец отдыхает
+            waves: list[str] = []
+            for bid, b in BOSSES.items():
+                if is_dead(bid) or not b["dmg"]:
+                    continue
+                hit = dodged = 0
+                for uid in list(b["dmg"]):
+                    if uid not in results:
+                        user = D.get_user(int(uid))
+                        if user is None or is_resting(user):
+                            results[uid] = None  # питомец восстанавливается: босс его не трогает
+                        else:
+                            results[uid] = boss_strike(user)["dodge"]
+                    r = results[uid]
+                    if r is None:
+                        continue
+                    if r:
+                        dodged += 1
+                    else:
+                        hit += 1
+                if hit or dodged:
+                    feed_push(bid, "wave", "", "", hit=hit, dodged=dodged)
+                    waves.append(bid)
+            if waves:
                 D.save_users()
                 save_boss()
-                _mark_dirty(bot)
+                _mark_dirty(bot, *waves)
         except Exception as e:
-            logging.warning("Ошибка удара босса: %s", e)
+            logging.warning("Ошибка удара боссов: %s", e)
 
 
 def start_strikes(bot) -> None:
-    """Запускает фоновые удары босса (можно вызвать при старте бота, повторно безопасно)."""
+    """Запускает фоновые удары боссов (можно вызвать при старте бота, повторно безопасно)."""
     global _strike_task
     if _strike_task is None or _strike_task.done():
         _strike_task = asyncio.create_task(_strike_loop(bot))
 
 
-def _mark_dirty(bot) -> None:
-    global _dirty, _task
-    _dirty = True
+def _mark_dirty(bot, *bids: str) -> None:
+    global _task
+    _dirty.update(bids)
     if _task is None or _task.done():
         _task = asyncio.create_task(_live_loop(bot))
 
 
-async def _show(callback: CallbackQuery, key: str) -> None:
+async def _show(callback: CallbackQuery, key: str, ref: str = "") -> None:
     """Старое сообщение удаляем, присылаем новое."""
     uid = callback.from_user.id
     try:
@@ -873,12 +1094,22 @@ async def _show(callback: CallbackQuery, key: str) -> None:
     except Exception as e:
         logging.warning("Не удалось удалить сообщение: %s", e)
     VIEWERS.pop(uid, None)
-    msg = await send_screen(callback.bot, callback.message.chat.id, uid, key)
+    msg = await send_screen(callback.bot, callback.message.chat.id, uid, key, ref)
     if key == "boss_skills" and msg is not None:
-        _watch(uid, msg.chat.id, msg.message_id)
+        _watch(uid, msg.chat.id, msg.message_id, resolve(ref))
+
+
+def _bid_from(data: str) -> str | None:
+    """Достаёт id босса («normal:3») из callback_data вида boss:действие:normal:3[:...]."""
+    parts = data.split(":")
+    bid = ":".join(parts[2:4])
+    return bid if bid in BOSSES else None
 
 
 # ---------- Хендлеры ----------
+
+_TYPES_RE = "|".join(BOSS_TYPES)
+
 
 @router.callback_query(F.data.in_({"menu:boss", "boss:open"}))
 async def on_open(callback: CallbackQuery):
@@ -889,13 +1120,55 @@ async def on_open(callback: CallbackQuery):
     await _show(callback, "boss")
 
 
-@router.callback_query(F.data == "boss:skills")
-async def on_skills(callback: CallbackQuery):
+@router.callback_query(F.data.regexp(rf"^boss:list:({_TYPES_RE})$"))
+async def on_list(callback: CallbackQuery):
     if await _require_user(callback) is None:
         return
     await callback.answer()
+    await _show(callback, "boss_list", callback.data.split(":")[2])
+
+
+@router.callback_query(F.data.regexp(r"^boss:info:\w+:\d+$"))
+async def on_info(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    bid = _bid_from(callback.data)
+    if bid is None:
+        await callback.answer("Такого босса нет", show_alert=True)
+        return
+    await callback.answer()
+    await _show(callback, "boss_info", bid)
+
+
+@router.callback_query(F.data.regexp(r"^boss:skills:\w+:\d+$"))
+async def on_skills(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    bid = _bid_from(callback.data)
+    if bid is None:
+        await callback.answer("Такого босса нет", show_alert=True)
+        return
+    await callback.answer()
     start_strikes(callback.bot)
-    await _show(callback, "boss_skills")
+    await _show(callback, "boss_skills", bid)
+
+
+@router.callback_query(F.data.regexp(r"^boss:top:\w+:\d+$"))
+async def on_top(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    bid = _bid_from(callback.data)
+    if bid is None:
+        await callback.answer("Такого босса нет", show_alert=True)
+        return
+    await callback.answer()
+    await _show(callback, "boss_top", bid)
+
+
+@router.callback_query(F.data.regexp(r"^boss:(skills|top)$|^boss:hit:\d+$"))
+async def on_old_buttons(callback: CallbackQuery):
+    """Кнопки из старых сообщений (когда босс был один)."""
+    await callback.answer("Окно устарело. Открой раздел «Босс» заново.", show_alert=True)
 
 
 @router.callback_query(F.data.regexp(r"^pskills:(prof|sel:\w+)$"))
@@ -926,18 +1199,10 @@ async def on_pet_skills(callback: CallbackQuery):
     )
 
 
-@router.callback_query(F.data == "boss:top")
-async def on_top(callback: CallbackQuery):
-    if await _require_user(callback) is None:
-        return
-    await callback.answer()
-    await _show(callback, "boss_top")
-
-
-async def _notify_rewards(bot, rewards: dict[str, dict[str, int]], killer: str) -> None:
+async def _notify_rewards(bot, bid: str, rewards: dict[str, dict[str, int]], killer: str) -> None:
     for uid, r in rewards.items():
         text = (
-            f"<b>{_boss_icon()} {escape(BOSS_SHORT)} повержен!</b>\n\n"
+            f"<b>{_boss_icon()} {escape(name_of(bid))} повержен!</b>\n\n"
             f"<i>Последний удар нанёс {escape(killer)}.</i>\n"
             f"<b>Твоя награда:</b> {_coin()} {fmt(r['coins'])}  "
             f"🥩 {r['meat']}  🥭 {r['fruit']}"
@@ -951,23 +1216,28 @@ async def _notify_rewards(bot, rewards: dict[str, dict[str, int]], killer: str) 
         await asyncio.sleep(0.05)
 
 
-@router.callback_query(F.data.regexp(r"^boss:hit:\d+$"))
+@router.callback_query(F.data.regexp(r"^boss:hit:\w+:\d+:\d+$"))
 async def on_hit(callback: CallbackQuery):
     user = await _require_user(callback)
     if user is None:
         return
+    bid = _bid_from(callback.data)
+    if bid is None:
+        await callback.answer("Такого босса нет", show_alert=True)
+        return
     tick()
+    b = BOSSES[bid]
 
     skills = skills_of(user)
-    i = int(callback.data.split(":")[2])
+    i = int(callback.data.split(":")[4])
     if not 0 <= i < len(skills):
         await callback.answer()
         return
     skill = skills[i]
 
-    if is_dead():
+    if is_dead(bid):
         await callback.answer(
-            f"Босс повержен. Вернётся через {fmt_dur(boss['dead_until'] - time.time())}.",
+            f"Босс повержен. Вернётся через {fmt_dur(b['dead_until'] - time.time())}.",
             show_alert=True,
         )
         return
@@ -988,14 +1258,14 @@ async def on_hit(callback: CallbackQuery):
         )
         return
 
-    total, hits = roll_attack(user, skill)
-    dealt = min(total, boss["hp"])
+    total, hits = roll_attack(user, skill, bid)
+    dealt = min(total, b["hp"])
     uid = str(callback.from_user.id)
 
-    boss["hp"] -= dealt
-    boss["dmg"][uid] = int(boss["dmg"].get(uid, 0)) + dealt
-    boss["names"][uid] = nick_of(callback.from_user)
-    boss["last_uid"] = uid
+    b["hp"] -= dealt
+    b["dmg"][uid] = int(b["dmg"].get(uid, 0)) + dealt
+    b["names"][uid] = nick_of(callback.from_user)
+    b["last_uid"] = uid
     user.setdefault("boss_cd", {})[str(i)] = time.time()
 
     crits = sum(1 for _, c in hits if c)
@@ -1003,16 +1273,16 @@ async def on_hit(callback: CallbackQuery):
     if crits:
         text += f" · крит ×{crits}" if len(hits) > 1 else " · КРИТ"
 
-    name = boss["names"][uid]
-    feed_push("hit", uid, name, icon=skill["icon"], skill=skill["name"],
+    name = b["names"][uid]
+    feed_push(bid, "hit", uid, name, icon=skill["icon"], skill=skill["name"],
               dmg=dealt, crit=crits > 0)
 
-    if boss["hp"] <= 0:
-        boss["hp"] = 0
-        feed_push("kill", uid, name)
-        rewards = finish_boss(boss["names"][uid])
+    if b["hp"] <= 0:
+        b["hp"] = 0
+        feed_push(bid, "kill", uid, name)
+        rewards = finish_boss(bid, name)
         await callback.answer(text + ". Босс повержен!", show_alert=True)
-        asyncio.create_task(_notify_rewards(callback.bot, rewards, boss["names"][uid]))
+        asyncio.create_task(_notify_rewards(callback.bot, bid, rewards, name))
     else:
         D.save_users()
         save_boss()
@@ -1020,7 +1290,7 @@ async def on_hit(callback: CallbackQuery):
 
     start_strikes(callback.bot)
     # Своё окно обновляем сразу на месте, окна остальных бойцов через общий цикл
-    _watch(callback.from_user.id, callback.message.chat.id, callback.message.message_id)
+    _watch(callback.from_user.id, callback.message.chat.id, callback.message.message_id, bid)
     await _edit_battle(callback.bot, callback.from_user.id,
                        VIEWERS[callback.from_user.id])
-    _mark_dirty(callback.bot)
+    _mark_dirty(callback.bot, bid)
