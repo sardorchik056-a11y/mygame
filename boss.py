@@ -14,7 +14,7 @@
     крита. Часть навыков пробивает защиту босса.
   * Когда босс падает, награду получают все, кто его бил, пропорционально
     нанесённому урону. Тот, кто добил, получает ещё и бонус.
-  * Каждую минуту боссы бьют питомцев своих бойцов. Урон по питомцам у всех
+  * Каждую минуту босс бьёт питомцев тех, кто бил именно его за последнюю минуту. Урон по питомцам у всех
     боссов одинаковый (BOSS_HIT_PCT). Через respawn_min минут убитый босс возрождается.
 """
 
@@ -123,6 +123,7 @@ TOP_SIZE = 10
 # Удары боссов по питомцам (одинаковые у всех видов)
 BOSS_HIT_PCT = (0.08, 0.25)  # доля максимального HP питомца за один удар босса (8-25%)
 BOSS_STRIKE_INTERVAL = 60    # раз в сколько секунд боссы бьют по своим бойцам
+BOSS_AGGRO_SEC = 60          # босс бьёт только тех, кто бил именно его за последние 60 секунд
 WEAK_MIN = 0.35              # сила и скорость раненого питомца падают плавно до 35% от обычных
                              # (полная форма при 100% HP, минимум при HP = MIN_FIGHT_PCT и ниже)
 DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
@@ -216,6 +217,7 @@ def _fresh(btype: str, kills: int = 0) -> dict:
         "kills": kills,      # сколько раз босса уже убивали
         "killer": None,      # ник того, кто добил в последний раз
         "last_uid": None,
+        "last_hit": {},      # {"user_id": время последнего удара по этому боссу}
     }
 
 
@@ -1104,19 +1106,22 @@ _strike_task: asyncio.Task | None = None
 
 
 async def _strike_loop(bot) -> None:
-    """Раз в BOSS_STRIKE_INTERVAL секунд каждый босс бьёт по питомцам своих бойцов.
-    Питомец получает не больше одного удара в минуту, даже если бьётся с несколькими боссами."""
+    """Раз в BOSS_STRIKE_INTERVAL секунд каждый босс бьёт по питомцам тех, кто бил именно его
+    за последние BOSS_AGGRO_SEC секунд. Питомец получает не больше одного удара в минуту, даже если бьётся с несколькими боссами."""
     while True:
         await asyncio.sleep(BOSS_STRIKE_INTERVAL)
         try:
             tick()
             results: dict[str, bool | None] = {}  # uid -> увернулся? None: питомец отдыхает
             waves: list[str] = []
+            now = time.time()
             for bid, b in BOSSES.items():
                 if is_dead(bid) or not b["dmg"]:
                     continue
                 hit = dodged = 0
-                for uid in list(b["dmg"]):
+                for uid, ts in list(b["last_hit"].items()):
+                    if now - ts > BOSS_AGGRO_SEC:
+                        continue  # давно не бил этого босса: он его не трогает
                     if uid not in results:
                         user = D.get_user(int(uid))
                         if user is None or is_resting(user):
@@ -1365,6 +1370,7 @@ async def on_hit(callback: CallbackQuery):
     b["dmg"][uid] = int(b["dmg"].get(uid, 0)) + dealt
     b["names"][uid] = nick_of(callback.from_user)
     b["last_uid"] = uid
+    b["last_hit"][uid] = time.time()
     t = TOTALS.setdefault(uid, {"dmg": 0, "name": b["names"][uid]})
     t["dmg"] += dealt
     t["name"] = b["names"][uid]
