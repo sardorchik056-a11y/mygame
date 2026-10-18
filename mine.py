@@ -428,7 +428,7 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     ]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{p['icon']} {p['name'].upper()}</b></p>"
+        f"<p><b>{p['name'].upper()}</b></p>"
         f"<blockquote><i>{p['desc']}</i></blockquote>"
         + _tree(stats, "Характеристики")
         + _gap()
@@ -468,7 +468,7 @@ def miner_card_html(user_id: int, i: int, with_image: bool = False) -> str:
 
     if have:
         eq = eq_of(m, i)
-        kids = [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.")
+        kids = [(PICKAXES[p]["name"], f"{c} шт.")
                 for p, c in sorted(eq.items())]
         if bare(m, i):
             kids.append(("🤲 Без кирки", f"{bare(m, i)} шт."))
@@ -513,7 +513,7 @@ def give_html(user_id: int, i: int, with_image: bool = False) -> str:
 
     tree = (
         _tree(
-            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.") for p, c in free],
+            [(PICKAXES[p]["name"], f"{c} шт.") for p, c in free],
             "Свободные кирки",
         )
         if free else ""
@@ -533,7 +533,7 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
 
     tree = (
         _tree(
-            [(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']}", f"{c} шт.")
+            [(PICKAXES[p]["name"], f"{c} шт.")
              for p, c in sorted(eq.items())],
             "Надетые кирки",
         )
@@ -554,7 +554,7 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
 # ---------- Клавиатуры (под сообщением) ----------
 
 def _btn(text: str, data: str, emoji_id: str | None = None,
-         style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
+         style: ButtonStyle = ButtonStyle.SUCCESS) -> InlineKeyboardButton:
     return InlineKeyboardButton(
         text=text,
         callback_data=data,
@@ -568,7 +568,7 @@ def _pairs(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButto
 
 
 def _back_row(data: str) -> list[InlineKeyboardButton]:
-    return [_btn("Назад", data, D.BACK_EMOJI_ID)]
+    return [_btn("Назад", data, D.BACK_EMOJI_ID, ButtonStyle.PRIMARY)]
 
 
 def mine_kb(user_id: int) -> InlineKeyboardMarkup:
@@ -581,7 +581,7 @@ def mine_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def picks_kb(user_id: int) -> InlineKeyboardMarkup:
-    rows = _pairs([_btn(f"{p['icon']} {p['name']}", f"mine:pick:{i}") for i, p in enumerate(PICKAXES)])
+    rows = _pairs([_btn(p["name"], f"mine:pick:{i}") for i, p in enumerate(PICKAXES)])
     rows.append(_back_row("mine:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -616,7 +616,7 @@ def _give_kb(i: int):
         buttons = []
         if bare(m, i) > 0:
             buttons = [
-                _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({picks_free(m, p)})",
+                _btn(f"{PICKAXES[p]['name']} ({picks_free(m, p)})",
                      f"mine:give:{i}:{p}")
                 for p in range(len(PICKAXES)) if picks_free(m, p) > 0
             ]
@@ -631,7 +631,7 @@ def _take_kb(i: int):
         _, m = load(user_id)
         rows = _pairs(
             [
-                _btn(f"{PICKAXES[p]['icon']} {PICKAXES[p]['name']} ({c})",
+                _btn(f"{PICKAXES[p]['name']} ({c})",
                      f"mine:take:{i}:{p}")
                 for p, c in sorted(eq_of(m, i).items())
             ]
