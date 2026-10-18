@@ -65,6 +65,7 @@ PLACE_EMOJI = ("5413566144986503832", "🏆")     # место
 ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атаковать»
 RESPAWN_EMOJI = ("5337258577729961075", "⏳")   # возрождение
 REWARD_EMOJI = ("5846184826184408721", "🎁")    # награда
+LAST_HIT_EMOJI = ("5397782960512444700", "📌")  # последний удар
 # Места в топе: с 1 по 10
 RANK_EMOJI = [
     ("5440539497383087970", "🥇"), ("5447203607294265305", "🥈"), ("5453902265922376865", "🥉"),
@@ -696,17 +697,22 @@ def _head(bid: str, sub: str = "") -> str:
 
 
 def _reward_tree(c: dict) -> str:
+    """Два отдельных блока: награда за победу и награда за последний удар."""
     reward = [
         (f"{_coin()} Монеты", fmt(c["reward"]["coins"])),
         ("🥩 Мясо", fmt(c["reward"]["meat"])),
         ("🥭 Фрукты", fmt(c["reward"]["fruit"])),
-        ("🎯 Последний удар", "", [
-            (f"{_coin()} Монеты", f"+{fmt(c['last']['coins'])}"),
-            ("🥩 Мясо", f"+{c['last']['meat']}"),
-            ("🥭 Фрукты", f"+{c['last']['fruit']}"),
-        ]),
     ]
-    return _tree(reward, f"{D.custom_emoji(REWARD_EMOJI)} Награда за победу (делится по доле урона)")
+    last = [
+        (f"{_coin()} Монеты", f"+{fmt(c['last']['coins'])}"),
+        ("🥩 Мясо", f"+{c['last']['meat']}"),
+        ("🥭 Фрукты", f"+{c['last']['fruit']}"),
+    ]
+    return (
+        _tree(reward, f"{D.custom_emoji(REWARD_EMOJI)} Награда за победу (делится по доле урона)")
+        + _gap()
+        + _tree(last, f"{D.custom_emoji(LAST_HIT_EMOJI)} Награда за последний удар")
+    )
 
 
 def boss_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
