@@ -67,6 +67,8 @@ ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атако�
 RESPAWN_EMOJI = ("5337258577729961075", "⏳")   # возрождение
 REWARD_EMOJI = ("5846184826184408721", "🎁")    # награда
 LAST_HIT_EMOJI = ("5397782960512444700", "📌")  # последний удар
+KILL_EMOJI = ("5285535716808342592", "☠️")      # убийство босса
+PERIOD_EMOJI = ("5472026645659401564", "🗓")    # периоды топа
 # Места в топе: с 1 по 10
 RANK_EMOJI = [
     ("5440539497383087970", "🥇"), ("5447203607294265305", "🥈"), ("5453902265922376865", "🥉"),
@@ -936,7 +938,7 @@ def skills_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
 
 def _kind_icon(kind: str) -> str:
     return {
-        "kills": "☠️",
+        "kills": D.custom_emoji(KILL_EMOJI),
         "dmg": D.custom_emoji(BLOOD_EMOJI),
         "last": D.custom_emoji(LAST_HIT_EMOJI),
     }[kind]
@@ -994,7 +996,7 @@ def top_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     return (
         f"{_image(with_image)}"
         + f"<p><b>{D.custom_emoji(PLACE_EMOJI)} ТОП БОЙЦОВ</b><br>&nbsp;<br>"
-        + f"<b>{_kind_icon(kind)} {label} · {PERIODS[period][0]}</b></p>"
+        + f"<b>{_kind_icon(kind)} {label} · {D.custom_emoji(PERIOD_EMOJI)} {PERIODS[period][0]}</b></p>"
         + f"<blockquote><i>{hint}</i></blockquote>"
         + body
         + _gap()
@@ -1083,10 +1085,11 @@ def top_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
         return ButtonStyle.SUCCESS if is_chosen else ButtonStyle.PRIMARY
 
     periods = [
-        _btn(PERIODS[p][0], f"boss:top:{p}:{kind}", style=pick(p == period)) for p in PERIODS
+        _btn(PERIODS[p][0], f"boss:top:{p}:{kind}", PERIOD_EMOJI[0], pick(p == period))
+        for p in PERIODS
     ]
     kinds = [
-        _btn("☠️ Убийства", f"boss:top:{period}:kills", style=pick(kind == "kills")),
+        _btn("Убийства", f"boss:top:{period}:kills", KILL_EMOJI[0], pick(kind == "kills")),
         _btn("Урон", f"boss:top:{period}:dmg", BLOOD_EMOJI[0], pick(kind == "dmg")),
         _btn("Посл. удар", f"boss:top:{period}:last", LAST_HIT_EMOJI[0], pick(kind == "last")),
     ]
