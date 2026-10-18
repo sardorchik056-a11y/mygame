@@ -63,6 +63,16 @@ FIGHTERS_EMOJI = ("6032609071373226027", "👥")  # бойцов
 BLOOD_EMOJI = ("5269535069550162819", "🩸")     # урон
 PLACE_EMOJI = ("5413566144986503832", "🏆")     # место
 ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атаковать»
+RESPAWN_EMOJI = ("5337258577729961075", "⏳")   # возрождение
+REWARD_EMOJI = ("5846184826184408721", "🎁")    # награда
+# Места в топе: с 1 по 10
+RANK_EMOJI = [
+    ("5440539497383087970", "🥇"), ("5447203607294265305", "🥈"), ("5453902265922376865", "🥉"),
+    ("5830434773088083875", "4️⃣"), ("5827941630472100575", "5️⃣"), ("5830446086031941275", "6️⃣"),
+    ("5830341589477629469", "7️⃣"), ("5829992769413717353", "8️⃣"), ("5830388872772591861", "9️⃣"),
+    ("5827670648100494160", "🔟"),
+]
+LOW_HP_RED = 0.20        # кнопка босса красная, когда у него осталось меньше 20% HP
 
 # Виды боссов. Отличаются здоровьем, защитой, наградой, временем возрождения и тем,
 # сколько боссов вида может жить одновременно (slots). Урон боссов по питомцам
@@ -696,7 +706,7 @@ def _reward_tree(c: dict) -> str:
             ("🥭 Фрукты", f"+{c['last']['fruit']}"),
         ]),
     ]
-    return _tree(reward, "Награда за победу (делится по доле урона)")
+    return _tree(reward, f"{D.custom_emoji(REWARD_EMOJI)} Награда за победу (делится по доле урона)")
 
 
 def boss_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
@@ -720,7 +730,7 @@ def boss_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
         "Урон боссов по питомцам у всех одинаковый.</i></blockquote>"
         + _table_n(("Вид", "Живых", "Здоровье"), rows)
         + _gap()
-        + _tree(rewards, "Награда за победу (делится по доле урона)")
+        + _tree(rewards, f"{D.custom_emoji(REWARD_EMOJI)} Награда за победу (делится по доле урона)")
     )
 
 
@@ -732,8 +742,8 @@ def boss_list_html(user_id: int, with_image: bool = False, ref: str = "") -> str
     about = [
         (f"{_hp_icon()} Здоровье", fmt(c["hp"])),
         (f"{_stat_icon('def')} Защита", str(c["def"])),
-        ("⏳ Возрождение", f"через {fmt_dur(c['respawn_min'] * 60)}"),
-        (f"{_coin()} Награда", fmt(c["reward"]["coins"])),
+        (f"{D.custom_emoji(RESPAWN_EMOJI)} Возрождение", fmt_dur(c['respawn_min'] * 60)),
+        (f"{D.custom_emoji(REWARD_EMOJI)} Награда", fmt(c["reward"]["coins"])),
     ]
     fighters = D.custom_emoji(FIGHTERS_EMOJI)
     rows = []
@@ -767,7 +777,7 @@ def boss_info_html(user_id: int, with_image: bool = False, ref: str = "") -> str
     about = [
         status,
         (f"{_stat_icon('def')} Защита", str(c["def"])),
-        ("⏳ Возрождение", f"через {fmt_dur(c['respawn_min'] * 60)}"),
+        (f"{D.custom_emoji(RESPAWN_EMOJI)} Возрождение", fmt_dur(c['respawn_min'] * 60)),
     ]
     return (
         f"{_image(with_image)}"
@@ -871,10 +881,9 @@ def top_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     rank = totals_ranking()
     total = sum(t["dmg"] for _, t in rank) or 1
 
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     rows = [
         (
-            f"{medals.get(n, str(n) + '.')} {escape(str(t['name']))}",
+            f"{D.custom_emoji(RANK_EMOJI[n - 1])} {escape(str(t['name']))}",
             f"{fmt(t['dmg'])} · {t['dmg'] / total * 100:.1f}%",
         )
         for n, (_, t) in enumerate(rank[:TOP_SIZE], start=1)
@@ -930,12 +939,13 @@ def list_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
     t = ref if ref in BOSS_TYPES else TYPE_ORDER[0]
     buttons = []
     for bid in all_ids(t):
+        short = name_of(bid).split(",")[0]
         if is_dead(bid):
-            buttons.append(_btn(f"☠️ {name_of(bid).split(',')[0]}", f"boss:info:{bid}",
-                                style=ButtonStyle.DANGER))
+            buttons.append(_btn(f"☠️ {short}", f"boss:info:{bid}"))
         else:
-            buttons.append(_btn(f"{name_of(bid).split(',')[0]} · {hp_ratio(bid) * 100:.0f}%",
-                                f"boss:info:{bid}", style=ButtonStyle.SUCCESS))
+            style = ButtonStyle.DANGER if hp_ratio(bid) < LOW_HP_RED else ButtonStyle.SUCCESS
+            buttons.append(_btn(f"{short} · {hp_ratio(bid) * 100:.0f}%",
+                                f"boss:info:{bid}", style=style))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append(_back_row("boss:open"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
