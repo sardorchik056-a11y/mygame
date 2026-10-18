@@ -362,7 +362,7 @@ def pet_card_html(pet_key: str, with_image: bool = False, preview: bool = False)
     buttons = "" if preview else (
         "<tg-button-row>"
         f'<tg-button type="callback_data" data="pskills:sel:{pet_key}" '
-        'style="primary">⚔️ Навыки</tg-button>'
+        'style="primary">🌀 Навыки</tg-button>'
         "</tg-button-row>"
         "<tg-button-row>"
         f'<tg-button type="callback_data" data="pet:pick:{pet_key}" '
@@ -444,7 +444,7 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
         # Кнопки прямо в теле сообщения (Bot API 10.3); «Прокачать» на макс. уровне нет
         + "<tg-button-row>"
         '<tg-button type="callback_data" data="pskills:prof" '
-        'style="primary">⚔️ Навыки</tg-button>'
+        'style="primary">🌀 Навыки</tg-button>'
         "</tg-button-row>"
         + (
             ""
