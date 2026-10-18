@@ -94,7 +94,8 @@ WEAK_MIN = 0.35              # сила и скорость раненого п�
 DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
 DODGE_MAX = 0.4              # уворот не чаще 40%
 REGEN_PCT_PER_MIN = 10       # +10% HP в минуту: полностью питомец восстанавливается за 10 минут
-MIN_FIGHT_PCT = 0.25         # без сил (HP ниже 25%) в бой не пустят
+MIN_FIGHT_PCT = 0.15         # HP ниже 15%: питомец уходит на отдых, босс его не бьёт, атаковать он не может
+RESUME_PCT = 0.80            # вернуться в бой можно, когда HP снова 80% и выше
 
 # «Лайв»-окно боя
 FEED_SIZE = 10        # сколько последних событий хранить
@@ -267,13 +268,26 @@ def _set_pet_hp(user: dict, hp: float) -> None:
     user["boss_hp_ts"] = time.time()
 
 
-def pet_ready_in(user: dict) -> float:
-    """Через сколько секунд питомец снова сможет драться (0, если уже может)."""
+def is_resting(user: dict) -> bool:
+    """Питомец отдыхает после боя: босс его не бьёт, а он не может атаковать.
+    Отдых включается, когда HP падает ниже MIN_FIGHT_PCT, и длится, пока HP не поднимется до RESUME_PCT."""
     mx = pet_max_hp(user)
-    need = mx * MIN_FIGHT_PCT - pet_hp(user)
-    if need <= 0:
+    hp = pet_hp(user)
+    resting = bool(user.get("boss_rest"))
+    if not resting and hp < mx * MIN_FIGHT_PCT:
+        resting = True
+    elif resting and hp >= mx * RESUME_PCT:
+        resting = False
+    user["boss_rest"] = resting
+    return resting
+
+
+def pet_ready_in(user: dict) -> float:
+    """Через сколько секунд питомец вернётся в бой, то есть дойдёт до RESUME_PCT (0, если не отдыхает)."""
+    if not is_resting(user):
         return 0.0
-    return need / (mx * REGEN_PCT_PER_MIN / 100 / 60)
+    mx = pet_max_hp(user)
+    return max(0.0, mx * RESUME_PCT - pet_hp(user)) / (mx * REGEN_PCT_PER_MIN / 100 / 60)
 
 
 def pet_form(user: dict) -> float:
@@ -304,6 +318,7 @@ def boss_strike(user: dict) -> dict:
     dmg = max(1, round(pet_max_hp(user) * random.uniform(*BOSS_HIT_PCT)))
     hp = max(0.0, hp - dmg)
     _set_pet_hp(user, hp)
+    is_resting(user)  # если HP упало ниже порога, питомец уходит на отдых
     return {"dodge": False, "dmg": dmg, "hp": hp}
 
 
@@ -591,7 +606,7 @@ def skills_html(user_id: int, with_image: bool = False) -> str:
             ("💨 Уворот", f"{dodge_chance(user) * 100:.0f}%"),
         ]
         if wait > 0:
-            pet_rows.append(("😴 Без сил", f"вернётся через {fmt_dur(wait)}"))
+            pet_rows.append(("😴 Отдыхает", f"вернётся в бой через {fmt_dur(wait)}"))
 
     if FEED:
         blood = D.custom_emoji(BLOOD_EMOJI)
@@ -821,8 +836,8 @@ async def _strike_loop(bot) -> None:
             hit = dodged = 0
             for uid in list(boss["dmg"]):
                 user = D.get_user(int(uid))
-                if user is None or pet_hp(user) <= 0:
-                    continue  # питомец уже без сил, добивать некого
+                if user is None or is_resting(user):
+                    continue  # питомец восстанавливается: босс его не трогает
                 if boss_strike(user)["dodge"]:
                     dodged += 1
                 else:
@@ -960,7 +975,7 @@ async def on_hit(callback: CallbackQuery):
     wait = pet_ready_in(user)
     if wait > 0:
         await callback.answer(
-            f"{D.PETS[user['pet']]['name']} без сил. "
+            f"{D.PETS[user['pet']]['name']} отдыхает и не может атаковать. "
             f"Вернётся в бой через {fmt_dur(wait)}.",
             show_alert=True,
         )
