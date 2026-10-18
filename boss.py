@@ -19,6 +19,7 @@
 """
 
 import asyncio
+import datetime
 from collections import deque
 import json
 import logging
@@ -254,42 +255,91 @@ def _load() -> dict[str, dict]:
 BOSSES: dict[str, dict] = _load()
 
 
-def _load_totals() -> dict[str, dict]:
-    """Урон каждого игрока по всем боссам за всё время: {uid: {"dmg": число, "name": ник}}."""
+STAT_KINDS = ("kills", "dmg", "last")
+STAT_DAYS_KEPT = 40   # посуточную статистику старше этого срока удаляем (хватает для «месяца»)
+
+
+def _zero() -> dict:
+    return {"dmg": 0, "kills": 0, "last": 0}
+
+
+def _load_stats() -> dict:
+    """Статистика бойцов: {"names": {uid: ник}, "total": {uid: {...}}, "days": {дата: {uid: {...}}}}.
+    dmg: урон по боссам, kills: убито боссов с участием игрока, last: добивающих ударов."""
     try:
         data = json.loads(BOSS_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    totals = data.get("totals")
-    if totals is None:  # первый запуск: берём урон из текущих боёв
-        totals = {}
+    stats = data.get("stats")
+    if stats:
+        stats.setdefault("names", {})
+        stats.setdefault("total", {})
+        stats.setdefault("days", {})
+        return stats
+
+    stats = {"names": {}, "total": {}, "days": {}}
+    old = data.get("totals")  # прошлая версия хранила только общий урон
+    if old is not None:
+        for uid, t in old.items():
+            stats["total"][uid] = {**_zero(), "dmg": int(t.get("dmg", 0))}
+            stats["names"][uid] = t.get("name", "Игрок")
+    else:  # самый первый запуск: берём урон из текущих боёв
         for b in BOSSES.values():
             for uid, dmg in b["dmg"].items():
-                t = totals.setdefault(uid, {"dmg": 0, "name": "Игрок"})
-                t["dmg"] += int(dmg)
-                t["name"] = b["names"].get(uid, t["name"])
-    return totals
+                rec = stats["total"].setdefault(uid, _zero())
+                rec["dmg"] += int(dmg)
+                stats["names"][uid] = b["names"].get(uid, stats["names"].get(uid, "Игрок"))
+    return stats
 
 
-TOTALS: dict[str, dict] = _load_totals()
+STATS: dict = _load_stats()
 
 
 def save_boss() -> None:
     BOSS_FILE.write_text(
-        json.dumps({"bosses": BOSSES, "totals": TOTALS}, ensure_ascii=False, indent=2),
+        json.dumps({"bosses": BOSSES, "stats": STATS}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
 
-def totals_ranking() -> list[tuple[str, dict]]:
-    return sorted(TOTALS.items(), key=lambda kv: kv[1]["dmg"], reverse=True)
+def stat_add(uid: str, name: str | None = None, **inc: int) -> None:
+    """Записывает результат бойца: в общий зачёт и в сегодняшний день."""
+    if name:
+        STATS["names"][uid] = name
+    today = datetime.date.today()
+    day = STATS["days"].setdefault(today.isoformat(), {})
+    for rec in (day.setdefault(uid, _zero()), STATS["total"].setdefault(uid, _zero())):
+        for kind, value in inc.items():
+            rec[kind] += value
+    # старые дни убираем
+    limit = (today - datetime.timedelta(days=STAT_DAYS_KEPT)).isoformat()
+    for d in [d for d in STATS["days"] if d < limit]:
+        del STATS["days"][d]
 
 
-def totals_place(uid: str) -> int | None:
-    for n, (u, _) in enumerate(totals_ranking(), start=1):
-        if u == uid:
-            return n
-    return None
+# Периоды топа: ключ -> (название, сколько последних дней, сдвиг от сегодняшнего дня)
+PERIODS: dict[str, tuple[str, int, int]] = {
+    "today": ("Сегодня", 1, 0),
+    "yday": ("Вчера", 1, 1),
+    "week": ("Неделя", 7, 0),
+    "month": ("Месяц", 30, 0),
+    "all": ("Всё время", 0, 0),
+}
+
+
+def stat_rank(period: str, kind: str) -> list[tuple[str, int]]:
+    """Рейтинг игроков за период по выбранному показателю (нули не показываем)."""
+    if period == "all":
+        values = {uid: rec[kind] for uid, rec in STATS["total"].items()}
+    else:
+        _, length, shift = PERIODS[period]
+        today = datetime.date.today()
+        days = {(today - datetime.timedelta(days=shift + n)).isoformat() for n in range(length)}
+        values: dict[str, int] = {}
+        for d in days:
+            for uid, rec in STATS["days"].get(d, {}).items():
+                values[uid] = values.get(uid, 0) + rec[kind]
+    return sorted(((u, v) for u, v in values.items() if v > 0), key=lambda kv: kv[1], reverse=True)
 
 
 def is_dead(bid: str) -> bool:
@@ -508,6 +558,9 @@ def finish_boss(bid: str, killer_name: str) -> dict[str, dict[str, int]]:
         user["meat"] += r["meat"]
         user["fruit"] += r["fruit"]
         rewards[uid] = r
+
+    for uid in b["dmg"]:
+        stat_add(uid, b["names"].get(uid), kills=1, last=1 if uid == b.get("last_uid") else 0)
 
     b["dead_until"] = time.time() + c["respawn_min"] * 60
     b["kills"] += 1
@@ -881,35 +934,68 @@ def skills_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     )
 
 
+def _kind_icon(kind: str) -> str:
+    return {
+        "kills": "☠️",
+        "dmg": D.custom_emoji(BLOOD_EMOJI),
+        "last": D.custom_emoji(LAST_HIT_EMOJI),
+    }[kind]
+
+
+# Показатели топа: ключ -> (название, заголовок колонки, пояснение)
+KINDS: dict[str, tuple[str, str, str]] = {
+    "kills": ("Убийство босса", "Убийств",
+              "Сколько боссов было убито с участием игрока."),
+    "dmg": ("Урон по боссу", "Урон",
+            "Сколько урона игрок нанёс боссам."),
+    "last": ("Последний удар", "Добиваний",
+             "Сколько раз игрок наносил добивающий удар."),
+}
+
+
+def parse_top(ref: str) -> tuple[str, str]:
+    """Из ссылки вида «week:dmg» достаёт (период, показатель), по умолчанию всё время и урон."""
+    period, _, kind = ref.partition(":")
+    return (period if period in PERIODS else "all", kind if kind in KINDS else "dmg")
+
+
 def top_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
-    """Общий топ бойцов: сколько урона игрок нанёс всем боссам за всё время."""
+    """Топ бойцов за выбранный период по выбранному показателю."""
+    period, kind = parse_top(ref)
     uid = str(user_id)
-    rank = totals_ranking()
-    total = sum(t["dmg"] for _, t in rank) or 1
+    full = stat_rank(period, kind)
+    total = sum(v for _, v in full) or 1
+    label, column, hint = KINDS[kind]
+
+    def show(v: int) -> str:
+        return f"{fmt(v)} · {v / total * 100:.1f}%" if kind == "dmg" else fmt(v)
 
     rows = [
         (
-            f"{D.custom_emoji(RANK_EMOJI[n - 1])} {escape(str(t['name']))}",
-            f"{fmt(t['dmg'])} · {t['dmg'] / total * 100:.1f}%",
+            f"{D.custom_emoji(RANK_EMOJI[n - 1])} {escape(str(STATS['names'].get(u, 'Игрок')))}",
+            show(v),
         )
-        for n, (_, t) in enumerate(rank[:TOP_SIZE], start=1)
+        for n, (u, v) in enumerate(full[:TOP_SIZE], start=1)
     ]
-    me = totals_place(uid)
     if rows:
-        body = _table(rows, head=("Игрок", "Урон · доля"))
+        body = _table(rows, head=("Игрок", column + (" · доля" if kind == "dmg" else "")))
     else:
-        body = "<p><i>Пока никто не бил боссов. Стань первым.</i></p>"
-    tail = (
-        _tree([
-            (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(me)),
-            (f"{D.custom_emoji(BLOOD_EMOJI)} Твой урон", fmt(TOTALS[uid]["dmg"])),
+        body = "<p><i>За этот период пока никого нет.</i></p>"
+
+    mine = next(((n, v) for n, (u, v) in enumerate(full, start=1) if u == uid), None)
+    if mine:
+        tail = _tree([
+            (f"{D.custom_emoji(PLACE_EMOJI)} Твоё место", str(mine[0])),
+            (f"{_kind_icon(kind)} {column}", fmt(mine[1])),
         ], "Твой результат")
-        if me else "<p><i>Ты ещё не бил боссов.</i></p>"
-    )
+    else:
+        tail = "<p><i>Тебя в этом топе пока нет.</i></p>"
+
     return (
         f"{_image(with_image)}"
         + f"<p><b>{D.custom_emoji(PLACE_EMOJI)} ТОП БОЙЦОВ</b><br>&nbsp;<br>"
-        + "<b>Весь урон по всем боссам за всё время</b></p>"
+        + f"<b>{_kind_icon(kind)} {label} · {PERIODS[period][0]}</b></p>"
+        + f"<blockquote><i>{hint}</i></blockquote>"
         + body
         + _gap()
         + tail
@@ -990,7 +1076,23 @@ def skills_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
 
 
 def top_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[_back_row("boss:open")])
+    """Периоды (два ряда), показатели (один ряд) и «Назад». Выбранное подсвечено зелёным."""
+    period, kind = parse_top(ref)
+
+    def pick(is_chosen: bool) -> ButtonStyle:
+        return ButtonStyle.SUCCESS if is_chosen else ButtonStyle.PRIMARY
+
+    periods = [
+        _btn(PERIODS[p][0], f"boss:top:{p}:{kind}", style=pick(p == period)) for p in PERIODS
+    ]
+    kinds = [
+        _btn("☠️ Убийства", f"boss:top:{period}:kills", style=pick(kind == "kills")),
+        _btn("Урон", f"boss:top:{period}:dmg", BLOOD_EMOJI[0], pick(kind == "dmg")),
+        _btn("Посл. удар", f"boss:top:{period}:last", LAST_HIT_EMOJI[0], pick(kind == "last")),
+    ]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[periods[:3], periods[3:], kinds, _back_row("boss:open")]
+    )
 
 
 # ---------- Отправка ----------
@@ -1281,13 +1383,42 @@ async def on_skills(callback: CallbackQuery):
     await _show(callback, "boss_skills", bid)
 
 
-@router.callback_query(F.data.regexp(r"^boss:top(:\w+:\d+)?$"))
+async def _edit_top(callback: CallbackQuery, ref: str) -> bool:
+    """Переключение периода или показателя: правим окно топа на месте."""
+    uid = callback.from_user.id
+    file_id = D.pet_images.get("boss_top")
+    kwargs = {"html": top_html(uid, bool(file_id), ref)}
+    if file_id:
+        kwargs["media"] = [InputRichMessageMedia(id="pet", media=InputMediaPhoto(media=file_id))]
+    try:
+        await callback.bot.edit_message_text(
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            rich_message=InputRichMessage(**kwargs),
+            reply_markup=top_kb(uid, ref),
+        )
+        return True
+    except TelegramBadRequest as e:
+        return "not modified" in str(e).lower()
+    except Exception as e:
+        logging.warning("Не удалось обновить топ: %s", e)
+        return False
+
+
+@router.callback_query(F.data.regexp(r"^boss:top(:\w+:\w+)?$"))
 async def on_top(callback: CallbackQuery):
-    """Общий топ бойцов (кнопки со старым id босса тоже ведут сюда)."""
+    """Топ бойцов. Кнопка с экрана выбора открывает его заново, кнопки периода и показателя
+    переключают на месте. Старые кнопки с id босса открывают топ по умолчанию."""
     if await _require_user(callback) is None:
         return
     await callback.answer()
-    await _show(callback, "boss_top")
+    parts = callback.data.split(":")
+    ref = ""
+    if len(parts) == 4 and parts[2] in PERIODS and parts[3] in KINDS:
+        ref = f"{parts[2]}:{parts[3]}"
+        if await _edit_top(callback, ref):
+            return
+    await _show(callback, "boss_top", ref)
 
 
 @router.callback_query(F.data.regexp(r"^boss:skills$|^boss:hit:\d+$"))
@@ -1392,9 +1523,7 @@ async def on_hit(callback: CallbackQuery):
     b["names"][uid] = nick_of(callback.from_user)
     b["last_uid"] = uid
     b["last_hit"][uid] = time.time()
-    t = TOTALS.setdefault(uid, {"dmg": 0, "name": b["names"][uid]})
-    t["dmg"] += dealt
-    t["name"] = b["names"][uid]
+    stat_add(uid, b["names"][uid], dmg=dealt)
     user.setdefault("boss_cd", {})[str(i)] = time.time()
 
     crits = sum(1 for _, c in hits if c)
