@@ -76,7 +76,7 @@ ATTACK_EMOJI = ("5454014806950429357", "⚔️")    # кнопка «Атако�
 #   names       имена боссов (по одному на каждое место, длина = slots)
 BOSS_TYPES: dict[str, dict] = {
     "normal": {
-        "title": "Обычные", "one": "Обычный", "icon": "🟢",
+        "title": "Обычные", "one": "Обычный", "icon": "🟢", "emoji": ("5458460995749944813", "🟢"),
         "hp": 100_000, "slots": 10, "def": 10, "respawn_min": 30,
         "reward": {"coins": 20_000, "meat": 100, "fruit": 100},
         "last": {"coins": 2_000, "meat": 10, "fruit": 10},
@@ -90,7 +90,7 @@ BOSS_TYPES: dict[str, dict] = {
         ],
     },
     "hard": {
-        "title": "Сложные", "one": "Сложный", "icon": "🟠",
+        "title": "Сложные", "one": "Сложный", "icon": "🟠", "emoji": ("5458699027132455518", "🟠"),
         "hp": 500_000, "slots": 5, "def": 20, "respawn_min": 60,
         "reward": {"coins": 120_000, "meat": 600, "fruit": 600},
         "last": {"coins": 12_000, "meat": 60, "fruit": 60},
@@ -101,7 +101,7 @@ BOSS_TYPES: dict[str, dict] = {
         "names": ["Рагна Громовая", "Ледяной Страж", "Пепельный Дракон", "Кровавая Королева", "Железный Палач"],
     },
     "insane": {
-        "title": "Безумные", "one": "Безумный", "icon": "🔴",
+        "title": "Безумные", "one": "Безумный", "icon": "🔴", "emoji": ("5458791832785787979", "🔴"),
         "hp": 5_000_000, "slots": 2, "def": 35, "respawn_min": 120,
         "reward": {"coins": 1_500_000, "meat": 6_000, "fruit": 6_000},
         "last": {"coins": 150_000, "meat": 600, "fruit": 600},
@@ -586,6 +586,11 @@ def _boss_icon() -> str:
     return D.custom_emoji(BOSS_EMOJI)
 
 
+def _type_icon(btype: str) -> str:
+    """Кастомный эмодзи вида босса."""
+    return D.custom_emoji(BOSS_TYPES[btype]["emoji"])
+
+
 def _hp_icon() -> str:
     """Тот же эмодзи здоровья, что и в характеристиках питомца."""
     return D.custom_emoji(D.STAT_EMOJI["hp"])
@@ -698,13 +703,13 @@ def boss_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
     """Первое окно: выбор вида босса."""
     tick()
     rows = [
-        (f"{BOSS_TYPES[t]['icon']} {BOSS_TYPES[t]['title']}",
+        (f"{_type_icon(t)} {BOSS_TYPES[t]['title']}",
          f"{alive_count(t)}/{BOSS_TYPES[t]['slots']}",
          fmt(BOSS_TYPES[t]["hp"]))
         for t in TYPE_ORDER
     ]
     rewards = [
-        (f"{BOSS_TYPES[t]['icon']} {BOSS_TYPES[t]['title']}",
+        (f"{_type_icon(t)} {BOSS_TYPES[t]['title']}",
          f"{fmt(BOSS_TYPES[t]['reward']['coins'])} {_coin()}")
         for t in TYPE_ORDER
     ]
@@ -742,7 +747,7 @@ def boss_list_html(user_id: int, with_image: bool = False, ref: str = "") -> str
                          f"{hp_ratio(bid) * 100:.0f}% {fighters} {len(b['dmg'])}"))
     return (
         f"{_image(with_image)}"
-        f"<p><b>{c['icon']} {c['title'].upper()} БОССЫ</b><br>&nbsp;<br><b>Выбери босса</b></p>"
+        f"<p><b>{_type_icon(t)} {c['title'].upper()} БОССЫ</b><br>&nbsp;<br><b>Выбери босса</b></p>"
         f"<blockquote><i>{escape(c['story'])}</i></blockquote>"
         + _tree(about, "Характеристики")
         + _gap()
@@ -766,7 +771,7 @@ def boss_info_html(user_id: int, with_image: bool = False, ref: str = "") -> str
     ]
     return (
         f"{_image(with_image)}"
-        + _head(bid, f"<b>{c['icon']} {c['one']} босс</b>")
+        + _head(bid, f"<b>{_type_icon(type_of(bid))} {c['one']} босс</b>")
         + f"<blockquote><i>{escape(c['story'])}</i></blockquote>"
         + _tree(about, "О боссе")
         + _gap()
@@ -913,7 +918,7 @@ def boss_kb(user_id: int, ref: str = "") -> InlineKeyboardMarkup:
     """Выбор вида босса: три кнопки в ряд только с эмодзи, ниже общий топ бойцов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn(BOSS_TYPES[t]["icon"], f"boss:list:{t}") for t in TYPE_ORDER],
+            [_btn("\u2800", f"boss:list:{t}", BOSS_TYPES[t]["emoji"][0]) for t in TYPE_ORDER],
             [_btn("Топ бойцов", "boss:top", PLACE_EMOJI[0])],
             _back_row("menu:back"),
         ]
@@ -1160,7 +1165,7 @@ async def _spawn_loop(bot) -> None:
                 c = cfg(bid)
                 text = (
                     f"<b>{_boss_icon()} {escape(name_of(bid))} возродился!</b>\n\n"
-                    f"<i>{c['icon']} {c['one']} босс снова в строю. "
+                    f"<i>{_type_icon(type_of(bid))} {c['one']} босс снова в строю. "
                     "Ты уже сражался с ним, самое время вернуться.</i>"
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
