@@ -46,6 +46,17 @@ FRAG_CHANCE = 0.5          # шанс получить фрагмент в од�
 
 FRAG = "🧩"                # значок фрагмента (можно заменить на кастомный эмодзи)
 
+# Кастомные эмодзи подписей
+NEXT_TRY_EMOJI = ("5460755126761312667", "🚩")   # до следующей попытки
+DAMAGE_EMOJI = ("5269535069550162819", "🩸")     # урон по боссам (как в разделе босса)
+TRY_EMOJI = ("5397782960512444700", "📌")        # попытка
+LEFTOVER_EMOJI = ("5222444124698853913", "🔖")   # остаток урона
+CLASS_EMOJI = ("5312026254751313956", "👍")      # класс
+PRICE_EMOJI = ("5417924076503062111", "💰")      # цена
+NUMBER_EMOJI = ("5325547803936572038", "✨")     # номер
+SAVED_EMOJI = ("5244837092042750681", "📈")      # накоплено
+STATUS_EMOJI = ("5422439311196834318", "💡")     # статус
+
 # Кейсы: цена во фрагментах, класс, значок и описание.
 # loot: пока пустой, лут появится позже. Пока он пуст, открыть кейс нельзя.
 CASES = [
@@ -148,6 +159,10 @@ def _info() -> str:
     return D.custom_emoji(D.INFO_EMOJI)
 
 
+def _e(pair: tuple[str, str]) -> str:
+    return D.custom_emoji(pair)
+
+
 # ---------- Экраны ----------
 
 def cases_html(user_id: int, with_image: bool = False) -> str:
@@ -158,12 +173,12 @@ def cases_html(user_id: int, with_image: bool = False) -> str:
 
     wallet = [
         (f"{FRAG} Фрагментов", fmt(have)),
-        ("🎲 До следующей попытки", _bar(progress / FRAG_DAMAGE_STEP)),
+        (f"{_e(NEXT_TRY_EMOJI)} До следующей попытки", _bar(progress / FRAG_DAMAGE_STEP)),
     ]
     how = [
-        ("🩸 Урон по боссам", f"каждые {fmt(FRAG_DAMAGE_STEP)} урона"),
-        ("🎯 Попытка", f"{int(FRAG_CHANCE * 100)}% на 1 фрагмент"),
-        ("💾 Остаток урона", "копится и не сгорает"),
+        (f"{_e(DAMAGE_EMOJI)} Урон по боссам", f"каждые {fmt(FRAG_DAMAGE_STEP)} урона"),
+        (f"{_e(TRY_EMOJI)} Попытка", f"{int(FRAG_CHANCE * 100)}% на 1 фрагмент"),
+        (f"{_e(LEFTOVER_EMOJI)} Остаток урона", "копится и не сгорает"),
     ]
     return (
         f"{_image(with_image)}"
@@ -190,16 +205,16 @@ def case_html(user_id: int, n: int, with_image: bool = False) -> str:
 
     status = "можно открыть" if missing == 0 else f"не хватает {missing} {FRAG}"
     about = [
-        (f"{c['icon']} Класс", c["tier"]),
-        (f"{FRAG} Цена", fmt(c["price"])),
-        ("🔢 Номер", f"{n + 1} из {len(CASES)}"),
+        (f"{_e(CLASS_EMOJI)} Класс", c["tier"]),
+        (f"{_e(PRICE_EMOJI)} Цена", f"{fmt(c['price'])} {FRAG}"),
+        (f"{_e(NUMBER_EMOJI)} Номер", f"{n + 1} из {len(CASES)}"),
     ]
     wallet = [
         (f"{FRAG} У тебя", fmt(have)),
-        ("📊 Накоплено", _bar(have / c["price"])),
-        ("🔓 Статус", status),
+        (f"{_e(SAVED_EMOJI)} Накоплено", _bar(have / c["price"])),
+        (f"{_e(STATUS_EMOJI)} Статус", status),
     ]
-    loot = [("🔒 Лут", "появится позже")] if not c["loot"] else []
+    loot = [("🔒 Содержимое", "скрыто")]  # содержимое кейсов всегда скрыто
     return (
         f"{_image(with_image)}"
         f"<p><b>{c['icon']} {c['name'].upper()}</b><br>&nbsp;<br><b>{c['tier']} кейс</b></p>"
@@ -207,7 +222,8 @@ def case_html(user_id: int, n: int, with_image: bool = False) -> str:
         + _tree(about, "О кейсе")
         + _gap()
         + _tree(wallet, "Твои фрагменты")
-        + (_gap() + _tree(loot, "Содержимое") if loot else "")
+        + _gap()
+        + _tree(loot)
     )
 
 
