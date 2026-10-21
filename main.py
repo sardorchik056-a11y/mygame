@@ -536,9 +536,10 @@ def menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text=f"{cases.FRAG} Кейсы",
+                    text="Кейсы",
                     callback_data="menu:cases",
                     style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=cases.MENU_EMOJI[0],
                 )
             ],
         ]
