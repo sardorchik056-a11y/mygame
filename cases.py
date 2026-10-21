@@ -61,11 +61,15 @@ SAVED_EMOJI = ("5244837092042750681", "📈")      # накоплено
 STATUS_EMOJI = ("5422439311196834318", "💡")     # статус
 
 # Кейсы: цена во фрагментах, класс, значок и описание.
+# icon: обычный значок. emoji: необязательный кастомный эмодзи (id, запасной значок),
+# если задан, показывается вместо icon.
 # loot: пока пустой, лут появится позже. Пока он пуст, открыть кейс нельзя.
 CASES = [
     {"name": "Деревянный ящик", "price": 3, "tier": "Обычный", "icon": "🪵", "loot": [],
+     "emoji": ("5388864306303508443", "🪵"),
      "desc": "Скромный ящик, сколоченный из обломков. С чего-то же нужно начинать."},
     {"name": "Каменный сундук", "price": 6, "tier": "Обычный", "icon": "🪨", "loot": [],
+     "emoji": ("5386812235353990404", "🪨"),
      "desc": "Тяжёлый и обветренный, пахнет пещерой. Замок давно сломан, но крышка поддаётся туго."},
     {"name": "Бронзовый кейс", "price": 12, "tier": "Необычный", "icon": "🥉", "loot": [],
      "desc": "Потемневший от времени. Внутри что-то позвякивает."},
@@ -166,6 +170,11 @@ def _e(pair: tuple[str, str]) -> str:
     return D.custom_emoji(pair)
 
 
+def _case_icon(c: dict) -> str:
+    """Значок кейса в тексте: кастомный, если задан, иначе обычный."""
+    return D.custom_emoji(c["emoji"]) if c.get("emoji") else c["icon"]
+
+
 # ---------- Экраны ----------
 
 def cases_html(user_id: int, with_image: bool = False) -> str:
@@ -220,7 +229,7 @@ def case_html(user_id: int, n: int, with_image: bool = False) -> str:
     loot = [("🔒 Содержимое", "скрыто")]  # содержимое кейсов всегда скрыто
     return (
         f"{_image(with_image)}"
-        f"<p><b>{c['icon']} {c['name'].upper()}</b><br>&nbsp;<br><b>{c['tier']} кейс</b></p>"
+        f"<p><b>{_case_icon(c)} {c['name'].upper()}</b><br>&nbsp;<br><b>{c['tier']} кейс</b></p>"
         f"<blockquote><i>{c['desc']}</i></blockquote>"
         + _tree(about, "О кейсе")
         + _gap()
@@ -249,11 +258,13 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 def cases_kb(user_id: int) -> InlineKeyboardMarkup:
     """Кейсы по два в ряд: «🪵 | 3🧩». Зелёная кнопка: хватает фрагментов, красная: не хватает."""
     have = fragments_of(D.get_user(user_id) or {})
-    buttons = [
-        _btn(f"{c['icon']} | {c['price']}{FRAG}", f"cases:view:{i}",
-             style=ButtonStyle.SUCCESS if have >= c["price"] else ButtonStyle.DANGER)
-        for i, c in enumerate(CASES)
-    ]
+    buttons = []
+    for i, c in enumerate(CASES):
+        style = ButtonStyle.SUCCESS if have >= c["price"] else ButtonStyle.DANGER
+        if c.get("emoji"):  # кастомный эмодзи ставится иконкой кнопки
+            buttons.append(_btn(f"| {c['price']}{FRAG}", f"cases:view:{i}", c["emoji"][0], style))
+        else:
+            buttons.append(_btn(f"{c['icon']} | {c['price']}{FRAG}", f"cases:view:{i}", style=style))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append(_back_row("menu:back"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -275,8 +286,8 @@ def case_kb(user_id: int, n: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [open_btn],
             [
-                _btn("\u2800", f"cases:view:{prev_n}", PREV_EMOJI[0], ButtonStyle.PRIMARY),
-                _btn("\u2800", f"cases:view:{next_n}", NEXT_EMOJI[0], ButtonStyle.PRIMARY),
+                _btn("\u2800", f"cases:view:{prev_n}", PREV_EMOJI[0], ButtonStyle.SUCCESS),
+                _btn("\u2800", f"cases:view:{next_n}", NEXT_EMOJI[0], ButtonStyle.SUCCESS),
             ],
             _back_row("menu:cases"),
         ]
