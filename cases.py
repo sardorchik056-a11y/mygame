@@ -47,6 +47,9 @@ FRAG_CHANCE = 0.5          # шанс получить фрагмент в од�
 FRAG = "🧩"                # значок фрагмента (можно заменить на кастомный эмодзи)
 
 # Кастомные эмодзи подписей
+MENU_EMOJI = ("5359664288241829619", "🎁")       # кнопка «Кейсы» в меню и заголовок раздела
+PREV_EMOJI = ("5255703720078879038", "🔙")       # кнопка: предыдущий кейс
+NEXT_EMOJI = ("5253767677670862169", "🔜")       # кнопка: следующий кейс
 NEXT_TRY_EMOJI = ("5460755126761312667", "🚩")   # до следующей попытки
 DAMAGE_EMOJI = ("5269535069550162819", "🩸")     # урон по боссам (как в разделе босса)
 TRY_EMOJI = ("5397782960512444700", "📌")        # попытка
@@ -182,7 +185,7 @@ def cases_html(user_id: int, with_image: bool = False) -> str:
     ]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{FRAG} КЕЙСЫ</b></p>"
+        f"<p><b>{_e(MENU_EMOJI)} КЕЙСЫ</b></p>"
         "<blockquote><i>Бей боссов, собирай фрагменты и открывай кейсы. "
         "Чем крупнее кейс, тем ценнее добыча.</i></blockquote>"
         + _tree(wallet, "Твои фрагменты")
@@ -272,8 +275,8 @@ def case_kb(user_id: int, n: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [open_btn],
             [
-                _btn("◀", f"cases:view:{prev_n}", style=ButtonStyle.PRIMARY),
-                _btn("▶", f"cases:view:{next_n}", style=ButtonStyle.PRIMARY),
+                _btn("\u2800", f"cases:view:{prev_n}", PREV_EMOJI[0], ButtonStyle.PRIMARY),
+                _btn("\u2800", f"cases:view:{next_n}", NEXT_EMOJI[0], ButtonStyle.PRIMARY),
             ],
             _back_row("menu:cases"),
         ]
