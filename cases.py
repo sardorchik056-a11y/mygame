@@ -103,23 +103,6 @@ def fmt(n: float) -> str:
 
 # ---------- Оформление ----------
 
-def _table_n(head: tuple, rows: list[tuple]) -> str:
-    """Таблица с любым числом колонок: первая слева, остальные по центру."""
-    body = "".join(
-        "<tr>"
-        + f"<td><b>{r[0]}</b></td>"
-        + "".join(f'<td align="center"><b>{c}</b></td>' for c in r[1:])
-        + "</tr>"
-        for r in rows
-    )
-    return (
-        "<table bordered striped>"
-        "<tr>" + "".join(f"<th><b>{h}</b></th>" for h in head) + "</tr>"
-        f"{body}"
-        "</table>"
-    )
-
-
 def _tree(rows: list, title: str = "") -> str:
     """Блок с рамочкой ├ └. Строка: (подпись, значение) или
     (подпись, значение, [вложенные (подпись, значение)])."""
@@ -182,10 +165,6 @@ def cases_html(user_id: int, with_image: bool = False) -> str:
         ("🎯 Попытка", f"{int(FRAG_CHANCE * 100)}% на 1 фрагмент"),
         ("💾 Остаток урона", "копится и не сгорает"),
     ]
-    rows = [
-        (f"{c['icon']} {c['name']}", f"{c['price']} {FRAG}", "✅" if have >= c["price"] else "🔒")
-        for c in CASES
-    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{FRAG} КЕЙСЫ</b></p>"
@@ -194,8 +173,6 @@ def cases_html(user_id: int, with_image: bool = False) -> str:
         + _tree(wallet, "Твои фрагменты")
         + _gap()
         + _tree(how, "Как получить фрагменты")
-        + _gap()
-        + _table_n(("Кейс", "Цена", "Твой"), rows)
     )
 
 
@@ -251,17 +228,16 @@ def _back_row(data: str) -> list[InlineKeyboardButton]:
 
 
 def cases_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Десять кейсов двумя рядами по пять, только значки. Зелёная кнопка: хватает фрагментов,
-    красная: не хватает."""
+    """Кейсы по два в ряд: «🪵 | 3🧩». Зелёная кнопка: хватает фрагментов, красная: не хватает."""
     have = fragments_of(D.get_user(user_id) or {})
     buttons = [
-        _btn(c["icon"], f"cases:view:{i}",
+        _btn(f"{c['icon']} | {c['price']}{FRAG}", f"cases:view:{i}",
              style=ButtonStyle.SUCCESS if have >= c["price"] else ButtonStyle.DANGER)
         for i, c in enumerate(CASES)
     ]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[buttons[:5], buttons[5:], _back_row("menu:back")]
-    )
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append(_back_row("menu:back"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def case_kb(user_id: int, n: int) -> InlineKeyboardMarkup:
