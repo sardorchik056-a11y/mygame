@@ -52,6 +52,7 @@ def setup(**deps) -> None:
 
     Нужны: get_user, save_users, send_rich_card, custom_emoji, COIN_EMOJI,
     INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats, pet_images, STAT_EMOJI.
+    Необязательно: award_fragments(user, урон) -> сколько фрагментов выпало (раздел «Кейсы»).
     """
     for name, value in deps.items():
         setattr(D, name, value)
@@ -1527,12 +1528,16 @@ async def on_hit(callback: CallbackQuery):
     b["last_uid"] = uid
     b["last_hit"][uid] = time.time()
     stat_add(uid, b["names"][uid], dmg=dealt)
+    award = getattr(D, "award_fragments", None)
+    fragments = award(user, dealt) if award else 0
     user.setdefault("boss_cd", {})[str(i)] = time.time()
 
     crits = sum(1 for _, c in hits if c)
     text = f"{skill['name']} · {fmt(dealt)} урона"
     if crits:
         text += f" · крит ×{crits}" if len(hits) > 1 else " · КРИТ"
+    if fragments:
+        text += f" · +{fragments} 🧩"
 
     name = b["names"][uid]
     feed_push(bid, "hit", uid, name, icon=skill["icon"], skill=skill["name"],
