@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 
 import boss
+import cases
 import mine
 
 BOT_TOKEN = "8867617327:AAGh7PGmp2DnCZaiA3KkpfLUu8ZZKFerb_8"
@@ -533,6 +534,13 @@ def menu_kb() -> InlineKeyboardMarkup:
                     icon_custom_emoji_id=boss.BOSS_EMOJI[0],
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text=f"{cases.FRAG} Кейсы",
+                    callback_data="menu:cases",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
         ]
     )
 
@@ -647,6 +655,7 @@ IMG_TARGETS: dict[str, str] = {
     "stock": "Запасы",
     **mine.IMG_TARGETS,
     **boss.IMG_TARGETS,
+    **cases.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -799,6 +808,10 @@ async def img_receive(message: Message, state: FSMContext):
         await boss.send_preview(
             message.bot, message.chat.id, message.from_user.id, pet_key
         )
+    elif pet_key in cases.IMG_TARGETS:
+        await cases.send_preview(
+            message.bot, message.chat.id, message.from_user.id, pet_key
+        )
     elif pet_key == "stock":
         await send_rich_card(
             message.bot,
@@ -831,8 +844,21 @@ mine.setup(
 )
 dp.include_router(mine.router)
 
+# Раздел «Кейсы» живёт в cases.py
+cases.setup(
+    get_user=get_user,
+    save_users=save_users,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    COIN_EMOJI=COIN_EMOJI,
+    INFO_EMOJI=INFO_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+)
+dp.include_router(cases.router)
+
 # Раздел «Босс» живёт в boss.py
 boss.setup(
+    award_fragments=cases.award_fragments,  # фрагменты за урон по боссам
     get_user=get_user,
     save_users=save_users,
     send_rich_card=send_rich_card,
