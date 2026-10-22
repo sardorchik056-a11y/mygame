@@ -52,7 +52,9 @@ def setup(**deps) -> None:
 
     Нужны: get_user, save_users, send_rich_card, custom_emoji, COIN_EMOJI,
     INFO_EMOJI, BACK_EMOJI_ID, PETS, pet_stats, pet_images, STAT_EMOJI.
-    Необязательно: award_fragments(user, урон) -> сколько фрагментов выпало (раздел «Кейсы»).
+    Необязательно: award_fragments(user, урон) -> сколько фрагментов выпало (раздел «Кейсы»),
+    user_stats(user) -> характеристики с учётом артефактов и bonus(user, вид) -> бонус в процентах
+    (раздел «Снаряжение»).
     """
     for name, value in deps.items():
         setattr(D, name, value)
@@ -429,13 +431,27 @@ def skills_of(user: dict) -> list[dict]:
 
 def cd_left(user: dict, i: int) -> float:
     last = user.get("boss_cd", {}).get(str(i), 0)
-    return max(0.0, last + skills_of(user)[i]["cd"] - time.time())
+    cd = skills_of(user)[i]["cd"] * (1 - _bonus(user, "cd") / 100)
+    return max(0.0, last + cd - time.time())
 
 
 # ---------- Питомец в бою: здоровье, скорость, удары босса ----------
 
 def _stats_of(user: dict) -> dict:
-    return D.pet_stats(D.PETS[user["pet"]], user["level"])
+    """Характеристики питомца с учётом артефактов (если снаряжение подключено)."""
+    fn = getattr(D, "user_stats", None)
+    return fn(user) if fn else D.pet_stats(D.PETS[user["pet"]], user["level"])
+
+
+def _bonus(user: dict, kind: str) -> int:
+    """Бонус артефактов в процентах (cd: быстрее перезарядка, regen: быстрее восстановление)."""
+    fn = getattr(D, "bonus", None)
+    return fn(user, kind) if fn else 0
+
+
+def _regen_per_sec(user: dict, mx: int) -> float:
+    """Сколько HP питомец восстанавливает в секунду."""
+    return mx * REGEN_PCT_PER_MIN / 100 / 60 * (1 + _bonus(user, "regen") / 100)
 
 
 def pet_max_hp(user: dict) -> int:
@@ -449,7 +465,7 @@ def pet_hp(user: dict) -> float:
     if cur is None:
         return float(mx)
     passed = max(0.0, time.time() - user.get("boss_hp_ts", time.time()))
-    return min(float(mx), cur + mx * REGEN_PCT_PER_MIN / 100 * passed / 60)
+    return min(float(mx), cur + _regen_per_sec(user, mx) * passed)
 
 
 def _set_pet_hp(user: dict, hp: float) -> None:
@@ -476,7 +492,7 @@ def pet_ready_in(user: dict) -> float:
     if not is_resting(user):
         return 0.0
     mx = pet_max_hp(user)
-    return max(0.0, mx * RESUME_PCT - pet_hp(user)) / (mx * REGEN_PCT_PER_MIN / 100 / 60)
+    return max(0.0, mx * RESUME_PCT - pet_hp(user)) / _regen_per_sec(user, mx)
 
 
 def pet_form(user: dict) -> float:
@@ -513,7 +529,7 @@ def boss_strike(user: dict) -> dict:
 
 def roll_attack(user: dict, skill: dict, bid: str) -> tuple[int, list[tuple[int, bool]]]:
     """Считает урон навыка. Возвращает (общий урон, [(урон удара, крит)])."""
-    stats = D.pet_stats(D.PETS[user["pet"]], user["level"])
+    stats = _stats_of(user)
     atk, luck = stats["atk"] * pet_form(user), stats["luck"]
     crit_chance = min(CRIT_MAX, luck / 400 + skill.get("crit", 0.0))
     defense = cfg(bid)["def"]
