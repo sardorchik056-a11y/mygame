@@ -10,11 +10,15 @@
     перезарядка навыков, быстрее восстановление HP после ударов босса).
   * Бонусы складываются. user_stats(user) отдаёт характеристики с учётом артефактов,
     bonus(user, вид) отдаёт сумму бонуса одного вида в процентах.
-  * Надетое лежит у игрока в user["equipment"] (список ключей артефактов).
-  * Пока артефакты не выдаются кейсами, надеть можно любой из десяти.
+  * Артефакты выпадают из кейсов (раздел «Кейсы»). Что есть у игрока, лежит в
+    user["artifacts"], надетое в user["equipment"]. Надеть можно только свои артефакты.
+  * У артефактов 5 редкостей (TIERS): чем реже, тем сильнее бонус.
+  * drop_artifact(user, редкость) выбирает случайный артефакт этой редкости и кладёт его
+    игроку; её вызывает раздел «Кейсы».
 """
 
 import logging
+import random
 from types import SimpleNamespace
 
 from aiogram import F, Router
@@ -55,39 +59,53 @@ BONUS_KINDS: dict[str, tuple[str, str, str | tuple | None]] = {
 STAT_KEYS = ("hp", "atk", "def", "spd", "luck")
 MAX_CD_CUT = 50   # перезарядка навыков не короче половины
 
-# Артефакты: ключ, название, значок, класс, бонус {вид: проценты}, описание.
+# Редкости от самой частой до самой редкой: название -> (значок, во множественном числе)
+TIERS: dict[str, tuple[str, str]] = {
+    "Обычный": ("⚪", "Обычные"),
+    "Необычный": ("🟢", "Необычные"),
+    "Редкий": ("🔵", "Редкие"),
+    "Эпический": ("🟣", "Эпические"),
+    "Легендарный": ("🟠", "Легендарные"),
+}
+
+# Артефакты: ключ, название, значок, редкость, бонус {вид: проценты}, описание.
 # emoji: необязательный кастомный эмодзи (id, запасной значок), если задан,
 # показывается вместо icon.
 ARTIFACTS = [
+    # Обычные
     {"key": "ring", "name": "Кольцо ярости", "icon": "💍", "tier": "Обычный",
-     "bonus": {"atk": 10},
+     "bonus": {"atk": 5},
      "desc": "Тёплое на ощупь. Питомец в нём бьёт заметно злее."},
     {"key": "amulet", "name": "Амулет жизни", "icon": "🧿", "tier": "Обычный",
-     "bonus": {"hp": 10},
+     "bonus": {"hp": 5},
      "desc": "Хранит чужую удачу и немного чужого здоровья."},
-    {"key": "boots", "name": "Сапоги ветра", "icon": "👢", "tier": "Обычный",
+    # Необычные
+    {"key": "boots", "name": "Сапоги ветра", "icon": "👢", "tier": "Необычный",
      "bonus": {"spd": 10},
      "desc": "Лёгкие, будто ничего не весят. В них проще увернуться."},
-    {"key": "clover", "name": "Клевер удачи", "icon": "🍀", "tier": "Обычный",
+    {"key": "clover", "name": "Клевер удачи", "icon": "🍀", "tier": "Необычный",
      "bonus": {"luck": 10},
      "desc": "Четырёхлистный, и листья всегда свежие, сколько бы он ни пролежал."},
-    {"key": "hourglass", "name": "Песочные часы", "icon": "⌛", "tier": "Обычный",
-     "bonus": {"cd": 10},
-     "desc": "Песок в них течёт чуть быстрее, чем положено. Навыки восстанавливаются раньше."},
+    # Редкие
     {"key": "fang", "name": "Клык хищника", "icon": "🦷", "tier": "Редкий",
-     "bonus": {"atk": 20},
+     "bonus": {"atk": 15},
      "desc": "Когда-то принадлежал тому, кто никогда не промахивался."},
-    {"key": "heart", "name": "Сердце титана", "icon": "❤️", "tier": "Редкий",
+    {"key": "hourglass", "name": "Песочные часы", "icon": "⌛", "tier": "Редкий",
+     "bonus": {"cd": 15},
+     "desc": "Песок в них течёт чуть быстрее, чем положено. Навыки восстанавливаются раньше."},
+    # Эпические
+    {"key": "heart", "name": "Сердце титана", "icon": "❤️", "tier": "Эпический",
      "bonus": {"hp": 20},
      "desc": "Бьётся медленно и гулко. Рядом с ним питомец становится выносливее."},
-    {"key": "wings", "name": "Крылья ветра", "icon": "🕊️", "tier": "Редкий",
+    {"key": "wings", "name": "Крылья ветра", "icon": "🕊️", "tier": "Эпический",
      "bonus": {"spd": 20},
      "desc": "Невесомые перья, которые подхватывает любой сквозняк."},
-    {"key": "eye", "name": "Око судьбы", "icon": "👁️", "tier": "Редкий",
-     "bonus": {"luck": 20},
+    # Легендарные
+    {"key": "eye", "name": "Око судьбы", "icon": "👁️", "tier": "Легендарный",
+     "bonus": {"luck": 25},
      "desc": "Смотрит на тебя в ответ и, кажется, знает, куда ты ударишь."},
-    {"key": "feather", "name": "Перо феникса", "icon": "🪶", "tier": "Редкий",
-     "bonus": {"regen": 20},
+    {"key": "feather", "name": "Перо феникса", "icon": "🪶", "tier": "Легендарный",
+     "bonus": {"regen": 50},
      "desc": "Тлеет, но не сгорает. Раны под ним затягиваются быстрее."},
 ]
 BY_KEY = {a["key"]: a for a in ARTIFACTS}
@@ -95,12 +113,34 @@ BY_KEY = {a["key"]: a for a in ARTIFACTS}
 # Куда админ может добавить фото
 IMG_TARGETS: dict[str, str] = {
     "equip": "Снаряжение",
-    "equip_list": "Снаряжение: список артефактов",
+    "equip_list": "Снаряжение: мои артефакты",
     "equip_item": "Снаряжение: карточка артефакта",
 }
 
 
 # ---------- Логика ----------
+
+def owned_keys(user: dict) -> set[str]:
+    """Ключи артефактов, которые есть у игрока (надетые считаем своими)."""
+    return set(user.get("artifacts", [])) | set(user.get("equipment", []))
+
+
+def owned(user: dict) -> list[dict]:
+    """Артефакты игрока в порядке редкости."""
+    keys = owned_keys(user)
+    return [a for a in ARTIFACTS if a["key"] in keys]
+
+
+def drop_artifact(user: dict, tier: str) -> tuple[dict, bool]:
+    """Выдаёт игроку случайный артефакт указанной редкости.
+    Возвращает (артефакт, новый ли он): False, если такой уже был (дубликат)."""
+    pool = [a for a in ARTIFACTS if a["tier"] == tier] or ARTIFACTS
+    art = random.choice(pool)
+    is_new = art["key"] not in owned_keys(user)
+    if is_new:
+        user.setdefault("artifacts", []).append(art["key"])
+    return art, is_new
+
 
 def equipped(user: dict) -> list[dict]:
     """Надетые артефакты по порядку слотов (неизвестные ключи пропускаем)."""
@@ -222,28 +262,35 @@ def equip_html(user_id: int, with_image: bool = False) -> str:
 
 
 def list_html(user_id: int, with_image: bool = False) -> str:
-    """Все артефакты по классам; надетые отмечены галочкой."""
+    """Мои артефакты по редкостям; надетые отмечены галочкой."""
     user = D.get_user(user_id)
+    mine = owned(user)
     worn_keys = {a["key"] for a in equipped(user)}
+    head = (
+        f"{_image(with_image)}"
+        "<p><b>🎒 МОИ АРТЕФАКТЫ</b><br>&nbsp;<br>"
+        f"<b>Всего: {len(mine)} из {len(ARTIFACTS)}</b></p>"
+    )
+    if not mine:
+        return (
+            head
+            + "<blockquote><i>У тебя пока нет артефактов. Открывай кейсы: "
+            "артефакты выпадают оттуда.</i></blockquote>"
+        )
 
-    titles = {"Обычный": "Обычные артефакты", "Редкий": "Редкие артефакты"}
     blocks = []
-    for tier in titles:
+    for tier, (tier_icon, plural) in TIERS.items():
         rows = []
-        for a in ARTIFACTS:
+        for a in mine:
             if a["tier"] != tier:
                 continue
             kind, pct = next(iter(a["bonus"].items()))
             mark = " ✅" if a["key"] in worn_keys else ""
-            rows.append((f"{_icon(a)} {a['name']}{mark}", f"{BONUS_KINDS[kind][0]} {fmt_bonus(kind, pct)}"))
-        blocks.append(_tree(rows, titles[tier]))
-
-    return (
-        f"{_image(with_image)}"
-        "<p><b>🎒 АРТЕФАКТЫ</b><br>&nbsp;<br>"
-        f"<b>Выбери артефакт, чтобы надеть или снять</b></p>"
-        + _gap().join(blocks)
-    )
+            rows.append((f"{_icon(a)} {a['name']}{mark}",
+                         f"{BONUS_KINDS[kind][0]} {fmt_bonus(kind, pct)}"))
+        if rows:
+            blocks.append(_tree(rows, f"{tier_icon} {plural}"))
+    return head + "<blockquote><i>Выбери артефакт, чтобы надеть или снять.</i></blockquote>" + _gap().join(blocks)
 
 
 def item_html(user_id: int, key: str, with_image: bool = False) -> str:
@@ -259,11 +306,24 @@ def item_html(user_id: int, key: str, with_image: bool = False) -> str:
     ]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{_icon(a)} {a['name'].upper()}</b><br>&nbsp;<br><b>{a['tier']} артефакт</b></p>"
+        f"<p><b>{_icon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
+        f"<b>{TIERS[a['tier']][0]} {a['tier']} артефакт</b></p>"
         f"<blockquote><i>{a['desc']}</i></blockquote>"
         + _tree(_bonus_rows(a["bonus"]), "Бонус")
         + _gap()
         + _tree(state, "Состояние")
+    )
+
+
+def result_block(a: dict) -> str:
+    """Название, редкость, описание и бонус артефакта. Раздел «Кейсы» показывает это
+    на экране выпадения."""
+    tier_icon = TIERS[a["tier"]][0]
+    return (
+        f"<p><b>{_icon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
+        f"<b>{tier_icon} {a['tier']} артефакт</b></p>"
+        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        + _tree(_bonus_rows(a["bonus"]), "Бонус")
     )
 
 
@@ -304,22 +364,25 @@ def equip_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             slots,
-            [_btn("Все артефакты", "equip:list")],
+            [_btn("Мои артефакты", "equip:list")],
             _back_row("menu:pet"),
         ]
     )
 
 
 def list_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Артефакты по два в ряд: свободные зелёные, надетые синие с галочкой."""
-    worn_keys = {a["key"] for a in equipped(D.get_user(user_id))}
+    """Мои артефакты по два в ряд: свободные зелёные, надетые синие с галочкой."""
+    user = D.get_user(user_id)
+    worn_keys = {a["key"] for a in equipped(user)}
     buttons = []
-    for a in ARTIFACTS:
+    for a in owned(user):
         on = a["key"] in worn_keys
         label = f"{a['name']} ✅" if on else a["name"]
         buttons.append(_artifact_btn(a, label, f"equip:item:{a['key']}",
                                      ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    if not buttons:  # артефактов ещё нет: подсказываем, где их взять
+        rows.append([_btn("К кейсам", "menu:cases")])
     rows.append(_back_row("menu:equip"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -404,11 +467,15 @@ async def on_list(callback: CallbackQuery):
 
 @router.callback_query(F.data.regexp(r"^equip:item:\w+$"))
 async def on_item(callback: CallbackQuery):
-    if await _require_user(callback) is None:
+    user = await _require_user(callback)
+    if user is None:
         return
     key = callback.data.split(":")[2]
     if key not in BY_KEY:
         await callback.answer("Такого артефакта нет", show_alert=True)
+        return
+    if key not in owned_keys(user):
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
         return
     await callback.answer()
     await _delete(callback)
@@ -425,6 +492,9 @@ async def on_wear(callback: CallbackQuery):
         await callback.answer("Такого артефакта нет", show_alert=True)
         return
 
+    if key not in owned_keys(user):
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        return
     worn = user.setdefault("equipment", [])
     if key in worn:
         await callback.answer("Этот артефакт уже надет.", show_alert=True)
