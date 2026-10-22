@@ -25,6 +25,7 @@ from aiogram.types import (
 
 import boss
 import cases
+import equipment
 import mine
 
 BOT_TOKEN = "8867617327:AAGh7PGmp2DnCZaiA3KkpfLUu8ZZKFerb_8"
@@ -398,12 +399,15 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
     pet = PETS[user["pet"]]
     level = user["level"]
 
+    base_stats = pet_stats(pet, level)
     stats_rows = "".join(
         "<tr>"
         f"<td><b>{custom_emoji(STAT_EMOJI[key])} {escape(STAT_LABELS[key])}</b></td>"
-        f'<td align="center"><b>{val}</b></td>'
+        # с артефактами: значение и сколько они добавили, например «112 (+12)»
+        f'<td align="center"><b>{val}'
+        f'{f" (+{val - base_stats[key]})" if val > base_stats[key] else ""}</b></td>'
         "</tr>"
-        for key, val in pet_stats(pet, level).items()
+        for key, val in equipment.user_stats(user).items()
     )
 
     battles_rows = "".join(
@@ -546,6 +550,29 @@ def menu_kb() -> InlineKeyboardMarkup:
     )
 
 
+def profile_kb() -> InlineKeyboardMarkup:
+    """Клавиатура профиля питомца: «Снаряжение» и «Назад»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎒 Снаряжение",
+                    callback_data="menu:equip",
+                    style=ButtonStyle.SUCCESS,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="menu:back",
+                    style=ButtonStyle.PRIMARY,
+                    icon_custom_emoji_id=BACK_EMOJI_ID,
+                )
+            ],
+        ]
+    )
+
+
 def profile_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -657,6 +684,7 @@ IMG_TARGETS: dict[str, str] = {
     **mine.IMG_TARGETS,
     **boss.IMG_TARGETS,
     **cases.IMG_TARGETS,
+    **equipment.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -813,6 +841,10 @@ async def img_receive(message: Message, state: FSMContext):
         await cases.send_preview(
             message.bot, message.chat.id, message.from_user.id, pet_key
         )
+    elif pet_key in equipment.IMG_TARGETS:
+        await equipment.send_preview(
+            message.bot, message.chat.id, message.from_user.id, pet_key
+        )
     elif pet_key == "stock":
         await send_rich_card(
             message.bot,
@@ -857,8 +889,24 @@ cases.setup(
 )
 dp.include_router(cases.router)
 
+# Раздел «Снаряжение» живёт в equipment.py
+equipment.setup(
+    get_user=get_user,
+    save_users=save_users,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    INFO_EMOJI=INFO_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    PETS=PETS,
+    pet_stats=pet_stats,
+    STAT_EMOJI=STAT_EMOJI,
+)
+dp.include_router(equipment.router)
+
 # Раздел «Босс» живёт в boss.py
 boss.setup(
+    user_stats=equipment.user_stats,  # характеристики с учётом артефактов
+    bonus=equipment.bonus,            # бонусы артефактов: перезарядка, восстановление
     award_fragments=cases.award_fragments,  # фрагменты за урон по боссам
     get_user=get_user,
     save_users=save_users,
@@ -983,7 +1031,7 @@ async def on_menu_pet(callback: CallbackQuery):
         callback.message.chat.id,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
-        profile_back_kb(),
+        profile_kb(),
     )
 
 
@@ -1190,7 +1238,7 @@ async def on_upgrade_back(callback: CallbackQuery):
         callback.message.chat.id,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
-        profile_back_kb(),
+        profile_kb(),
     )
 
 
