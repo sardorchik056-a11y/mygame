@@ -9,8 +9,10 @@
     который не добрал до попытки, копится дальше. Босс вызывает award_fragments(...)
     после каждого удара игрока.
   * Кейсов 10, у каждого своя цена во фрагментах (CASES).
-  * Лут пока не добавлен: это оболочка. Пока у кейса пустой loot, открыть его нельзя,
-    а фрагменты не списываются.
+  * Из кейсов выпадают артефакты (раздел «Снаряжение»). Пока лут есть только у первых
+    двух кейсов: поле drops задаёт шансы редкостей. У остальных кейсов drops пустой, это
+    оболочка: открыть их нельзя, а фрагменты не списываются.
+  * Если выпал артефакт, который уже есть, возвращается часть фрагментов (DUPLICATE_REFUND).
   * У каждого кейса своя карточка и своё фото (ключи case_1 ... case_10, задаются
     через /img).
 """
@@ -33,7 +35,8 @@ def setup(**deps) -> None:
     """Передаём модулю функции и эмодзи из main.py.
 
     Нужны: get_user, save_users, send_rich_card, custom_emoji, COIN_EMOJI,
-    INFO_EMOJI, BACK_EMOJI_ID.
+    INFO_EMOJI, BACK_EMOJI_ID, artifacts (список артефактов), drop_artifact(user, редкость),
+    result_block(артефакт).
     """
     for name, value in deps.items():
         setattr(D, name, value)
@@ -43,6 +46,8 @@ def setup(**deps) -> None:
 
 FRAG_DAMAGE_STEP = 5_000   # за каждые столько урона по боссу даётся попытка
 FRAG_CHANCE = 0.5          # шанс получить фрагмент в одной попытке
+
+DUPLICATE_REFUND = 0.5     # за дубликат артефакта возвращается эта доля цены кейса
 
 FRAG = "🧩"                # значок фрагмента (можно заменить на кастомный эмодзи)
 
@@ -61,40 +66,44 @@ SAVED_EMOJI = ("5244837092042750681", "📈")      # накоплено
 STATUS_EMOJI = ("5422439311196834318", "💡")     # статус
 
 # Кейсы: цена во фрагментах, класс, значок и описание.
+# drops: шансы редкостей артефактов в весах, например {"Обычный": 80, "Необычный": 20}.
+# Пустой drops: лута ещё нет, кейс открыть нельзя.
 # icon: обычный значок. emoji: необязательный кастомный эмодзи (id, запасной значок),
 # если задан, показывается вместо icon.
-# loot: пока пустой, лут появится позже. Пока он пуст, открыть кейс нельзя.
 CASES = [
-    {"name": "Деревянный ящик", "price": 3, "tier": "Обычный", "icon": "🪵", "loot": [],
+    {"name": "Деревянный ящик", "price": 3, "tier": "Обычный", "icon": "🪵",
+     "drops": {"Обычный": 80, "Необычный": 20},
      "emoji": ("5388864306303508443", "🪵"),
      "desc": "Скромный ящик, сколоченный из обломков. С чего-то же нужно начинать."},
-    {"name": "Каменный сундук", "price": 6, "tier": "Обычный", "icon": "🪨", "loot": [],
+    {"name": "Каменный сундук", "price": 6, "tier": "Обычный", "icon": "🪨",
+     "drops": {"Обычный": 55, "Необычный": 35, "Редкий": 10},
      "emoji": ("5386812235353990404", "🪨"),
      "desc": "Тяжёлый и обветренный, пахнет пещерой. Замок давно сломан, но крышка поддаётся туго."},
-    {"name": "Бронзовый кейс", "price": 12, "tier": "Необычный", "icon": "🥉", "loot": [],
+    {"name": "Бронзовый кейс", "price": 12, "tier": "Необычный", "icon": "🥉",
      "emoji": ("5391145187340756295", "🥉"),
      "desc": "Потемневший от времени. Внутри что-то позвякивает."},
-    {"name": "Железный кейс", "price": 20, "tier": "Необычный", "icon": "⚙️", "loot": [],
+    {"name": "Железный кейс", "price": 20, "tier": "Необычный", "icon": "⚙️",
      "emoji": ("5390938848521920799", "⚙️"),
      "desc": "Клёпаный, с тремя замками. Кто-то явно не хотел, чтобы его открывали."},
-    {"name": "Серебряный кейс", "price": 35, "tier": "Редкий", "icon": "🥈", "loot": [],
+    {"name": "Серебряный кейс", "price": 35, "tier": "Редкий", "icon": "🥈",
      "emoji": ("5391276493080929719", "🥈"),
      "desc": "Холодный на ощупь и всегда начищенный. Выглядит дорого, и не зря."},
-    {"name": "Золотой кейс", "price": 60, "tier": "Редкий", "icon": "🥇", "loot": [],
+    {"name": "Золотой кейс", "price": 60, "tier": "Редкий", "icon": "🥇",
      "desc": "Сияет так, что видно из соседней пещеры. Открывается только по большим праздникам."},
-    {"name": "Алмазный кейс", "price": 100, "tier": "Эпический", "icon": "💎", "loot": [],
+    {"name": "Алмазный кейс", "price": 100, "tier": "Эпический", "icon": "💎",
      "desc": "Грани переливаются на свету. Говорят, внутри всегда лежит что-то особенное."},
-    {"name": "Рунный кейс", "price": 160, "tier": "Эпический", "icon": "🔮", "loot": [],
+    {"name": "Рунный кейс", "price": 160, "tier": "Эпический", "icon": "🔮",
      "desc": "Покрыт светящимися рунами. Они шепчут, но слов не разобрать."},
-    {"name": "Космический кейс", "price": 260, "tier": "Легендарный", "icon": "🌌", "loot": [],
+    {"name": "Космический кейс", "price": 260, "tier": "Легендарный", "icon": "🌌",
      "desc": "Упал со звёзд и до сих пор тёплый. Внутри слышен далёкий гул."},
-    {"name": "Кейс Бездны", "price": 450, "tier": "Мифический", "icon": "🕳️", "loot": [],
+    {"name": "Кейс Бездны", "price": 450, "tier": "Мифический", "icon": "🕳️",
      "desc": "Его достали из трещины между мирами. Лучше не слушать, что в нём скрипит."},
 ]
 
 # Куда админ может добавить фото: список кейсов и карточка каждого кейса
 IMG_TARGETS: dict[str, str] = {
     "cases": "Кейсы",
+    "case_result": "Кейсы: выпавший артефакт",
     **{f"case_{i + 1}": f"Кейс: {c['name']}" for i, c in enumerate(CASES)},
 }
 
@@ -242,6 +251,26 @@ def case_html(user_id: int, n: int, with_image: bool = False) -> str:
     )
 
 
+def result_html(user_id: int, n: int, art: dict, is_new: bool, refund: int,
+                with_image: bool = False) -> str:
+    """Экран после открытия кейса: что выпало и что осталось."""
+    n = _case_index(n)
+    c = CASES[n]
+    user = D.get_user(user_id) or {}
+    status = [(f"{_e(STATUS_EMOJI)} Результат", "новый артефакт" if is_new else "дубликат")]
+    if not is_new:
+        status.append((f"{FRAG} Возврат", f"+{refund}"))
+    status.append((f"{FRAG} Осталось фрагментов", fmt(fragments_of(user))))
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{_e(MENU_EMOJI)} КЕЙС ОТКРЫТ</b><br>&nbsp;<br>"
+        f"<b>{_case_icon(c)} {c['name']}</b></p>"
+        + D.result_block(art)
+        + _gap()
+        + _tree(status)
+    )
+
+
 # ---------- Клавиатуры ----------
 
 def _btn(text: str, data: str, emoji_id: str | None = None,
@@ -297,6 +326,22 @@ def case_kb(user_id: int, n: int) -> InlineKeyboardMarkup:
     )
 
 
+def result_kb(user_id: int, n: int) -> InlineKeyboardMarkup:
+    """После открытия: открыть ещё, мои артефакты, к списку кейсов."""
+    n = _case_index(n)
+    c = CASES[n]
+    ready = fragments_of(D.get_user(user_id) or {}) >= c["price"]
+    again = _btn(f"Ещё раз · {c['price']} {FRAG}", f"cases:open:{n}",
+                 style=ButtonStyle.SUCCESS if ready else ButtonStyle.DANGER)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [again],
+            [_btn("Мои артефакты", "equip:list")],
+            _back_row("menu:cases"),
+        ]
+    )
+
+
 # ---------- Отправка ----------
 
 def _key_index(key: str) -> int:
@@ -323,6 +368,11 @@ async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
     if key == "cases":
         await D.send_rich_card(
             bot, chat_id, "cases", lambda with_image: cases_html(user_id, with_image)
+        )
+    elif key == "case_result":
+        await D.send_rich_card(
+            bot, chat_id, key,
+            lambda with_image: result_html(user_id, 0, D.artifacts[0], True, 0, with_image),
         )
     else:
         n = _key_index(key)
@@ -380,11 +430,27 @@ async def on_open_case(callback: CallbackQuery):
             f"Не хватает фрагментов: нужно {c['price']}, у тебя {have}.", show_alert=True
         )
         return
-    if not c["loot"]:
+    if not c.get("drops"):
         await callback.answer(
             f"{c['name']}: содержимое появится позже. Фрагменты не потрачены.",
             show_alert=True,
         )
         return
-    # Когда в кейсах появится лут, открытие будет списывать c["price"] фрагментов здесь.
+
+    # Открываем: списываем фрагменты, выбираем редкость, затем артефакт
+    user["fragments"] = have - c["price"]
+    tier = random.choices(list(c["drops"]), weights=list(c["drops"].values()))[0]
+    art, is_new = D.drop_artifact(user, tier)
+    refund = 0 if is_new else max(1, round(c["price"] * DUPLICATE_REFUND))
+    if refund:
+        user["fragments"] += refund
+    D.save_users()
+
     await callback.answer()
+    await _delete(callback)
+    uid = callback.from_user.id
+    await D.send_rich_card(
+        callback.bot, callback.message.chat.id, "case_result",
+        lambda with_image: result_html(uid, n, art, is_new, refund, with_image),
+        result_kb(uid, n),
+    )
