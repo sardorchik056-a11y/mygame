@@ -879,6 +879,9 @@ dp.include_router(mine.router)
 
 # Раздел «Кейсы» живёт в cases.py
 cases.setup(
+    artifacts=equipment.ARTIFACTS,             # что может выпасть
+    drop_artifact=equipment.drop_artifact,     # выдать артефакт игроку
+    result_block=equipment.result_block,       # карточка выпавшего артефакта
     get_user=get_user,
     save_users=save_users,
     send_rich_card=send_rich_card,
