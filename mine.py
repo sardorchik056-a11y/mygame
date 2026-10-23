@@ -13,9 +13,13 @@
     У кирки одна характеристика, множитель дохода: шахтёр с киркой приносит
     в столько раз больше. Шахтёр без кирки добывает с множителем ×1.
   * У каждого типа шахтёров и у каждой кирки есть своя карточка.
+  * Артефактов шахты 25, по 5 в каждой из 5 редкостей (ARTIFACTS). Надеть можно
+    до MINE_SLOTS штук. Они выпадают из кейсов и дают бонус: к доходу, к силе кирок,
+    скидку на найм шахтёров и на кирки, более долгий запуск шахты.
 """
 
 import logging
+import random
 import time
 from types import SimpleNamespace
 
@@ -108,11 +112,130 @@ HOURGLASS_EMOJI = ("5339151799314034719", "⏳")  # длительность з�
 HIRE_EMOJI = ("5440457429147997980", "🫴")     # кнопка «Нанять»
 UNEQUIP_EMOJI = ("5210952531676504517", "❌")  # кнопка «Снять кирку»
 
+# ---------- Артефакты шахты ----------
+
+MINE_SLOTS = 3        # сколько артефактов можно надеть
+MAX_DISCOUNT = 50     # скидки на найм и на кирки не больше половины цены
+MAX_RUN_BONUS = 50    # запуск шахты не длиннее чем на 50% больше
+
+# Редкости от самой частой до самой редкой:
+# название -> (кастомный эмодзи (id, запасной значок), во множественном числе)
+TIERS: dict[str, tuple[tuple[str, str], str]] = {
+    "Обычный": (("5391359540568565034", "⚪"), "Обычные"),
+    "Редкий": (("5391181222116371093", "🔵"), "Редкие"),
+    "Эпический": (("5391134355433233897", "🟣"), "Эпические"),
+    "Мифический": (("5391223488889528055", "🔴"), "Мифические"),
+    "Легендарный": (("5390951544445248338", "🟠"), "Легендарные"),
+}
+
+# Виды бонусов: ключ -> (название, знак, эмодзи (id, запасной значок)).
+ART_KINDS: dict[str, tuple[str, str, tuple[str, str]]] = {
+    "income": ("Доход шахты", "+", INCOME_EMOJI),
+    "pick": ("Сила кирок", "+", PICK_EMOJI),
+    "hire": ("Цена найма", "−", HIRE_EMOJI),
+    "shop": ("Цена кирок", "−", BOUGHT_EMOJI),
+    "run": ("Длительность запуска", "+", HOURGLASS_EMOJI),
+}
+
+# Артефакты: ключ, название, значок, редкость, бонус {вид: проценты}, описание.
+# В каждой редкости по одному артефакту каждого вида, список идёт от обычных к легендарным.
+# Сила бонуса: доход 3/6/10/15/25, кирки 5/10/15/25/40, остальные виды 5/10/15/20/25.
+# emoji: необязательный кастомный эмодзи (id, запасной значок), если задан,
+# показывается вместо icon.
+ARTIFACTS = [
+    # Обычные
+    {"key": "m_lamp", "name": "Шахтёрская лампа", "icon": "🔦", "tier": "Обычный",
+     "bonus": {"income": 3},
+     "desc": "Светит тускло, зато добыча идёт веселее."},
+    {"key": "m_oil", "name": "Масло для кирок", "icon": "🛢️", "tier": "Обычный",
+     "bonus": {"pick": 5},
+     "desc": "Смазанная кирка входит в породу заметно легче."},
+    {"key": "m_poster", "name": "Вербовочный плакат", "icon": "📜", "tier": "Обычный",
+     "bonus": {"hire": 5},
+     "desc": "Висит у входа. Шахтёры идут наниматься охотнее."},
+    {"key": "m_coupon", "name": "Купон кузнеца", "icon": "🎟️", "tier": "Обычный",
+     "bonus": {"shop": 5},
+     "desc": "Кузнец обещал скидку. Кажется, даже не соврал."},
+    {"key": "m_tea", "name": "Термос с чаем", "icon": "☕", "tier": "Обычный",
+     "bonus": {"run": 5},
+     "desc": "Горячий чай, и смена тянется чуть дольше."},
+    # Редкие
+    {"key": "m_cart", "name": "Тачка старателя", "icon": "🛒", "tier": "Редкий",
+     "bonus": {"income": 6},
+     "desc": "Скрипит, но возит породу без остановок."},
+    {"key": "m_axe", "name": "Закалённая рукоять", "icon": "🪓", "tier": "Редкий",
+     "bonus": {"pick": 10},
+     "desc": "Не гнётся и не трескается, как ни бей."},
+    {"key": "m_ale", "name": "Кружка эля", "icon": "🍺", "tier": "Редкий",
+     "bonus": {"hire": 10},
+     "desc": "После неё любой шахтёр соглашается на меньшую плату."},
+    {"key": "m_scales", "name": "Весы торговца", "icon": "⚖️", "tier": "Редкий",
+     "bonus": {"shop": 10},
+     "desc": "Взвешивает честно, а цену сбивает ещё честнее."},
+    {"key": "m_alarm", "name": "Будильник шахтёра", "icon": "⏰", "tier": "Редкий",
+     "bonus": {"run": 10},
+     "desc": "Заведён с запасом: шахта работает дольше."},
+    # Эпические
+    {"key": "m_crystal", "name": "Жильный кристалл", "icon": "🔷", "tier": "Эпический",
+     "bonus": {"income": 10},
+     "desc": "Тянет руду к себе, как магнит. Добыча идёт сама."},
+    {"key": "m_rune", "name": "Руна остроты", "icon": "🔮", "tier": "Эпический",
+     "bonus": {"pick": 15},
+     "desc": "Светится на лезвии. Порода трескается ещё до удара."},
+    {"key": "m_letter", "name": "Рекомендательное письмо", "icon": "✉️", "tier": "Эпический",
+     "bonus": {"hire": 15},
+     "desc": "Шахтёры охотно идут в смену, если в письме правильная подпись."},
+    {"key": "m_price", "name": "Гномий прейскурант", "icon": "📋", "tier": "Эпический",
+     "bonus": {"shop": 15},
+     "desc": "Цены в нём устарели лет на сто. Продавцы стесняются спорить."},
+    {"key": "m_lantern", "name": "Вечный фонарь", "icon": "🏮", "tier": "Эпический",
+     "bonus": {"run": 15},
+     "desc": "Не гаснет, пока в шахте есть кому работать."},
+    # Мифические
+    {"key": "m_mountain", "name": "Сердце горы", "icon": "🏔️", "tier": "Мифический",
+     "bonus": {"income": 15},
+     "desc": "Бьётся глубоко под землёй. Жилы тянутся на этот стук."},
+    {"key": "m_anvil", "name": "Наковальня гномов", "icon": "⚒️", "tier": "Мифический",
+     "bonus": {"pick": 25},
+     "desc": "Кирки, выкованные на ней, режут камень как хлеб."},
+    {"key": "m_badge", "name": "Гильдейский знак", "icon": "🏅", "tier": "Мифический",
+     "bonus": {"hire": 20},
+     "desc": "Шахтёры уважают гильдию и работают за меньшие деньги."},
+    {"key": "m_purse", "name": "Бездонный кошелёк", "icon": "👛", "tier": "Мифический",
+     "bonus": {"shop": 20},
+     "desc": "Сколько ни трать, а в нём всегда что-то остаётся."},
+    {"key": "m_clock", "name": "Часы забоя", "icon": "🕰️", "tier": "Мифический",
+     "bonus": {"run": 20},
+     "desc": "Отбивают время неторопливо. Смена не спешит заканчиваться."},
+    # Легендарные
+    {"key": "m_idol", "name": "Золотой идол", "icon": "🗿", "tier": "Легендарный",
+     "bonus": {"income": 25},
+     "desc": "Старше самих шахт. Жилы до сих пор его слушаются."},
+    {"key": "m_forge", "name": "Горн Вулкана", "icon": "🔥", "tier": "Легендарный",
+     "bonus": {"pick": 40},
+     "desc": "Кирки, закалённые в нём, не знают преград."},
+    {"key": "m_seal", "name": "Печать главы гильдии", "icon": "🎖️", "tier": "Легендарный",
+     "bonus": {"hire": 25},
+     "desc": "Шахтёры работают за идею. Почти."},
+    {"key": "m_dragon", "name": "Договор с драконом", "icon": "🐲", "tier": "Легендарный",
+     "bonus": {"shop": 25},
+     "desc": "Дракон обещал разумные цены на кирки. Спорить с ним никто не решается."},
+    {"key": "m_thread", "name": "Нить времени", "icon": "🧵", "tier": "Легендарный",
+     "bonus": {"run": 25},
+     "desc": "Тянется и не рвётся. Смена идёт дольше, чем должна."},
+]
+for _a in ARTIFACTS:
+    _a["section"] = "mine"  # по этому полю «Кейсы» отличают артефакты шахты от артефактов питомца
+BY_KEY = {a["key"]: a for a in ARTIFACTS}
+
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
     "mine": "Шахты",
     "mine_picks": "Шахты: кирки",
     "mine_miners": "Шахты: все шахтёры (общее фото)",
+    "mine_arts": "Шахты: артефакты",
+    "mine_arts_list": "Шахты: мои артефакты",
+    "mine_art_item": "Шахты: карточка артефакта (общее фото)",
 }
 for _i, _p in enumerate(PICKAXES):
     IMG_TARGETS[f"mine_pick_{_i}"] = f"Шахты: {_p['name']}"
@@ -168,6 +291,11 @@ def get_mine(user: dict) -> dict:
             m[key] = None
             changed = True
 
+    for key in ("arts", "worn"):  # артефакты: что есть и что надето
+        if key not in m:
+            m[key] = []
+            changed = True
+
     if changed:
         D.save_users()
     return m
@@ -207,12 +335,60 @@ def picks_free(m: dict, p: int) -> int:
     return picks_owned(m, p) - picks_equipped(m, p)
 
 
+def art_keys(m: dict) -> set[str]:
+    """Ключи артефактов шахты, которые есть у игрока (надетые считаем своими)."""
+    return set(m.get("arts", [])) | set(m.get("worn", []))
+
+
+def owned_arts(m: dict) -> list[dict]:
+    """Артефакты игрока в порядке редкости."""
+    keys = art_keys(m)
+    return [a for a in ARTIFACTS if a["key"] in keys]
+
+
+def worn_arts(m: dict) -> list[dict]:
+    """Надетые артефакты по порядку слотов."""
+    return [BY_KEY[k] for k in m.get("worn", []) if k in BY_KEY]
+
+
+def art_bonus(m: dict, kind: str) -> int:
+    """Сумма бонуса одного вида в процентах от надетых артефактов (с ограничениями)."""
+    total = sum(a["bonus"].get(kind, 0) for a in worn_arts(m))
+    if kind in ("hire", "shop"):
+        return min(total, MAX_DISCOUNT)
+    if kind == "run":
+        return min(total, MAX_RUN_BONUS)
+    return total
+
+
+def run_hours(m: dict) -> float:
+    """Сколько часов длится запуск шахты с учётом артефактов."""
+    return RUN_HOURS * (1 + art_bonus(m, "run") / 100)
+
+
+def fmt_hours(h: float) -> str:
+    return f"{h:g}"
+
+
+def drop_artifact(user: dict, tier: str) -> tuple[dict, bool]:
+    """Выдаёт игроку случайный артефакт шахты указанной редкости.
+    Возвращает (артефакт, новый ли он): False, если такой уже был (дубликат)."""
+    m = get_mine(user)
+    pool = [a for a in ARTIFACTS if a["tier"] == tier] or ARTIFACTS
+    art = random.choice(pool)
+    is_new = art["key"] not in art_keys(m)
+    if is_new:
+        m["arts"].append(art["key"])
+    return art, is_new
+
+
 def miner_income(m: dict, i: int) -> float:
-    """Доход всех шахтёров типа i в час."""
+    """Доход всех шахтёров типа i в час: кирки и артефакты уже учтены."""
+    pick_k = 1 + art_bonus(m, "pick") / 100   # артефакты усиливают прибавку от кирок
     mult_sum = bare(m, i) + sum(
-        c * PICKAXES[p]["mult"] for p, c in eq_of(m, i).items()
+        c * (1 + (PICKAXES[p]["mult"] - 1) * pick_k) for p, c in eq_of(m, i).items()
     )
-    return MINERS[i]["income"] * mult_sum
+    return MINERS[i]["income"] * mult_sum * (1 + art_bonus(m, "income") / 100)
 
 
 def income_per_hour(m: dict) -> float:
@@ -237,7 +413,12 @@ def settle(m: dict) -> None:
 
 
 def miner_price(m: dict, i: int) -> int:
-    return round(MINERS[i]["price"] * MINER_PRICE_GROWTH ** owned(m, i))
+    base = MINERS[i]["price"] * MINER_PRICE_GROWTH ** owned(m, i)
+    return max(1, round(base * (1 - art_bonus(m, "hire") / 100)))
+
+
+def pick_price(m: dict, p: int) -> int:
+    return max(1, round(PICKAXES[p]["price"] * (1 - art_bonus(m, "shop") / 100)))
 
 
 def fmt(n: float) -> str:
@@ -365,7 +546,7 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
     if is_running(m):
         now = time.time()
         left = max(0.0, m["run_end"] - now)
-        done = (now - m["run_start"]) / (RUN_HOURS * 3600)
+        done = (now - m["run_start"]) / max(1.0, m["run_end"] - m["run_start"])
         state_rows = [
             (f"{_mine()} Шахта", f"Работает {D.custom_emoji(START_EMOJI)}"),
             (f"{D.custom_emoji(PROGRESS_EMOJI)} Прогресс", _bar(done)),
@@ -380,13 +561,14 @@ def mine_html(user_id: int, with_image: bool = False) -> str:
     else:
         state_rows = [
             (f"{_mine()} Шахта", f"Стоит {D.custom_emoji(STOP_EMOJI)}"),
-            (f"{D.custom_emoji(HOURGLASS_EMOJI)} Длительность запуска", f"{RUN_HOURS} ч"),
+            (f"{D.custom_emoji(HOURGLASS_EMOJI)} Длительность запуска", f"{fmt_hours(run_hours(m))} ч"),
         ]
-        action = _button("mine:start", f"Запустить на {RUN_HOURS} ч", D.custom_emoji(START_EMOJI))
+        action = _button("mine:start", f"Запустить на {fmt_hours(run_hours(m))} ч", D.custom_emoji(START_EMOJI))
 
     farm_rows = [
         ("👷 Шахтёры", str(total_miners(m))),
         (f"{_pick()} Кирки", f"надето {on_miners} из {total_picks}"),
+        ("🎒 Артефакты", f"надето {len(worn_arts(m))} из {MINE_SLOTS}"),
         (f"{_income()} Доход", f"{fmt(income_per_hour(m))} в час"),
         (f"{_storage()} Склад", fmt(m["stored"])),
     ]
@@ -419,7 +601,7 @@ def pick_card_html(user_id: int, i: int, with_image: bool = False) -> str:
     p = PICKAXES[i]
     stats = [
         (f"{D.custom_emoji(MULT_EMOJI)} Множитель дохода", fmt_mult(p["mult"])),
-        (f"{_coin()} Цена", fmt(p["price"])),
+        (f"{_coin()} Цена", fmt(pick_price(m, i))),
     ]
     have = [
         (f"{D.custom_emoji(BOUGHT_EMOJI)} Куплено", str(picks_owned(m, i))),
@@ -551,6 +733,119 @@ def take_html(user_id: int, i: int, with_image: bool = False) -> str:
     )
 
 
+def _tier_icon(tier: str) -> str:
+    return D.custom_emoji(TIERS[tier][0])
+
+
+def _aicon(a: dict) -> str:
+    """Значок артефакта в тексте: кастомный, если задан, иначе обычный."""
+    return D.custom_emoji(a["emoji"]) if a.get("emoji") else a["icon"]
+
+
+def fmt_art_bonus(kind: str, pct: int) -> str:
+    return f"{ART_KINDS[kind][1]}{pct}%"
+
+
+def _art_rows(bonuses: dict[str, int]) -> list[tuple[str, str]]:
+    return [
+        (f"{D.custom_emoji(ART_KINDS[k][2])} {ART_KINDS[k][0]}", fmt_art_bonus(k, pct))
+        for k, pct in bonuses.items()
+    ]
+
+
+def arts_html(user_id: int, with_image: bool = False) -> str:
+    """Главное окно артефактов шахты: слоты и суммарные бонусы."""
+    user, m = load(user_id)
+    worn = worn_arts(m)
+    slots = []
+    for n in range(MINE_SLOTS):
+        if n < len(worn):
+            a = worn[n]
+            slots.append((f"{n + 1} слот", f"{_aicon(a)} {a['name']}", _art_rows(a["bonus"])))
+        else:
+            slots.append((f"{n + 1} слот", "пусто"))
+    total = {k: art_bonus(m, k) for k in ART_KINDS if art_bonus(m, k)}
+    summary = (
+        _tree(_art_rows(total), "Общие бонусы")
+        if total else _tree([("Артефакты не надеты", "")], "Общие бонусы")
+    )
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>🎒 АРТЕФАКТЫ ШАХТЫ</b><br>&nbsp;<br>"
+        f"<b>занято {len(worn)}/{MINE_SLOTS}</b></p>"
+        "<blockquote><i>Артефакты усиливают шахту. Надень до трёх, "
+        "и их бонусы сложатся.</i></blockquote>"
+        + _tree(slots, "Слоты")
+        + _gap()
+        + summary
+    )
+
+
+def arts_list_html(user_id: int, with_image: bool = False) -> str:
+    """Мои артефакты по редкостям; надетые отмечены галочкой."""
+    user, m = load(user_id)
+    mine = owned_arts(m)
+    worn_keys = {a["key"] for a in worn_arts(m)}
+    head = (
+        f"{_image(with_image)}"
+        "<p><b>🎒 МОИ АРТЕФАКТЫ ШАХТЫ</b><br>&nbsp;<br>"
+        f"<b>Всего: {len(mine)} из {len(ARTIFACTS)}</b></p>"
+    )
+    if not mine:
+        return (
+            head
+            + "<blockquote><i>У тебя пока нет артефактов шахты. Открывай кейсы: "
+            "артефакты выпадают оттуда.</i></blockquote>"
+        )
+    blocks = []
+    for tier, (_, plural) in TIERS.items():
+        rows = []
+        for a in mine:
+            if a["tier"] != tier:
+                continue
+            kind, pct = next(iter(a["bonus"].items()))
+            mark = f" {D.custom_emoji(EQUIPPED_EMOJI)}" if a["key"] in worn_keys else ""
+            rows.append((f"{_aicon(a)} {a['name']}{mark}",
+                         f"{ART_KINDS[kind][0]} {fmt_art_bonus(kind, pct)}"))
+        if rows:
+            blocks.append(_tree(rows, f"{_tier_icon(tier)} {plural}"))
+    return (
+        head + "<blockquote><i>Выбери артефакт, чтобы надеть или снять.</i></blockquote>"
+        + _gap().join(blocks)
+    )
+
+
+def art_card_html(user_id: int, i: int, with_image: bool = False) -> str:
+    """Карточка артефакта: что даёт и надет ли он."""
+    user, m = load(user_id)
+    a = ARTIFACTS[i]
+    worn_keys = [x["key"] for x in worn_arts(m)]
+    state = [
+        ("🔓 Статус", "надет" if a["key"] in worn_keys else "не надет"),
+        ("🎒 Слоты", f"{len(worn_keys)}/{MINE_SLOTS} заняты"),
+    ]
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{_aicon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
+        f"<b>{_tier_icon(a['tier'])} {a['tier']} артефакт шахты</b></p>"
+        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        + _tree(_art_rows(a["bonus"]), "Бонус")
+        + _gap()
+        + _tree(state, "Состояние")
+    )
+
+
+def result_block(a: dict) -> str:
+    """Название, редкость, описание и бонус артефакта шахты. Раздел «Кейсы» показывает
+    это на экране выпадения."""
+    return (
+        f"<p><b>{_aicon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
+        f"<b>{_tier_icon(a['tier'])} {a['tier']} артефакт шахты</b></p>"
+        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        + _tree(_art_rows(a["bonus"]), "Бонус")
+    )
+
+
 # ---------- Клавиатуры (под сообщением) ----------
 
 def _btn(text: str, data: str, emoji_id: str | None = None,
@@ -575,6 +870,7 @@ def mine_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_btn("Кирки", "mine:picks", PICK_EMOJI[0]), _btn("👷 Шахтёры", "mine:miners")],
+            [_btn("🎒 Артефакты", "mine:arts")],
             _back_row("menu:back"),
         ]
     )
@@ -641,13 +937,77 @@ def _take_kb(i: int):
     return kb
 
 
+def _art_btn(a: dict, text: str, data: str, style: ButtonStyle) -> InlineKeyboardButton:
+    """Кнопка артефакта: кастомный эмодзи ставится иконкой кнопки."""
+    if a.get("emoji"):
+        return _btn(text, data, a["emoji"][0], style)
+    return _btn(f"{a['icon']} {text}".strip(), data, style=style)
+
+
+def arts_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Три слота в ряд (надетый открывает карточку, пустой открывает список)."""
+    _, m = load(user_id)
+    worn = worn_arts(m)
+    slots = []
+    for n in range(MINE_SLOTS):
+        if n < len(worn):
+            a = worn[n]
+            slots.append(_art_btn(a, "\u2800" if a.get("emoji") else "",
+                                  f"mine:art:{ARTIFACTS.index(a)}", ButtonStyle.SUCCESS))
+        else:
+            slots.append(_btn("➕", "mine:artlist", style=ButtonStyle.PRIMARY))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[slots, [_btn("Мои артефакты", "mine:artlist")], _back_row("mine:open")]
+    )
+
+
+def arts_list_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Мои артефакты по два в ряд: свободные зелёные, надетые синие с галочкой."""
+    _, m = load(user_id)
+    worn_keys = {a["key"] for a in worn_arts(m)}
+    buttons = []
+    for a in owned_arts(m):
+        on = a["key"] in worn_keys
+        label = f"{a['name']} ✅" if on else a["name"]
+        buttons.append(_art_btn(a, label, f"mine:art:{ARTIFACTS.index(a)}",
+                                ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
+    rows = _pairs(buttons)
+    if not buttons:  # артефактов ещё нет: подсказываем, где их взять
+        rows.append([_btn("К кейсам", "menu:cases")])
+    rows.append(_back_row("mine:arts"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _art_card_kb(i: int):
+    def kb(user_id: int) -> InlineKeyboardMarkup:
+        """Надеть (зелёная; красная, если слоты заняты) или снять (красная)."""
+        _, m = load(user_id)
+        worn = [x["key"] for x in worn_arts(m)]
+        if ARTIFACTS[i]["key"] in worn:
+            action = _btn("Снять", f"mine:aoff:{i}", style=ButtonStyle.DANGER)
+        else:
+            free = len(worn) < MINE_SLOTS
+            action = _btn("Надеть", f"mine:awear:{i}",
+                          style=ButtonStyle.SUCCESS if free else ButtonStyle.DANGER)
+        return InlineKeyboardMarkup(inline_keyboard=[[action], _back_row("mine:artlist")])
+    return kb
+
+
 # ---------- Отправка ----------
 
 SCREENS = {
     "mine": (mine_html, mine_kb),
     "mine_picks": (picks_html, picks_kb),
     "mine_miners": (miners_html, miners_kb),
+    "mine_arts": (arts_html, arts_kb),
+    "mine_arts_list": (arts_list_html, arts_list_kb),
+    "mine_art_item": (lambda uid, wi=False: art_card_html(uid, 0, wi), _art_card_kb(0)),
 }
+for _i in range(len(ARTIFACTS)):
+    SCREENS[f"mine_art_{_i}"] = (
+        lambda uid, wi=False, i=_i: art_card_html(uid, i, wi),
+        _art_card_kb(_i),
+    )
 for _i in range(len(PICKAXES)):
     SCREENS[f"mine_pick_{_i}"] = (
         lambda uid, wi=False, i=_i: pick_card_html(uid, i, wi),
@@ -672,6 +1032,8 @@ def img_key(key: str) -> str:
     """Под каким ключом хранится фото экрана: у всех экранов шахтёров оно одно."""
     if key.startswith(("mine_miner_", "mine_give_", "mine_take_")):
         return "mine_miners"
+    if key.startswith("mine_art_") and key != "mine_art_item":
+        return "mine_art_item"
     return key
 
 
@@ -787,10 +1149,11 @@ async def on_start(callback: CallbackQuery):
 
     now = time.time()
     m["run_start"] = now
-    m["run_end"] = now + RUN_HOURS * 3600
+    hours = run_hours(m)
+    m["run_end"] = now + hours * 3600
     m["ts"] = now
     D.save_users()
-    await callback.answer(f"Шахта запущена на {RUN_HOURS} ч!")
+    await callback.answer(f"Шахта запущена на {fmt_hours(hours)} ч!")
     await _show(callback, "mine")
 
 
@@ -856,7 +1219,7 @@ async def on_buy_pick(callback: CallbackQuery):
 
     m = get_mine(user)
     p = PICKAXES[i]
-    cost = p["price"] * n
+    cost = pick_price(m, i) * n
     if user["coins"] < cost:
         await callback.answer(
             f"Не хватает монет: {fmt(cost - user['coins'])}", show_alert=True
@@ -980,3 +1343,91 @@ async def on_take(callback: CallbackQuery):
     D.save_users()
     await callback.answer(f"Снято: {PICKAXES[p]['name']}. Она вернулась в запас.")
     await _show(callback, f"mine_take_{i}")
+
+
+# --- Артефакты шахты ---
+
+@router.callback_query(F.data == "mine:arts")
+async def on_arts(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    await callback.answer()
+    await _show(callback, "mine_arts")
+
+
+@router.callback_query(F.data == "mine:artlist")
+async def on_art_list(callback: CallbackQuery):
+    if await _require_user(callback) is None:
+        return
+    await callback.answer()
+    await _show(callback, "mine_arts_list")
+
+
+@router.callback_query(F.data.regexp(r"^mine:art:\d+$"))
+async def on_art_card(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    nums = _valid(callback, len(ARTIFACTS))
+    if not nums:
+        await callback.answer("Такого артефакта нет", show_alert=True)
+        return
+    if ARTIFACTS[nums[0]]["key"] not in art_keys(get_mine(user)):
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        return
+    await callback.answer()
+    await _show(callback, f"mine_art_{nums[0]}")
+
+
+@router.callback_query(F.data.regexp(r"^mine:awear:\d+$"))
+async def on_art_wear(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    nums = _valid(callback, len(ARTIFACTS))
+    if not nums:
+        await callback.answer("Такого артефакта нет", show_alert=True)
+        return
+    a = ARTIFACTS[nums[0]]
+    m = get_mine(user)
+    settle(m)  # доход может измениться: сначала фиксируем добычу по старому
+
+    if a["key"] not in art_keys(m):
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        return
+    if a["key"] in m["worn"]:
+        await callback.answer("Этот артефакт уже надет.", show_alert=True)
+        return
+    if len(m["worn"]) >= MINE_SLOTS:
+        await callback.answer(
+            f"Все {MINE_SLOTS} слота заняты. Сними один из артефактов.", show_alert=True
+        )
+        return
+
+    m["worn"].append(a["key"])
+    D.save_users()
+    await callback.answer(f"Надето: {a['name']}")
+    await _show(callback, "mine_arts")
+
+
+@router.callback_query(F.data.regexp(r"^mine:aoff:\d+$"))
+async def on_art_take(callback: CallbackQuery):
+    user = await _require_user(callback)
+    if user is None:
+        return
+    nums = _valid(callback, len(ARTIFACTS))
+    if not nums:
+        await callback.answer("Такого артефакта нет", show_alert=True)
+        return
+    a = ARTIFACTS[nums[0]]
+    m = get_mine(user)
+    settle(m)
+
+    if a["key"] not in m["worn"]:
+        await callback.answer("Этот артефакт не надет.", show_alert=True)
+        return
+
+    m["worn"].remove(a["key"])
+    D.save_users()
+    await callback.answer(f"Снято: {a['name']}")
+    await _show(callback, "mine_arts")
