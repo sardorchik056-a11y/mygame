@@ -13,7 +13,8 @@
     (раздел «Шахты»), всего 50. Пока лут есть только у первых
     двух сундуков: поле drops задаёт шансы редкостей. У остальных сундуков drops пустой, это
     оболочка: открыть их нельзя, а фрагменты не списываются.
-  * Если выпал артефакт, который уже есть, возвращается часть фрагментов (DUPLICATE_REFUND).
+  * Если выпал артефакт, который уже есть, игрок получает монеты (DUPLICATE_COINS):
+    чем реже артефакт, тем больше. Фрагменты за дубликат не возвращаются.
   * У каждого сундука своя карточка и своё фото (ключи case_1 ... case_10, задаются
     через /img).
 """
@@ -48,7 +49,14 @@ def setup(**deps) -> None:
 FRAG_DAMAGE_STEP = 5_000   # за каждые столько урона по боссу даётся попытка
 FRAG_CHANCE = 0.5          # шанс получить фрагмент в одной попытке
 
-DUPLICATE_REFUND = 0.5     # за дубликат артефакта возвращается эта доля цены сундука
+# Компенсация монетами, если выпал артефакт, который уже есть: редкость -> монеты
+DUPLICATE_COINS = {
+    "Обычный": 50,
+    "Редкий": 150,
+    "Эпический": 500,
+    "Мифический": 2_500,
+    "Легендарный": 10_000,
+}
 
 FRAG = "🧩"                # значок фрагмента (можно заменить на кастомный эмодзи)
 
@@ -258,7 +266,7 @@ def case_html(user_id: int, n: int, with_image: bool = False) -> str:
     )
 
 
-def result_html(user_id: int, n: int, art: dict, is_new: bool, refund: int,
+def result_html(user_id: int, n: int, art: dict, is_new: bool, coins: int,
                 with_image: bool = False) -> str:
     """Экран после открытия сундука: что внутри (содержимое) и что осталось."""
     n = _case_index(n)
@@ -273,12 +281,13 @@ def result_html(user_id: int, n: int, art: dict, is_new: bool, refund: int,
     else:
         status = [
             (f"{_e(STATUS_EMOJI)} Результат", "дубликат, такой уже есть"),
-            (f"{FRAG} Возврат", f"+{refund}"),
+            (f"{_coin()} Компенсация", f"+{fmt(coins)}"),
         ]
     status.append((f"{FRAG} Осталось фрагментов", fmt(fragments_of(user))))
     return (
         f"{_image(with_image)}"
         f"<p><b>{_e(OPENED_EMOJI)} {c['name'].upper()} ОТКРЫТ</b></p>"
+        + _gap()
         + D.result_block(art)
         + _gap()
         + _tree(status, "Итог")
@@ -455,9 +464,9 @@ async def on_open_case(callback: CallbackQuery):
     user["fragments"] = have - c["price"]
     tier = random.choices(list(c["drops"]), weights=list(c["drops"].values()))[0]
     art, is_new = D.drop_artifact(user, tier)
-    refund = 0 if is_new else max(1, round(c["price"] * DUPLICATE_REFUND))
+    refund = 0 if is_new else DUPLICATE_COINS.get(art["tier"], 0)
     if refund:
-        user["fragments"] += refund
+        user["coins"] = int(user.get("coins", 0)) + refund
     D.save_users()
 
     await callback.answer()
