@@ -541,7 +541,7 @@ def menu_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="Кейсы",
+                    text="Сокровищница",
                     callback_data="menu:cases",
                     style=ButtonStyle.PRIMARY,
                     icon_custom_emoji_id=cases.MENU_EMOJI[0],
@@ -1162,7 +1162,7 @@ mine.setup(
 dp.include_router(mine.router)
 
 def drop_any_artifact(user: dict, tier: str):
-    """Из кейса выпадает артефакт питомца или шахты (поровну, в каждой редкости по 5 + 5)."""
+    """Из сундука выпадает артефакт питомца или шахты (поровну, в каждой редкости по 5 + 5)."""
     return random.choice((equipment.drop_artifact, mine.drop_artifact))(user, tier)
 
 
@@ -1172,7 +1172,7 @@ def artifact_block(art: dict) -> str:
     return owner.result_block(art)
 
 
-# Раздел «Кейсы» живёт в cases.py
+# Раздел «Сокровищница» живёт в cases.py
 cases.setup(
     artifacts=equipment.ARTIFACTS + mine.ARTIFACTS,  # что может выпасть (все 50)
     drop_artifact=drop_any_artifact,           # выдать артефакт игроку
