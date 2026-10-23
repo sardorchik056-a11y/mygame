@@ -10,12 +10,12 @@
     перезарядка навыков, быстрее восстановление HP после ударов босса).
   * Бонусы складываются. user_stats(user) отдаёт характеристики с учётом артефактов,
     bonus(user, вид) отдаёт сумму бонуса одного вида в процентах.
-  * Артефакты выпадают из кейсов (раздел «Кейсы»). Что есть у игрока, лежит в
+  * Артефакты выпадают из сундуков (раздел «Сокровищница»). Что есть у игрока, лежит в
     user["artifacts"], надетое в user["equipment"]. Надеть можно только свои артефакты.
   * У артефактов 5 редкостей (TIERS): Обычный, Редкий, Эпический, Мифический, Легендарный.
     Чем реже, тем сильнее бонус.
   * drop_artifact(user, редкость) выбирает случайный артефакт этой редкости и кладёт его
-    игроку; её вызывает раздел «Кейсы».
+    игроку; её вызывает раздел «Сокровищница».
 """
 
 import logging
@@ -329,7 +329,7 @@ def list_html(user_id: int, with_image: bool = False) -> str:
     if not mine:
         return (
             head
-            + "<blockquote><i>У тебя пока нет артефактов. Открывай кейсы: "
+            + "<blockquote><i>У тебя пока нет артефактов. Открывай сундуки: "
             "артефакты выпадают оттуда.</i></blockquote>"
         )
 
@@ -371,12 +371,16 @@ def item_html(user_id: int, key: str, with_image: bool = False) -> str:
 
 
 def result_block(a: dict) -> str:
-    """Название, редкость, описание и бонус артефакта. Раздел «Кейсы» показывает это
-    на экране выпадения."""
+    """Что выпало из сундука: предмет, тип, редкость, описание и бонус. Раздел
+    «Сокровищница» показывает это на экране выпадения."""
+    rows = [
+        ("Предмет", f"{_icon(a)} {a['name']}"),
+        ("Тип", "артефакт питомца"),
+        ("Редкость", f"{_tier_icon(a['tier'])} {a['tier']}"),
+    ]
     return (
-        f"<p><b>{_icon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
-        f"<b>{_tier_icon(a['tier'])} {a['tier']} артефакт</b></p>"
-        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        _tree(rows, "Содержимое")
+        + f"<blockquote><i>{a['desc']}</i></blockquote>"
         + _tree(_bonus_rows(a["bonus"]), "Бонус")
     )
 
@@ -436,7 +440,7 @@ def list_kb(user_id: int) -> InlineKeyboardMarkup:
                                      ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     if not buttons:  # артефактов ещё нет: подсказываем, где их взять
-        rows.append([_btn("К кейсам", "menu:cases")])
+        rows.append([_btn("В сокровищницу", "menu:cases")])
     rows.append(_back_row("menu:equip"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -529,7 +533,7 @@ async def on_item(callback: CallbackQuery):
         await callback.answer("Такого артефакта нет", show_alert=True)
         return
     if key not in owned_keys(user):
-        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из сундуков.", show_alert=True)
         return
     await callback.answer()
     await _delete(callback)
@@ -547,7 +551,7 @@ async def on_wear(callback: CallbackQuery):
         return
 
     if key not in owned_keys(user):
-        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из сундуков.", show_alert=True)
         return
     worn = user.setdefault("equipment", [])
     if key in worn:
