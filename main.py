@@ -29,7 +29,7 @@ import cases
 import equipment
 import mine
 
-BOT_TOKEN = "8867617327:AAGh7PGmp2DnCZaiA3KkpfLUu8ZZKFerb_8"
+BOT_TOKEN = "8867617327:AAGP427kiEOg1aI8hRIUOyiH3Mu7eQGaEbE"
 
 # Telegram ID админов (свой ID можно узнать у @userinfobot)
 ADMIN_IDS: set[int] = {8118184388}
