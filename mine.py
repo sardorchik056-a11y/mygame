@@ -14,7 +14,7 @@
     в столько раз больше. Шахтёр без кирки добывает с множителем ×1.
   * У каждого типа шахтёров и у каждой кирки есть своя карточка.
   * Артефактов шахты 25, по 5 в каждой из 5 редкостей (ARTIFACTS). Надеть можно
-    до MINE_SLOTS штук. Они выпадают из кейсов и дают бонус: к доходу, к силе кирок,
+    до MINE_SLOTS штук. Они выпадают из сундуков и дают бонус: к доходу, к силе кирок,
     скидку на найм шахтёров и на кирки, более долгий запуск шахты.
 """
 
@@ -225,7 +225,7 @@ ARTIFACTS = [
      "desc": "Тянется и не рвётся. Смена идёт дольше, чем должна."},
 ]
 for _a in ARTIFACTS:
-    _a["section"] = "mine"  # по этому полю «Кейсы» отличают артефакты шахты от артефактов питомца
+    _a["section"] = "mine"  # по этому полю «Сокровищница» отличают артефакты шахты от артефактов питомца
 BY_KEY = {a["key"]: a for a in ARTIFACTS}
 
 # Куда админ может добавить фото через /img
@@ -794,7 +794,7 @@ def arts_list_html(user_id: int, with_image: bool = False) -> str:
     if not mine:
         return (
             head
-            + "<blockquote><i>У тебя пока нет артефактов шахты. Открывай кейсы: "
+            + "<blockquote><i>У тебя пока нет артефактов шахты. Открывай сундуки: "
             "артефакты выпадают оттуда.</i></blockquote>"
         )
     blocks = []
@@ -836,12 +836,16 @@ def art_card_html(user_id: int, i: int, with_image: bool = False) -> str:
 
 
 def result_block(a: dict) -> str:
-    """Название, редкость, описание и бонус артефакта шахты. Раздел «Кейсы» показывает
-    это на экране выпадения."""
+    """Что выпало из сундука: предмет, тип, редкость, описание и бонус. Раздел
+    «Сокровищница» показывает это на экране выпадения."""
+    rows = [
+        ("Предмет", f"{_aicon(a)} {a['name']}"),
+        ("Тип", "артефакт шахты"),
+        ("Редкость", f"{_tier_icon(a['tier'])} {a['tier']}"),
+    ]
     return (
-        f"<p><b>{_aicon(a)} {a['name'].upper()}</b><br>&nbsp;<br>"
-        f"<b>{_tier_icon(a['tier'])} {a['tier']} артефакт шахты</b></p>"
-        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        _tree(rows, "Содержимое")
+        + f"<blockquote><i>{a['desc']}</i></blockquote>"
         + _tree(_art_rows(a["bonus"]), "Бонус")
     )
 
@@ -973,7 +977,7 @@ def arts_list_kb(user_id: int) -> InlineKeyboardMarkup:
                                 ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
     rows = _pairs(buttons)
     if not buttons:  # артефактов ещё нет: подсказываем, где их взять
-        rows.append([_btn("К кейсам", "menu:cases")])
+        rows.append([_btn("В сокровищницу", "menu:cases")])
     rows.append(_back_row("mine:arts"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1373,7 +1377,7 @@ async def on_art_card(callback: CallbackQuery):
         await callback.answer("Такого артефакта нет", show_alert=True)
         return
     if ARTIFACTS[nums[0]]["key"] not in art_keys(get_mine(user)):
-        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из сундуков.", show_alert=True)
         return
     await callback.answer()
     await _show(callback, f"mine_art_{nums[0]}")
@@ -1393,7 +1397,7 @@ async def on_art_wear(callback: CallbackQuery):
     settle(m)  # доход может измениться: сначала фиксируем добычу по старому
 
     if a["key"] not in art_keys(m):
-        await callback.answer("Этого артефакта у тебя нет. Он выпадает из кейсов.", show_alert=True)
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из сундуков.", show_alert=True)
         return
     if a["key"] in m["worn"]:
         await callback.answer("Этот артефакт уже надет.", show_alert=True)
