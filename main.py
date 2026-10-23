@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import random
 from html import escape
 from pathlib import Path
 
@@ -877,11 +878,22 @@ mine.setup(
 )
 dp.include_router(mine.router)
 
+def drop_any_artifact(user: dict, tier: str):
+    """Из кейса выпадает артефакт питомца или шахты (поровну, в каждой редкости по 5 + 5)."""
+    return random.choice((equipment.drop_artifact, mine.drop_artifact))(user, tier)
+
+
+def artifact_block(art: dict) -> str:
+    """Карточка выпавшего артефакта: у артефактов шахты поле section == "mine"."""
+    owner = mine if art.get("section") == "mine" else equipment
+    return owner.result_block(art)
+
+
 # Раздел «Кейсы» живёт в cases.py
 cases.setup(
-    artifacts=equipment.ARTIFACTS,             # что может выпасть
-    drop_artifact=equipment.drop_artifact,     # выдать артефакт игроку
-    result_block=equipment.result_block,       # карточка выпавшего артефакта
+    artifacts=equipment.ARTIFACTS + mine.ARTIFACTS,  # что может выпасть (все 50)
+    drop_artifact=drop_any_artifact,           # выдать артефакт игроку
+    result_block=artifact_block,               # карточка выпавшего артефакта
     get_user=get_user,
     save_users=save_users,
     send_rich_card=send_rich_card,
