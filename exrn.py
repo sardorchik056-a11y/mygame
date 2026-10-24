@@ -10,11 +10,17 @@
 (опыт за экспедиции даёт уровни и бонус к добыче), в пути случаются события, за
 ежедневные походы копится серия с бонусом, а по числу экспедиций растёт звание.
 
+Артефакты исследователей: 25 штук, по 5 в каждой редкости (как в «Снаряжении» и «Шахтах»).
+Надеть можно до 3, бонусы складываются и усиливают экспедиции: больше монет, мяса и фруктов,
+выше шанс артефакта и события, быстрее опыт, короче путь. Из экспедиций выпадают артефакты
+до мифической редкости, а легендарные можно получить только из сундуков «Сокровищницы».
+
 Данные игрока лежат в user["exrn"]:
     {"hired": [ключи нанятых групп], "sel": ключ выбранного отряда,
      "times": [открытые длительности в часах],
      "trips": {ключ группы: {"start": ts, "end": ts, "hours": h}},
      "xp": {ключ: опыт}, "stats": {...}, "log": [...],
+     "arts": [ключи артефактов], "worn": [ключи надетых],
      "streak": дней подряд, "last_day": "ГГГГ-ММ-ДД"}
 """
 
@@ -52,6 +58,10 @@ RARITY_DECAY = 0.35          # чем меньше, тем реже выпада
 RARITY_SKILL = 0.35          # насколько сильные отряды чаще находят редкое
 PAGE_SIZE = 5
 ARROW_TEXT = "\u2800"        # кнопка только со стрелкой: текст невидимый
+ART_CHANCE_HARD_CAP = 0.45   # потолок шанса артефакта даже с бонусами
+EVENT_CHANCE_CAP = 0.90
+SLOTS = 3                   # сколько артефактов исследователей можно надеть
+MAX_TIME_CUT = 50           # экспедиция не может стать короче половины
 ARROW_PREV_ID = "5255703720078879038"   # стрелка «назад» на кнопках страниц
 ARROW_NEXT_ID = "5253767677670862169"   # стрелка «вперёд»
 
@@ -218,21 +228,146 @@ RETURN_LINES = [
 
 
 # ---------------------------------------------------------------------------
+# Артефакты исследователей
+# ---------------------------------------------------------------------------
+
+# Редкости (те же, что в «Снаряжении»): название -> (кастомный эмодзи, во множественном числе).
+# Нужны здесь, чтобы админка и сундуки работали с этим разделом так же, как с остальными.
+TIERS: dict[str, tuple[tuple[str, str], str]] = {
+    "Обычный": (("5391359540568565034", "⚪"), "Обычные"),
+    "Редкий": (("5391181222116371093", "🔵"), "Редкие"),
+    "Эпический": (("5391134355433233897", "🟣"), "Эпические"),
+    "Мифический": (("5391223488889528055", "🔴"), "Мифические"),
+    "Легендарный": (("5390951544445248338", "🟠"), "Легендарные"),
+}
+
+# Виды бонусов: ключ -> (название, знак, эмодзи)
+BONUS_KINDS: dict[str, tuple[str, str, str]] = {
+    "coins": ("Монеты из экспедиций", "+", "💰"),
+    "meat": ("Мясо из экспедиций", "+", "🥩"),
+    "fruit": ("Фрукты из экспедиций", "+", "🥭"),
+    "loot": ("Вся добыча", "+", "📦"),
+    "art": ("Шанс артефакта", "+", "💎"),
+    "xp": ("Опыт отрядов", "+", "✨"),
+    "time": ("Время экспедиций", "−", "⏱"),
+    "event": ("Шанс события в пути", "+", "🎲"),
+}
+
+# Компенсация монетами за дубликат (как в сундуках)
+DUPLICATE_COINS = {"Обычный": 50, "Редкий": 150, "Эпический": 500, "Мифический": 2_500, "Легендарный": 10_000}
+
+# 25 артефактов: ключ, название, значок, редкость, бонус {вид: проценты}, описание.
+# Сила бонуса: Обычный 5, Редкий 10, Эпический 15, Мифический 20, Легендарный 25
+# (для шанса артефакта вдвое больше: 10, 20, 30, 40, 50).
+ARTIFACTS: list[dict] = [
+    # Обычные
+    {"key": "xmap", "name": "Потёртая карта", "icon": "🗺️", "tier": "Обычный",
+     "bonus": {"coins": 5},
+     "desc": "Нарисована от руки и местами порвана, зато крестик стоит ровно там, где лежат монеты."},
+    {"key": "xhorn", "name": "Охотничий рожок", "icon": "📯", "tier": "Обычный",
+     "bonus": {"meat": 5},
+     "desc": "Его зов слышат даже за холмом. Дичь сама выходит навстречу отряду."},
+    {"key": "xbasket", "name": "Плетёная корзина", "icon": "🧺", "tier": "Обычный",
+     "bonus": {"fruit": 5},
+     "desc": "Кажется небольшой, но фруктов в неё влезает больше, чем должно."},
+    {"key": "xdiary", "name": "Дневник путника", "icon": "📔", "tier": "Обычный",
+     "bonus": {"xp": 5},
+     "desc": "Каждая запись в нём учит чему-то новому. Отряд мудреет после каждого похода."},
+    {"key": "xboots", "name": "Походные сапоги", "icon": "🥾", "tier": "Обычный",
+     "bonus": {"time": 5},
+     "desc": "Разношенные и удобные. В них шагается легче, и дорога будто короче."},
+    # Редкие
+    {"key": "xpurse", "name": "Кошель торговца", "icon": "👝", "tier": "Редкий",
+     "bonus": {"coins": 10},
+     "desc": "Монеты в нём звенят особенно приятно. Старый хозяин не расставался с ним даже во сне."},
+    {"key": "xpack", "name": "Рюкзак следопыта", "icon": "🎒", "tier": "Редкий",
+     "bonus": {"loot": 10},
+     "desc": "Десяток карманов, и в каждом нашлось место для трофея."},
+    {"key": "xlens", "name": "Лупа археолога", "icon": "🔍", "tier": "Редкий",
+     "bonus": {"art": 20},
+     "desc": "Сквозь неё видно то, что скрыто под слоем пыли: даже самый неприметный тайник."},
+    {"key": "xwatch", "name": "Дорожные часы", "icon": "⌚", "tier": "Редкий",
+     "bonus": {"time": 10},
+     "desc": "Тикают чуть быстрее обычного. Путь с ними пролетает незаметно."},
+    {"key": "xtotem", "name": "Костровой тотем", "icon": "🔥", "tier": "Редкий",
+     "bonus": {"event": 10},
+     "desc": "У его огня рассказывают лучшие истории, а на огонёк заглядывают самые интересные гости."},
+    # Эпические
+    {"key": "xantler", "name": "Рогатый трофей", "icon": "🦌", "tier": "Эпический",
+     "bonus": {"meat": 15},
+     "desc": "Рога древнего оленя-короля. Лесные звери ему подчиняются и сами идут к отряду."},
+    {"key": "xgrape", "name": "Лоза вечного сада", "icon": "🍇", "tier": "Эпический",
+     "bonus": {"fruit": 15},
+     "desc": "Ягоды на ней вызревают за один день и никогда не заканчиваются."},
+    {"key": "xbag", "name": "Сумка с двойным дном", "icon": "👜", "tier": "Эпический",
+     "bonus": {"loot": 15},
+     "desc": "Снаружи кажется пустой, а внутри умещается добыча целого каравана."},
+    {"key": "xmirror", "name": "Зеркало искателя", "icon": "🪞", "tier": "Эпический",
+     "bonus": {"art": 30},
+     "desc": "Отражает не лицо, а спрятанные неподалёку сокровища. Главное, не заглядеться."},
+    {"key": "xscroll", "name": "Свиток мудрости", "icon": "📜", "tier": "Эпический",
+     "bonus": {"xp": 15},
+     "desc": "Чем чаще его перечитывают, тем больше строк на нём появляется."},
+    # Мифические
+    {"key": "xamphora", "name": "Амфора древних царей", "icon": "🏺", "tier": "Мифический",
+     "bonus": {"coins": 20},
+     "desc": "В ней хранили царскую казну. Золото до сих пор тянется к ней само."},
+    {"key": "xcloak", "name": "Плащ странствующего короля", "icon": "🧥", "tier": "Мифический",
+     "bonus": {"loot": 20},
+     "desc": "Тот, кто его носит, получает от дорог больше, чем просит."},
+    {"key": "xclock", "name": "Часы вечного пути", "icon": "🕰️", "tier": "Мифический",
+     "bonus": {"time": 20},
+     "desc": "Стрелки бегут вперёд, а расстояния сжимаются. Дорога становится заметно короче."},
+    {"key": "xstar", "name": "Звезда-проводник", "icon": "🌟", "tier": "Мифический",
+     "bonus": {"event": 20},
+     "desc": "Горит над отрядом и указывает на самые удивительные встречи."},
+    {"key": "xhawk", "name": "Глаз пустынного ястреба", "icon": "🦅", "tier": "Мифический",
+     "bonus": {"art": 40},
+     "desc": "Видит блеск артефакта за десять миль. Ничто не укроется от этого взгляда."},
+    # Легендарные
+    {"key": "xpirate", "name": "Клад Короля Пиратов", "icon": "🏴‍☠️", "tier": "Легендарный",
+     "bonus": {"coins": 25},
+     "desc": "Легенда гласит: кто владеет им, тот никогда не останется без золота."},
+    {"key": "xworld", "name": "Карта Края Мира", "icon": "🌍", "tier": "Легендарный",
+     "bonus": {"loot": 25},
+     "desc": "На ней отмечено всё, что ещё не открыто. Каждая вылазка превращается в триумф."},
+    {"key": "xmonocle", "name": "Монокль Всеведения", "icon": "🧐", "tier": "Легендарный",
+     "bonus": {"art": 50},
+     "desc": "Через него видно будущее находок. Артефакты сами выходят из тени."},
+    {"key": "xportal", "name": "Врата Первопроходца", "icon": "🌀", "tier": "Легендарный",
+     "bonus": {"time": 25},
+     "desc": "Шаг в них, и отряд оказывается на полпути к цели. Время для него течёт иначе."},
+    {"key": "xbook", "name": "Книга Первооткрывателя", "icon": "📖", "tier": "Легендарный",
+     "bonus": {"xp": 25},
+     "desc": "В ней записаны все тропы мира. Отряд, прочитавший хоть страницу, взрослеет на глазах."},
+]
+for _a in ARTIFACTS:
+    _a["section"] = "exrn"          # по этому полю «Сокровищница» узнаёт раздел артефакта
+BY_ART = {a["key"]: a for a in ARTIFACTS}
+_TIER_LIST = list(TIERS)
+
+# Куда админ может добавить фото
+IMG_TARGETS.update({
+    "exrn_arts": "Исследователи: артефакты",
+    "exrn_art_item": "Исследователи: карточка артефакта",
+})
+
+
+# ---------------------------------------------------------------------------
 # Подключение к боту
 # ---------------------------------------------------------------------------
 
 _get_user = None
 _save_users = None
 _show_rich_card = None
+_send_rich_card = None
 _custom_emoji = None
-_drop_artifact = None
-_result_block = None
 _COIN = ("5449418135381759397", "🪙")
 _INFO = ("5334544901428229844", "ℹ️")
 _BACK_ID: str | None = None
 _MEAT = "🥩"
 _FRUIT = "🥭"
-_TIERS: list[str] = []
+_TIERS: list[str] = _TIER_LIST
 
 
 def setup(
@@ -240,29 +375,26 @@ def setup(
     get_user,
     save_users,
     show_rich_card,
+    send_rich_card,
     custom_emoji,
     COIN_EMOJI,
     INFO_EMOJI,
     BACK_EMOJI_ID,
     MEAT_EMOJI,
     FRUIT_EMOJI,
-    drop_artifact,
-    result_block,
-    tiers,
+    **_ignored,
 ) -> None:
-    """drop_artifact(user, tier) выдаёт артефакт игроку, result_block(art) рисует карточку,
-    tiers: названия редкостей по порядку от обычной к высшей (list(equipment.TIERS))."""
-    global _get_user, _save_users, _show_rich_card, _custom_emoji, _drop_artifact
-    global _result_block, _COIN, _INFO, _BACK_ID, _MEAT, _FRUIT, _TIERS
+    """Артефакты исследователей выдаются из собственного списка ARTIFACTS, поэтому
+    drop_artifact, result_block и tiers из старого вызова setup больше не нужны."""
+    global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji
+    global _COIN, _INFO, _BACK_ID, _MEAT, _FRUIT
     _get_user = get_user
     _save_users = save_users
     _show_rich_card = show_rich_card
+    _send_rich_card = send_rich_card
     _custom_emoji = custom_emoji
-    _drop_artifact = drop_artifact
-    _result_block = result_block
     _COIN, _INFO, _BACK_ID = COIN_EMOJI, INFO_EMOJI, BACK_EMOJI_ID
     _MEAT, _FRUIT = MEAT_EMOJI, FRUIT_EMOJI
-    _TIERS = list(tiers)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +452,8 @@ def _state(user: dict) -> dict:
     times = ex.setdefault("times", [DURATIONS[0]])
     if DURATIONS[0] not in times:
         times.append(DURATIONS[0])
+    ex.setdefault("arts", [])
+    ex.setdefault("worn", [])
     ex.setdefault("xp", {})
     ex.setdefault("log", [])
     stats = ex.setdefault("stats", {})
@@ -396,10 +530,12 @@ def _tier_weights(gi: int) -> list[float]:
     return [(RARITY_DECAY ** j) * (1 + gi * RARITY_SKILL * j) for j in range(cap + 1)]
 
 
-def art_chance(gi: int, hours: int, level: int = 1, boost: float = 1.0) -> float:
+def art_chance(gi: int, hours: int, level: int = 1, boost: float = 1.0, bonus_pct: int = 0) -> float:
+    """Шанс артефакта за экспедицию. bonus_pct: бонус от надетых артефактов в процентах."""
     base = GROUPS[gi]["art"] * math.sqrt(hours / DURATIONS[0])
     base *= 1 + LEVEL_ART_BONUS * (level - 1)
-    return min(ART_CHANCE_CAP, base * boost)
+    base = min(ART_CHANCE_CAP, base * boost)
+    return min(ART_CHANCE_HARD_CAP, base * (1 + bonus_pct / 100))
 
 
 def _tier_name(i: int) -> str:
@@ -442,21 +578,132 @@ def _trip_status(ex: dict, key: str, now: float) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Артефакты: владение, надевание, бонусы
+# ---------------------------------------------------------------------------
+
+def owned_keys(user: dict) -> set[str]:
+    ex = _state(user)
+    return set(ex["arts"]) | set(ex["worn"])
+
+
+def owned(user: dict) -> list[dict]:
+    keys = owned_keys(user)
+    return [a for a in ARTIFACTS if a["key"] in keys]
+
+
+def equipped(user: dict) -> list[dict]:
+    return [BY_ART[k] for k in _state(user)["worn"] if k in BY_ART]
+
+
+def bonus(user: dict, kind: str) -> int:
+    """Сумма бонуса одного вида от надетых артефактов (в процентах)."""
+    total = sum(a["bonus"].get(kind, 0) for a in equipped(user))
+    return min(total, MAX_TIME_CUT) if kind == "time" else total
+
+
+def bonuses(user: dict) -> dict[str, int]:
+    return {kind: bonus(user, kind) for kind in BONUS_KINDS}
+
+
+def grant(user: dict, key: str) -> bool:
+    """Выдаёт артефакт. False, если такой уже есть или ключ неизвестен (для админки)."""
+    if key not in BY_ART or key in owned_keys(user):
+        return False
+    _state(user)["arts"].append(key)
+    return True
+
+
+def revoke(user: dict, key: str) -> bool:
+    if key not in BY_ART or key not in owned_keys(user):
+        return False
+    ex = _state(user)
+    for field in ("arts", "worn"):
+        if key in ex[field]:
+            ex[field].remove(key)
+    return True
+
+
+def drop_artifact(user: dict, tier: str) -> tuple[dict, bool]:
+    """Случайный артефакт редкости tier. Возвращает (артефакт, новый ли)."""
+    pool = [a for a in ARTIFACTS if a["tier"] == tier] or ARTIFACTS
+    art = random.choice(pool)
+    return art, grant(user, art["key"])
+
+
+def fmt_bonus(kind: str, pct: int) -> str:
+    return f"{BONUS_KINDS[kind][1]}{pct}%"
+
+
+def _tier_icon(tier: str) -> str:
+    return _custom_emoji(TIERS[tier][0])
+
+
+def _tree(rows: list, title: str = "") -> str:
+    """Блок с рамочкой ├ └, как в «Снаряжении» и «Сокровищнице»."""
+    lines = []
+    for n, row in enumerate(rows):
+        label, value = row[0], row[1]
+        kids = row[2] if len(row) > 2 else []
+        last = n == len(rows) - 1
+        line = f"{'└' if last else '├'} {label}"
+        if value != "":
+            line += f": <b>{value}</b>"
+        lines.append(line)
+        pad = "&nbsp;&nbsp;&nbsp;" if last else "│&nbsp;&nbsp;"
+        for k, (kl, kv) in enumerate(kids):
+            kline = f"{pad}{'└' if k == len(kids) - 1 else '├'} {kl}"
+            if kv != "":
+                kline += f": <b>{kv}</b>"
+            lines.append(kline)
+    head = f"<b>{title}</b><br>" if title else ""
+    return f"<p>{head}{'<br>'.join(lines)}</p>"
+
+
+def _gap() -> str:
+    return "<p>&nbsp;</p>"
+
+
+def _bonus_rows(bonuses_: dict[str, int]) -> list[tuple[str, str]]:
+    return [
+        (f"{BONUS_KINDS[kind][2]} {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct))
+        for kind, pct in bonuses_.items()
+    ]
+
+
+def result_block(a: dict) -> str:
+    """Карточка артефакта в «Сокровищнице» после открытия сундука."""
+    rows = [
+        ("Предмет", f"{a['icon']} {a['name']}"),
+        ("Тип", "артефакт исследователей"),
+        ("Редкость", f"{_tier_icon(a['tier'])} {a['tier']}"),
+    ]
+    return (
+        _tree(rows, "Содержимое")
+        + f"<blockquote><i>{a['desc']}</i></blockquote>"
+        + _tree(_bonus_rows(a["bonus"]), "Бонус")
+    )
+
+
+# ---------------------------------------------------------------------------
 # Добыча
 # ---------------------------------------------------------------------------
 
-def roll_trip(gi: int, hours: int, level: int = 1, streak_bonus: float = 0.0) -> dict:
-    """Считает добычу за экспедицию (артефакт здесь только выбирается по редкости)."""
+def roll_trip(gi: int, hours: int, level: int = 1, streak_bonus: float = 0.0,
+              bon: dict | None = None) -> dict:
+    """Считает добычу за экспедицию (артефакт здесь только выбирается по редкости).
+    bon: бонусы надетых артефактов исследователей (см. bonuses())."""
     g = GROUPS[gi]
+    bon = bon or {}
     event = None
-    if random.random() < EVENT_CHANCE:
+    if random.random() < min(EVENT_CHANCE_CAP, EVENT_CHANCE + bon.get("event", 0) / 100):
         event = random.choices(EVENTS, weights=[e["w"] for e in EVENTS])[0]
     ev = event or {}
 
     base = DURATION_BONUS.get(hours, 1.0) * (1 + LEVEL_LOOT_BONUS * (level - 1)) * (1 + streak_bonus)
 
     def part(rate: float, kind: str) -> int:
-        mult = base * ev.get("all", 1.0) * ev.get(kind, 1.0)
+        art_mult = 1 + (bon.get("loot", 0) + bon.get(kind, 0)) / 100
+        mult = base * art_mult * ev.get("all", 1.0) * ev.get(kind, 1.0)
         return max(1, int(round(rate * hours * mult * random.uniform(*SPREAD))))
 
     result = {
@@ -464,10 +711,10 @@ def roll_trip(gi: int, hours: int, level: int = 1, streak_bonus: float = 0.0) ->
         "meat": part(g["meat_h"], "meat"),
         "fruit": part(g["fruit_h"], "fruit"),
         "event": event,
-        "xp": int(hours * ev.get("xp", 1)),
+        "xp": max(1, int(round(hours * ev.get("xp", 1) * (1 + bon.get("xp", 0) / 100)))),
         "tier": None,
     }
-    if random.random() < art_chance(gi, hours, level, ev.get("art", 1.0)):
+    if random.random() < art_chance(gi, hours, level, ev.get("art", 1.0), bon.get("art", 0)):
         weights = _tier_weights(gi)
         result["tier"] = random.choices(range(len(weights)), weights=weights)[0]
     return result
@@ -488,19 +735,21 @@ def _rank_stars(gi: int) -> str:
     return "★" * (gi + 1) + "☆" * (len(GROUPS) - gi - 1)
 
 
-def _loot_rows(gi: int, hours: int, level: int) -> str:
+def _loot_rows(gi: int, hours: int, level: int, bon: dict | None = None) -> str:
     g = GROUPS[gi]
+    bon = bon or {}
     mult = DURATION_BONUS.get(hours, 1.0) * (1 + LEVEL_LOOT_BONUS * (level - 1))
 
-    def span(rate: float) -> str:
-        lo = max(1, round(rate * hours * mult * SPREAD[0]))
-        hi = max(1, round(rate * hours * mult * SPREAD[1]))
+    def span(rate: float, kind: str) -> str:
+        m = mult * (1 + (bon.get("loot", 0) + bon.get(kind, 0)) / 100)
+        lo = max(1, round(rate * hours * m * SPREAD[0]))
+        hi = max(1, round(rate * hours * m * SPREAD[1]))
         return f"{_num(lo)} – {_num(hi)}"
 
     return (
-        f"<tr><td><b>{_coin()} Монеты</b></td><td align=\"center\">{span(g['coins_h'])}</td></tr>"
-        f"<tr><td><b>{_MEAT} Мясо</b></td><td align=\"center\">{span(g['meat_h'])}</td></tr>"
-        f"<tr><td><b>{_FRUIT} Фрукты</b></td><td align=\"center\">{span(g['fruit_h'])}</td></tr>"
+        f"<tr><td><b>{_coin()} Монеты</b></td><td align=\"center\">{span(g['coins_h'], 'coins')}</td></tr>"
+        f"<tr><td><b>{_MEAT} Мясо</b></td><td align=\"center\">{span(g['meat_h'], 'meat')}</td></tr>"
+        f"<tr><td><b>{_FRUIT} Фрукты</b></td><td align=\"center\">{span(g['fruit_h'], 'fruit')}</td></tr>"
     )
 
 
@@ -566,6 +815,7 @@ def main_html(user: dict, with_image: bool = False) -> str:
             f"<b>🏅 Звание: {rank}</b>" + (f"<br><i>до следующего: {to_next} эксп.</i>" if to_next else ""),
             f"<b>🔥 Серия: {streak} дн.</b>" + (f" · +{bonus}% к добыче" if bonus else " · зайди завтра, и пойдёт бонус"),
             f"<b>👥 Отрядов: {len(ex['hired'])} из {len(GROUPS)}</b>",
+            f"<b>🎒 Артефакты: надето {len(ex['worn'])} из {SLOTS}</b>",
         )
     )
 
@@ -590,7 +840,9 @@ def main_kb(user: dict) -> InlineKeyboardMarkup:
         rows.append([_btn("🔁 Сменить отряд", "exrn:sel", ButtonStyle.SUCCESS)])
     rows.append([_btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.PRIMARY),
                  _btn("⏱ Время", "exrn:times", ButtonStyle.PRIMARY)])
-    rows.append([_btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY), _back("menu:back")])
+    rows.append([_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS),
+                 _btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY)])
+    rows.append([_back("menu:back")])
     return _kb(*rows)
 
 
@@ -674,6 +926,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     cap = _tier_cap(gi)
     h0 = DURATIONS[0]
     lvl = _level(ex, g["key"]) if code != "locked" else 1
+    bon = bonuses(user)
 
     if gi == 0:
         price = "Базовый · всегда с тобой"
@@ -689,7 +942,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
         rows += f"<tr><td><b>⭐ Уровень</b></td><td align=\"center\">{lvl}</td></tr>"
     rows += (
         f"<tr><td><b>💎 Шанс артефакта за {h0} ч</b></td>"
-        f"<td align=\"center\">{art_chance(gi, h0, lvl) * 100:.1f}%</td></tr>"
+        f"<td align=\"center\">{art_chance(gi, h0, lvl, 1.0, bon['art']) * 100:.1f}%</td></tr>"
         f"<tr><td><b>✨ Редкость находок</b></td>"
         f"<td align=\"center\">до «{escape(_tier_name(cap))}»</td></tr>"
     )
@@ -702,7 +955,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
         f"{rows}</table>"
         "<table bordered striped>"
         f"<tr><th><b>Добыча за {h0} ч</b></th><th><b>Примерно</b></th></tr>"
-        f"{_loot_rows(gi, h0, lvl)}</table>"
+        f"{_loot_rows(gi, h0, lvl, bon)}</table>"
     )
 
     if code == "locked":
@@ -721,13 +974,15 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
             )
         rows = ""
         for h in sorted(ex["times"]):
-            mult = DURATION_BONUS.get(h, 1.0) * (1 + LEVEL_LOOT_BONUS * (lvl - 1))
+            mult = DURATION_BONUS.get(h, 1.0) * (1 + LEVEL_LOOT_BONUS * (lvl - 1)) \
+                * (1 + (bon["loot"] + bon["coins"]) / 100)
             lo = max(1, round(g["coins_h"] * h * mult * SPREAD[0]))
             hi = max(1, round(g["coins_h"] * h * mult * SPREAD[1]))
+            real = _dur(h * 3600 * (1 - bon["time"] / 100))
             rows += (
-                f"<tr><td><b>⏱ {h} ч</b></td>"
+                f"<tr><td><b>⏱ {h} ч</b>" + (f" · в пути {real}" if bon["time"] else "") + "</td>"
                 f"<td align=\"center\">{_num(lo)} – {_num(hi)}</td>"
-                f"<td align=\"center\">{art_chance(gi, h, lvl) * 100:.1f}%</td></tr>"
+                f"<td align=\"center\">{art_chance(gi, h, lvl, 1.0, bon['art']) * 100:.1f}%</td></tr>"
             )
         return head + (
             "<table bordered striped>"
@@ -881,7 +1136,8 @@ def log_html(user: dict, with_image: bool = False) -> str:
     )
 
 
-def loot_html(gi: int, hours: int, loot: dict, art, info: dict, with_image: bool = False) -> str:
+def loot_html(gi: int, hours: int, loot: dict, art, is_new: bool, dup: int, info: dict,
+              with_image: bool = False) -> str:
     g = GROUPS[gi]
     event = loot["event"]
     rows = (
@@ -906,18 +1162,17 @@ def loot_html(gi: int, hours: int, loot: dict, art, info: dict, with_image: bool
         bonus_lines.append(f"<b>⭐ Бонус уровня отряда: +{info['level_bonus']}%</b>")
     if info["streak_bonus"]:
         bonus_lines.append(f"<b>🔥 Бонус серии ({info['streak']} дн.): +{info['streak_bonus']}%</b>")
+    for kind, pct in info.get("art_bonus", {}).items():
+        if pct and kind != "time":
+            bonus_lines.append(f"<b>🎒 {BONUS_KINDS[kind][0]}: {fmt_bonus(kind, pct)}</b>")
     text += _p(*bonus_lines)
     if art is not None:
-        try:
-            text += _p("<b>💎 В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b>") + f"{_result_block(art)}"
-        except Exception:  # карточка не должна ломать выдачу добычи
-            log.exception("не удалось нарисовать карточку артефакта")
-            text += _p("<b>💎 Отряд принёс артефакт!</b>", "<i>Загляни в «Снаряжение».</i>")
-    elif loot["tier"] is not None:
-        text += _p(
-            "<b>💎 Отряд нашёл артефакт, но такой у тебя уже есть.</b>",
-            "<i>Его обменяли на дополнительные монеты.</i>",
-        )
+        text += _p("<b>💎 В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b>") + result_block(art)
+        if is_new:
+            text += _p("<i>Он уже ждёт тебя в разделе «🎒 Артефакты».</i>")
+        else:
+            text += _p("<b>♻️ Такой артефакт у тебя уже есть.</b>",
+                       f"<i>Компенсация: +{_num(dup)} монет.</i>")
     text += _p(f"<b>✨ Опыт отряда: +{loot['xp']}</b>")
     if info["new_level"] > info["old_level"]:
         text += _p(
@@ -929,6 +1184,80 @@ def loot_html(gi: int, hours: int, loot: dict, art, info: dict, with_image: bool
     text += _p("<i>Всё добытое уже лежит в твоих запасах.</i>")
     return text
 
+
+# ---------------------------------------------------------------------------
+# Экраны артефактов
+# ---------------------------------------------------------------------------
+
+def arts_html(user: dict, with_image: bool = False) -> str:
+    ex = _state(user)
+    worn = equipped(user)
+    slots = []
+    for n in range(SLOTS):
+        if n < len(worn):
+            a = worn[n]
+            slots.append((f"{n + 1} слот", f"{a['icon']} {a['name']}", _bonus_rows(a["bonus"])))
+        else:
+            slots.append((f"{n + 1} слот", "пусто"))
+    total = {k: v for k, v in bonuses(user).items() if v}
+    summary = (_tree(_bonus_rows(total), "Общие бонусы") if total
+               else _tree([("Артефакты не надеты", "")], "Общие бонусы"))
+    have = len(owned_keys(user))
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>🎒 АРТЕФАКТЫ ИССЛЕДОВАТЕЛЕЙ</b><br>&nbsp;<br>"
+        f"<b>Занято слотов: {len(worn)}/{SLOTS} · найдено {have} из {len(ARTIFACTS)}</b></p>"
+        "<blockquote><i>Эти находки делают экспедиции богаче, короче и удачливее. "
+        "Надень до трёх артефактов, и их бонусы сложатся.</i></blockquote>"
+        + _tree(slots, "Слоты")
+        + _gap()
+        + summary
+        + _gap()
+        + _p("<i>Артефакты находят в экспедициях (до мифических) и достают из сундуков «Сокровищницы».</i>")
+    )
+
+
+def arts_kb(user: dict) -> InlineKeyboardMarkup:
+    worn = set(_state(user)["worn"])
+    buttons = [
+        _btn(f"{a['icon']} {a['name']}", f"exrn:ai:{a['key']}",
+             ButtonStyle.SUCCESS if a["key"] in worn else ButtonStyle.PRIMARY)
+        for a in owned(user)
+    ]
+    rows = [[b] for b in buttons]
+    rows.append([_back("exrn:main")])
+    return _kb(*rows)
+
+
+def art_item_html(user: dict, key: str, with_image: bool = False) -> str:
+    a = BY_ART.get(key, ARTIFACTS[0])
+    ex = _state(user)
+    is_worn = a["key"] in ex["worn"]
+    state = [
+        ("🔓 Статус", "надет" if is_worn else "не надет"),
+        ("🎒 Слоты", f"{len(ex['worn'])}/{SLOTS} заняты"),
+    ]
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{a['icon']} {a['name'].upper()}</b><br>&nbsp;<br>"
+        f"<b>{_tier_icon(a['tier'])} {a['tier']} артефакт исследователей</b></p>"
+        f"<blockquote><i>{a['desc']}</i></blockquote>"
+        + _tree(_bonus_rows(a["bonus"]), "Бонус")
+        + _gap()
+        + _tree(state, "Состояние")
+    )
+
+
+def art_item_kb(user: dict, key: str) -> InlineKeyboardMarkup:
+    a = BY_ART.get(key, ARTIFACTS[0])
+    ex = _state(user)
+    if a["key"] in ex["worn"]:
+        action = _btn("Снять", f"exrn:at:{a['key']}", ButtonStyle.DANGER)
+    else:
+        free = len(ex["worn"]) < SLOTS
+        action = _btn("Надеть", f"exrn:aw:{a['key']}",
+                      ButtonStyle.SUCCESS if free else ButtonStyle.DANGER)
+    return _kb([action], [_back("exrn:arts")])
 
 
 # ---------------------------------------------------------------------------
@@ -944,8 +1273,9 @@ async def _need_user(callback: CallbackQuery):
     return user
 
 
-async def _show(callback: CallbackQuery, html_fn, kb: InlineKeyboardMarkup, force_new: bool = False):
-    await _show_rich_card(callback, "exrn", html_fn, kb, force_new=force_new)
+async def _show(callback: CallbackQuery, html_fn, kb: InlineKeyboardMarkup,
+                force_new: bool = False, key: str = "exrn"):
+    await _show_rich_card(callback, key, html_fn, kb, force_new=force_new)
 
 
 async def _show_main(callback: CallbackQuery, user: dict):
@@ -1082,10 +1412,13 @@ async def on_go(callback: CallbackQuery):
         )
     else:
         now = time.time()
-        ex["trips"][g["key"]] = {"start": now, "end": now + hours * 3600, "hours": hours}
+        cut = bonus(user, "time")
+        real = hours * 3600 * (1 - cut / 100)
+        ex["trips"][g["key"]] = {"start": now, "end": now + real, "hours": hours}
         ex["sel"] = g["key"]
         _save_users()
-        await callback.answer(f"{g['name']} отправились в путь на {hours} ч!")
+        note = f" Артефакты сократили путь до {_dur(real)}." if cut else ""
+        await callback.answer(f"{g['name']} отправились в путь на {hours} ч!{note}")
         await _show_main(callback, user)
         return
     await _show(callback, lambda wi: group_html(user, gi, wi), group_kb(user, gi))
@@ -1131,21 +1464,19 @@ async def on_take(callback: CallbackQuery):
     old_level = _level_info(old_xp)[0]
     old_rank = _rank_title(ex["stats"]["trips"])[0]
 
-    loot = roll_trip(gi, hours, old_level, sb)
+    bon = bonuses(user)
+    loot = roll_trip(gi, hours, old_level, sb, bon)
     user["coins"] += loot["coins"]
     user["meat"] += loot["meat"]
     user["fruit"] += loot["fruit"]
-    art = None
+    art, is_new, dup = None, False, 0
     if loot["tier"] is not None:
-        try:
-            art = _drop_artifact(user, _TIERS[loot["tier"]])
-        except Exception:
-            log.exception("не удалось выдать артефакт из экспедиции")
-        if art is None:
-            # Дубликат или сбой выдачи: компенсируем монетами, чтобы находка не пропала
-            bonus = loot["coins"]
-            user["coins"] += bonus
-            loot["coins"] += bonus
+        art, is_new = drop_artifact(user, _TIER_LIST[loot["tier"]])
+        if not is_new:
+            # Дубликат: компенсируем монетами, как в сундуках
+            dup = DUPLICATE_COINS.get(art["tier"], 0)
+            user["coins"] += dup
+            loot["coins"] += dup
 
     ex["xp"][g["key"]] = old_xp + loot["xp"]
     new_level = _level_info(ex["xp"][g["key"]])[0]
@@ -1154,7 +1485,7 @@ async def on_take(callback: CallbackQuery):
     st["coins"] += loot["coins"]
     st["meat"] += loot["meat"]
     st["fruit"] += loot["fruit"]
-    st["arts"] += 1 if art is not None else 0
+    st["arts"] += 1 if (art is not None and is_new) else 0
     new_rank = _rank_title(st["trips"])[0]
     ex["log"].append({"gi": gi, "hours": hours, "coins": loot["coins"], "art": art is not None,
                       "ts": int(time.time())})
@@ -1166,13 +1497,15 @@ async def on_take(callback: CallbackQuery):
         "level_bonus": int(round(LEVEL_LOOT_BONUS * (old_level - 1) * 100)),
         "streak": streak, "streak_bonus": int(round(sb * 100)),
         "rank_up": new_rank if new_rank != old_rank else None,
+        "art_bonus": bon,
     }
     await callback.answer("Добыча у тебя в запасах!")
     kb = _kb(
         [_btn("🚀 К лагерю", "exrn:main", ButtonStyle.SUCCESS)],
-        [_btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY)],
+        [_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS),
+         _btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY)],
     )
-    await _show(callback, lambda wi: loot_html(gi, hours, loot, art, info, wi), kb)
+    await _show(callback, lambda wi: loot_html(gi, hours, loot, art, is_new, dup, info, wi), kb)
 
 
 @router.callback_query(F.data == "exrn:log")
@@ -1215,3 +1548,87 @@ async def on_time_buy(callback: CallbackQuery):
         _save_users()
         await callback.answer(f"Открыта экспедиция на {nxt} ч!", show_alert=True)
     await _show(callback, lambda wi: times_html(user, wi), times_kb(user))
+
+
+@router.callback_query(F.data == "exrn:arts")
+async def on_arts(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show(callback, lambda wi: arts_html(user, wi), arts_kb(user), key="exrn_arts")
+
+
+@router.callback_query(F.data.regexp(r"^exrn:ai:\w+$"))
+async def on_art_item(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    key = callback.data.split(":")[2]
+    if key not in BY_ART:
+        await callback.answer("Такого артефакта нет", show_alert=True)
+        return
+    if key not in owned_keys(user):
+        await callback.answer("Этого артефакта у тебя нет. Он выпадает из экспедиций и сундуков.",
+                              show_alert=True)
+        return
+    await callback.answer()
+    await _show(callback, lambda wi: art_item_html(user, key, wi), art_item_kb(user, key),
+                key="exrn_art_item")
+
+
+@router.callback_query(F.data.regexp(r"^exrn:aw:\w+$"))
+async def on_art_wear(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    key = callback.data.split(":")[2]
+    ex = _state(user)
+    if key not in BY_ART or key not in owned_keys(user):
+        await callback.answer("Этого артефакта у тебя нет", show_alert=True)
+        return
+    if key in ex["worn"]:
+        await callback.answer("Этот артефакт уже надет", show_alert=True)
+        return
+    if len(ex["worn"]) >= SLOTS:
+        await callback.answer(f"Все {SLOTS} слота заняты. Сними один из артефактов.", show_alert=True)
+        return
+    if key in ex["arts"]:
+        ex["arts"].remove(key)
+    ex["worn"].append(key)
+    _save_users()
+    await callback.answer(f"Надето: {BY_ART[key]['name']}")
+    await _show(callback, lambda wi: arts_html(user, wi), arts_kb(user), key="exrn_arts")
+
+
+@router.callback_query(F.data.regexp(r"^exrn:at:\w+$"))
+async def on_art_take(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    key = callback.data.split(":")[2]
+    ex = _state(user)
+    if key not in ex["worn"]:
+        await callback.answer("Этот артефакт не надет", show_alert=True)
+        return
+    ex["worn"].remove(key)
+    if key not in ex["arts"]:
+        ex["arts"].append(key)
+    _save_users()
+    await callback.answer(f"Снято: {BY_ART[key]['name']}")
+    await _show(callback, lambda wi: arts_html(user, wi), arts_kb(user), key="exrn_arts")
+
+
+# ---------------------------------------------------------------------------
+# Предпросмотр фото для /img (без кнопок)
+# ---------------------------------------------------------------------------
+
+async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
+    user = _get_user(user_id) or {"coins": 0, "meat": 0, "fruit": 0}
+    _state(user)
+    builders = {
+        "exrn": lambda wi: main_html(user, wi),
+        "exrn_arts": lambda wi: arts_html(user, wi),
+        "exrn_art_item": lambda wi: art_item_html(user, ARTIFACTS[0]["key"], wi),
+    }
+    await _send_rich_card(bot, chat_id, key, builders[key])
