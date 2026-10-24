@@ -120,6 +120,35 @@ GROUPS: list[dict] = [
 ]
 BY_KEY = {g["key"]: g for g in GROUPS}
 
+# Случайные картины мира над списком отрядов: лес, пещеры, море и так далее
+SCENES = [
+    "🌲 Лес шумит старыми соснами, а между корнями поблёскивает что-то золотое. "
+    "Кто рискнёт зайти в чащу первым?",
+    "🕳️ Из тёмной пещеры тянет холодом и эхом далёких капель. Где-то там, в глубине, "
+    "мерцают забытые сокровища.",
+    "🌊 Море бьётся о скалы, а на горизонте виднеются паруса. Под волнами спят "
+    "затонувшие корабли и их тайны.",
+    "🏜️ Над барханами дрожит раскалённый воздух. Ветер то открывает, то снова "
+    "хоронит под песком древние города.",
+    "⛰️ Горные вершины тонут в облаках. Говорят, на самом верху остались следы тех, "
+    "кто был здесь до людей.",
+    "🌋 Вулкан тихо ворчит во сне. Его склоны усыпаны самоцветами, которые остыли "
+    "тысячу лет назад.",
+    "🏛️ Поросшие мхом колонны стоят в тишине. Каждый камень руин хранит надпись, "
+    "а под ними спрятан тайный ход.",
+    "🌌 Ночное небо рассыпало звёзды над долиной. Старые карты утверждают, что "
+    "одна из них падала здесь и оставила дар.",
+    "❄️ Ледяная пустошь сверкает под северным сиянием. Подо льдом замерзли "
+    "сундуки давно пропавших экспедиций.",
+    "🌿 Болото тихо булькает и светится огоньками. Тот, кто не боится тумана, "
+    "найдёт здесь редкие травы и старые клады.",
+    "🏝️ Далёкий остров едва виден в дымке. Местные рыбаки шепчут, что на его "
+    "пляжах волны выносят настоящие трофеи.",
+    "🌅 Рассвет красит дорогу в золото. Впереди неизведанные земли, и каждый "
+    "шаг по ним может стать открытием.",
+]
+PAGE_SIZE = 5
+
 # Фразы при возвращении отряда
 RETURN_LINES = [
     "Отряд вернулся, покрытый пылью дорог, но с горящими глазами.",
@@ -379,46 +408,46 @@ def main_kb(user: dict) -> InlineKeyboardMarkup:
         squad_buttons.append(_btn(f"{mark}{g['icon']} {g['name']}", f"exrn:g:{gi}", style))
     return _kb(
         *_pairs(squad_buttons),
-        [_btn("➕ Нанять отряд", "exrn:list", ButtonStyle.SUCCESS),
+        [_btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.SUCCESS),
          _btn("⏱ Время экспедиций", "exrn:times", ButtonStyle.PRIMARY)],
         [_back("menu:back")],
     )
 
 
-def list_html(user: dict, with_image: bool = False) -> str:
-    ex = _state(user)
-    rows = ""
-    for gi, g in enumerate(GROUPS):
-        owned = g["key"] in ex["hired"]
-        price = "✅ нанят" if owned else f"{_num(g['price'])} {_coin()}"
-        rows += (
-            f"<tr><td><b>{gi + 1}. {g['icon']} {g['name']}</b></td>"
-            f'<td align="center">{price}</td></tr>'
-        )
+def _pages() -> int:
+    return math.ceil(len(GROUPS) / PAGE_SIZE)
+
+
+def list_html(user: dict, page: int = 0, with_image: bool = False) -> str:
+    page = max(0, min(page, _pages() - 1))
     return (
         f"{_image(with_image)}"
-        "<p><b>➕ НАЙМ ИССЛЕДОВАТЕЛЕЙ</b></p>"
-        "<blockquote><i>Чем дороже отряд, тем богаче добыча и тем выше шанс "
-        "вернуться с артефактом. Нанять можно каждого один раз, и он служит тебе навсегда.</i></blockquote>"
-        "<table bordered striped>"
-        "<tr><th><b>Отряд</b></th><th><b>Цена</b></th></tr>"
-        f"{rows}</table>"
+        f"<p><b>➕ НАЙМ ИССЛЕДОВАТЕЛЕЙ · страница {page + 1}/{_pages()}</b></p>"
+        f"<blockquote><i>{random.choice(SCENES)}</i></blockquote>"
+        "<p><b>Выбери отряд, и я расскажу о нём подробнее.</b></p>"
         f"<p><b>{_info()} Твои монеты: {_num(user['coins'])} {_coin()}</b></p>"
-        "<p><i>Нажми на отряд, чтобы посмотреть подробности.</i></p>"
     )
 
 
-def list_kb(user: dict) -> InlineKeyboardMarkup:
+def list_kb(user: dict, page: int = 0) -> InlineKeyboardMarkup:
     ex = _state(user)
-    buttons = []
-    for gi, g in enumerate(GROUPS):
+    page = max(0, min(page, _pages() - 1))
+    start = page * PAGE_SIZE
+    rows = []
+    for gi in range(start, min(start + PAGE_SIZE, len(GROUPS))):
+        g = GROUPS[gi]
         owned = g["key"] in ex["hired"]
-        buttons.append(_btn(
-            f"{'✅' if owned else g['icon']} {gi + 1}",
+        rows.append([_btn(
+            f"{'✅' if owned else g['icon']} {g['name']}",
             f"exrn:g:{gi}",
             ButtonStyle.SUCCESS if owned else ButtonStyle.PRIMARY,
-        ))
-    return _kb(*_pairs(buttons, 5), [_back("exrn:main")])
+        )])
+    nav = []
+    if page > 0:
+        nav.append(_btn(f"◀ Страница {page}", f"exrn:list:{page - 1}", ButtonStyle.PRIMARY))
+    if page < _pages() - 1:
+        nav.append(_btn(f"Страница {page + 2} ▶", f"exrn:list:{page + 1}", ButtonStyle.PRIMARY))
+    return _kb(*rows, nav, [_back("exrn:main")])
 
 
 def group_html(user: dict, gi: int, with_image: bool = False) -> str:
@@ -486,7 +515,7 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
     if code == "locked":
         return _kb(
             [_btn(f"Нанять за {_num(g['price'])}", f"exrn:buy:{gi}", ButtonStyle.SUCCESS)],
-            [_back("exrn:list")],
+            [_back(f"exrn:list:{gi // PAGE_SIZE}")],
         )
     if code == "idle":
         go = [_btn(f"{h} ч", f"exrn:go:{gi}:{h}", ButtonStyle.SUCCESS) for h in sorted(ex["times"])]
@@ -627,13 +656,15 @@ async def on_main(callback: CallbackQuery):
     await _show(callback, lambda wi: main_html(user, wi), main_kb(user))
 
 
-@router.callback_query(F.data == "exrn:list")
+@router.callback_query(F.data.regexp(r"^exrn:list(:\d+)?$"))
 async def on_list(callback: CallbackQuery):
     user = await _need_user(callback)
     if user is None:
         return
+    parts = callback.data.split(":")
+    page = int(parts[2]) if len(parts) > 2 else 0
     await callback.answer()
-    await _show(callback, lambda wi: list_html(user, wi), list_kb(user))
+    await _show(callback, lambda wi: list_html(user, page, wi), list_kb(user, page))
 
 
 @router.callback_query(F.data.regexp(r"^exrn:g:\d+$"))
