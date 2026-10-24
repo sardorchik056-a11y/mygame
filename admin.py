@@ -15,6 +15,8 @@
   * Боссы: состояние всех боссов, сброс отдельного босса или всех сразу, топ урона.
   * Журнал: последние записи audit.log, фильтр по игроку, выгрузка файла.
   * Управление: технические работы, бэкап базы, скачать базу и журнал.
+  * Реклама: рекламные ссылки (t.me/бот?start=ad_код), клики, уникальные, регистрации,
+    активность и удержание по каждой ссылке, динамика по дням.
   * Изображения (/img): фото экранов, питомцев, шахт, боссов, сундуков.
   * Команды: /admin, /img, /give, /stats, /find, /ban, /unban, /cancel.
 
@@ -38,6 +40,7 @@ import json
 import logging
 import platform
 import re
+import secrets
 import sqlite3
 import time
 from collections import Counter
@@ -101,6 +104,32 @@ STATE: dict = {
 }
 _STATE_FILE: Path | None = None
 
+# Рекламные ссылки лежат в ads.json отдельно от admin_state.json
+ADS: dict = {"links": {}}
+_ADS_FILE: Path | None = None
+_PENDING_SRC: dict[str, str] = {}      # uid -> код ссылки, пока игрок не зарегистрировался
+_BOT_USERNAME: str | None = None
+ADS_MAX_LINKS = 200
+ADS_UNIQ_CAP = 200000                  # сколько уникальных ID хранить на одну ссылку
+AD_CODE_RE = re.compile(r"^ad_([A-Za-z0-9]{4,32})$")
+
+
+def _load_ads() -> None:
+    try:
+        saved = read_json_safe(_ADS_FILE)
+    except RuntimeError:
+        log.critical("ads.json повреждён и копии нет: реклама начата с нуля")
+        return
+    if isinstance(saved, dict) and isinstance(saved.get("links"), dict):
+        ADS["links"] = saved["links"]
+
+
+def _save_ads() -> None:
+    try:
+        atomic_write_json(_ADS_FILE, ADS, backup_every=300)
+    except OSError:
+        log.exception("не удалось сохранить ads.json")
+
 
 def _load_state() -> None:
     try:
@@ -132,13 +161,15 @@ def setup(**deps) -> None:
     BACK_EMOJI_ID, send_pet_card, send_screen, send_rich_card, menu_html, stock_html,
     WELCOME_TEXT, PETS_LIST_TEXT.
     """
-    global _STATE_FILE
+    global _STATE_FILE, _ADS_FILE
     for name, value in deps.items():
         setattr(D, name, value)
     ADMIN_IDS.clear()
     ADMIN_IDS.update(D.ADMIN_IDS)
     _STATE_FILE = Path(D.store.path).with_name("admin_state.json")
+    _ADS_FILE = Path(D.store.path).with_name("ads.json")
     _load_state()
+    _load_ads()
 
 
 # ---------- Фильтры и сквозные middleware ----------
@@ -199,10 +230,44 @@ async def track_user(handler, event, data):
     tg = getattr(event, "from_user", None)
     if tg is not None and not tg.is_bot:
         try:
+            if isinstance(event, Message):
+                _track_ad_click(tg, event)
             _track(tg)
         except Exception:   # учёт не должен ломать обработку события
             log.exception("не удалось обновить данные игрока %s", tg.id)
     return await handler(event, data)
+
+
+def _track_ad_click(tg, message: Message) -> None:
+    """Если игрок пришёл по рекламной ссылке (/start ad_код), записывает клик."""
+    text = message.text or ""
+    if not text.startswith("/start"):
+        return
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2:
+        return
+    m = AD_CODE_RE.match(parts[1].strip())
+    if not m:
+        return
+    link = ADS["links"].get(m.group(1))
+    if not link or not link.get("active", True):
+        return
+    uid = str(tg.id)
+    now = time.time()
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    link["clicks"] = link.get("clicks", 0) + 1
+    link.setdefault("last_click", 0)
+    link["last_click"] = now
+    daily = link.setdefault("daily", {}).setdefault(day, [0, 0, 0])   # клики, уникальные, регистрации
+    daily[0] += 1
+    uniq = link.setdefault("uniq", {})
+    if uid not in uniq and len(uniq) < ADS_UNIQ_CAP:
+        uniq[uid] = now
+        daily[1] += 1
+    if uid not in D.users and uid not in _PENDING_SRC:
+        if len(_PENDING_SRC) < 20000:
+            _PENDING_SRC[uid] = m.group(1)
+    _save_ads()
 
 
 def _track(tg) -> None:
@@ -223,6 +288,16 @@ def _track(tg) -> None:
         # 0 значит «дата неизвестна» (игрок был в базе до подключения панели)
         user["joined"] = time.time() if uid in _PENDING_NEW else 0
         changed = True
+    code = _PENDING_SRC.pop(uid, None)
+    if code and "src" not in user and uid in _PENDING_NEW:
+        user["src"] = code
+        changed = True
+        link = ADS["links"].get(code)
+        if link is not None:
+            link["regs"] = link.get("regs", 0) + 1
+            day = time.strftime("%Y-%m-%d")
+            link.setdefault("daily", {}).setdefault(day, [0, 0, 0])[2] += 1
+            _save_ads()
     _PENDING_NEW.discard(uid)
     now = time.time()
     if now - float(user.get("seen", 0) or 0) >= SEEN_EVERY:
@@ -481,6 +556,7 @@ def _scan(items) -> tuple[dict, list[dict]]:
             "id": str(uid), "un": u.get("username"), "pet": u.get("pet"), "lv": lv,
             "wins": _int(u.get("wins")), "coins": coins, "seen": seen, "joined": joined,
             "dmg": _int(dmg_total.get(str(uid), {}).get("dmg", 0)),
+            "src": u.get("src"),
         })
     return S, rows
 
@@ -691,7 +767,8 @@ def _main_kb() -> InlineKeyboardMarkup:
         [_b("Статистика", "adm:st:ov", G), _b("Игроки", "adm:pl", G)],
         [_b("Выдача", "adm:give", S), _b("Рассылка", "adm:bc", S)],
         [_b("Боссы", "adm:bs", G), _b("Журнал", "adm:lg:0:0", G)],
-        [_b("Изображения", "adm:img", G), _b("Управление", "adm:sys", P)],
+        [_b("Реклама", "adm:ads", S), _b("Изображения", "adm:img", G)],
+        [_b("Управление", "adm:sys", P)],
     )
 
 
@@ -1889,6 +1966,271 @@ async def adm_bc_stop(cb: CallbackQuery):
         await cb.answer("Останавливаю…")
     else:
         await cb.answer("Рассылка не идёт")
+
+
+# ---------- Реклама: ссылки и статистика ----------
+
+class AdStates(StatesGroup):
+    waiting_name = State()
+
+
+async def _bot_username(bot) -> str:
+    global _BOT_USERNAME
+    if not _BOT_USERNAME:
+        _BOT_USERNAME = (await bot.me()).username
+    return _BOT_USERNAME
+
+
+def _ad_url(username: str, code: str) -> str:
+    return f"https://t.me/{username}?start=ad_{code}"
+
+
+def _new_code() -> str:
+    alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+    while True:
+        code = "".join(secrets.choice(alphabet) for _ in range(8))
+        if code not in ADS["links"]:
+            return code
+
+
+def _ad_rows(code: str, rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r.get("src") == code]
+
+
+def _ad_summary_line(code: str, link: dict, rows: list[dict]) -> str:
+    mine_rows = _ad_rows(code, rows)
+    mark = "" if link.get("active", True) else " (выкл)"
+    return (f"<b>{escape(link['name'])}</b>{mark}: "
+            f"клики {fmt(link.get('clicks', 0))}, "
+            f"уник. {fmt(len(link.get('uniq', {})))}, "
+            f"игроков {fmt(len(mine_rows))}")
+
+
+async def _render_ads_list(cb: CallbackQuery) -> None:
+    _, rows = await get_stats()
+    links = ADS["links"]
+    lines = ["<b>Реклама</b>", ""]
+    if not links:
+        lines.append("<i>Ссылок пока нет. Создай первую: появится ссылка вида t.me/бот?start=ad_код.</i>")
+    else:
+        tot_c = sum(l.get("clicks", 0) for l in links.values())
+        tot_u = sum(len(l.get("uniq", {})) for l in links.values())
+        tot_p = sum(1 for r in rows if r.get("src") in links)
+        lines.append(f"Ссылок: {len(links)} · клики {fmt(tot_c)} · уникальных {fmt(tot_u)} · "
+                     f"пришло игроков {fmt(tot_p)}")
+        lines.append("")
+        ordered = sorted(links.items(), key=lambda kv: kv[1].get("created", 0), reverse=True)[:20]
+        for n, (code, link) in enumerate(ordered, start=1):
+            lines.append(f"{n}. " + _ad_summary_line(code, link, rows))
+    buttons = []
+    ordered = sorted(links.items(), key=lambda kv: kv[1].get("created", 0), reverse=True)[:20]
+    for code, link in ordered:
+        buttons.append(_b(link["name"][:24], f"adm:adsv:{code}", ButtonStyle.PRIMARY))
+    kb = _kb(
+        [_b("Создать ссылку", "adm:adsn", ButtonStyle.SUCCESS)],
+        *_pairs(buttons),
+        [_b("Обновить", "adm:ads:1", ButtonStyle.SUCCESS)],
+        _back(),
+    )
+    await _show(cb, "\n".join(lines), kb)
+
+
+@router.callback_query(F.data.regexp(r"^adm:ads(:1)?$"))
+async def adm_ads(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    force = cb.data.endswith(":1")
+    await cb.answer("Считаю…" if force else None)
+    if force:
+        await get_stats(True)
+    await _render_ads_list(cb)
+
+
+@router.callback_query(F.data == "adm:adsn")
+async def adm_ad_new(cb: CallbackQuery, state: FSMContext):
+    if len(ADS["links"]) >= ADS_MAX_LINKS:
+        await cb.answer(f"Максимум ссылок: {ADS_MAX_LINKS}. Удали ненужные.", show_alert=True)
+        return
+    await state.set_state(AdStates.waiting_name)
+    await _show(
+        cb,
+        "<b>Новая рекламная ссылка</b>\n\nНапиши название: где будет размещена реклама "
+        "(например «Канал Вася», «TikTok октябрь»). Оно видно только тебе.",
+        _cancel_kb("adm:ads"),
+    )
+    await cb.answer()
+
+
+@router.message(AdStates.waiting_name, F.text, _not_cmd)
+async def ad_name_receive(message: Message, state: FSMContext):
+    name = " ".join(message.text.split())[:40]
+    if not name:
+        await message.answer("<i>Название не должно быть пустым.</i>")
+        return
+    code = _new_code()
+    ADS["links"][code] = {
+        "name": name, "created": time.time(), "by": message.from_user.id,
+        "active": True, "clicks": 0, "regs": 0, "uniq": {}, "daily": {},
+    }
+    _save_ads()
+    ledger("admin_ad_create", admin=message.from_user.id, code=code, name=name)
+    await state.clear()
+    url = _ad_url(await _bot_username(message.bot), code)
+    await message.answer(
+        f"<b>Ссылка создана</b>\n«{escape(name)}»\n\n<code>{url}</code>\n\n"
+        "<i>Нажми на ссылку, чтобы скопировать.</i>",
+        reply_markup=_kb([_b("Статистика ссылки", f"adm:adsv:{code}", ButtonStyle.SUCCESS)],
+                         [_b("К списку", "adm:ads", ButtonStyle.PRIMARY)]),
+    )
+
+
+@router.message(AdStates.waiting_name, ~F.text)
+async def ad_name_not_text(message: Message):
+    await message.answer("<i>Пришли название текстом.</i>")
+
+
+def _ad_card(code: str, link: dict, rows: list[dict], url: str) -> str:
+    mine_rows = _ad_rows(code, rows)
+    now = time.time()
+    n = len(mine_rows)
+    clicks = link.get("clicks", 0)
+    uniq = len(link.get("uniq", {}))
+    act1 = sum(1 for r in mine_rows if r["seen"] and now - r["seen"] <= 86400)
+    act7 = sum(1 for r in mine_rows if r["seen"] and now - r["seen"] <= 7 * 86400)
+    online = sum(1 for r in mine_rows if r["seen"] and now - r["seen"] <= ONLINE_WINDOW)
+    # удержание: игроки, вернувшиеся спустя сутки и больше после регистрации
+    old = [r for r in mine_rows if r["joined"] and now - r["joined"] >= 86400]
+    back = sum(1 for r in old if r["seen"] - r["joined"] >= 86400)
+    with_pet = sum(1 for r in mine_rows if r["pet"])
+    lv_avg = sum(r["lv"] for r in mine_rows) / n if n else 0
+    coins = sum(r["coins"] for r in mine_rows)
+    lines = [
+        f"<b>Реклама: {escape(link['name'])}</b>"
+        + ("" if link.get("active", True) else "  <b>(выключена)</b>"),
+        f"Создана {when(link.get('created'))}",
+        "",
+        f"<code>{url}</code>",
+        "",
+        "<b>Переходы</b>",
+        f"Клики: <b>{fmt(clicks)}</b>",
+        f"Уникальных людей: <b>{fmt(uniq)}</b>",
+        f"Последний клик: {ago(link.get('last_click'))}",
+        "",
+        "<b>Игроки с этой ссылки</b>",
+        f"Зарегистрировалось: <b>{fmt(n)}</b> ({pct(n, uniq)} от уникальных)",
+        f"Выбрали питомца: {fmt(with_pet)} ({pct(with_pet, n)})",
+        f"Онлайн сейчас: {fmt(online)}",
+        f"Активны за 24 ч: {fmt(act1)} ({pct(act1, n)})",
+        f"Активны за 7 дн: {fmt(act7)} ({pct(act7, n)})",
+        f"Вернулись через сутки+: {fmt(back)} из {fmt(len(old))} ({pct(back, len(old))})",
+        f"Средний уровень: {lv_avg:.1f}",
+        f"Монет у них всего: {short(coins)}",
+    ]
+    old_users = max(0, uniq - n)
+    if old_users:
+        lines.append(f"<i>Уже были в базе или не дошли до регистрации: {fmt(old_users)}</i>")
+    daily = link.get("daily", {})
+    if daily:
+        lines += ["", "<b>По дням</b> (клики / уник. / игроки)"]
+        for day in sorted(daily, reverse=True)[:7]:
+            c, u, r = daily[day]
+            lines.append(f"{day[8:]}.{day[5:7]}: {c} / {u} / {r}")
+    return "\n".join(lines)
+
+
+def _ad_kb(code: str, link: dict) -> InlineKeyboardMarkup:
+    active = link.get("active", True)
+    return _kb(
+        [_b("Обновить", f"adm:adsv:{code}:1", ButtonStyle.SUCCESS),
+         _b("Топ игроков", f"adm:adsp:{code}", ButtonStyle.PRIMARY)],
+        [_b("Выключить" if active else "Включить", f"adm:adst:{code}",
+            ButtonStyle.DANGER if active else ButtonStyle.SUCCESS),
+         _b("Удалить", f"adm:adsx:{code}", ButtonStyle.DANGER)],
+        _back("adm:ads"),
+    )
+
+
+@router.callback_query(F.data.regexp(r"^adm:adsv:[a-z0-9]+(:1)?$"))
+async def adm_ad_view(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    code, force = parts[2], len(parts) > 3
+    link = ADS["links"].get(code)
+    if not link:
+        await cb.answer("Ссылка не найдена", show_alert=True)
+        return
+    await cb.answer("Считаю…" if force else None)
+    _, rows = await get_stats(force)
+    url = _ad_url(await _bot_username(cb.bot), code)
+    await _show(cb, _ad_card(code, link, rows, url) + f"\n\n<i>Обновлено {time.strftime('%H:%M:%S')}</i>",
+                _ad_kb(code, link))
+
+
+@router.callback_query(F.data.regexp(r"^adm:adsp:[a-z0-9]+$"))
+async def adm_ad_players(cb: CallbackQuery):
+    code = cb.data.split(":")[2]
+    link = ADS["links"].get(code)
+    if not link:
+        await cb.answer("Ссылка не найдена", show_alert=True)
+        return
+    _, rows = await get_stats()
+    mine_rows = sorted(_ad_rows(code, rows), key=lambda r: r["lv"], reverse=True)[:10]
+    lines = [f"<b>Игроки с ссылки «{escape(link['name'])}»</b>", "<i>Топ по уровню</i>", ""]
+    if not mine_rows:
+        lines.append("—")
+    for n, r in enumerate(mine_rows, start=1):
+        name = f"@{escape(r['un'])}" if r["un"] else f"ID {r['id']}"
+        lines.append(f"{n}. {name}: ур. {r['lv']}, {short(r['coins'])} монет, {ago(r['seen'])}")
+    buttons = [_b(f"{n}", f"adm:u:{r['id']}", ButtonStyle.PRIMARY)
+               for n, r in enumerate(mine_rows, start=1)]
+    await _show(cb, "\n".join(lines),
+                _kb(*[b for b in _pairs(buttons, 5)], _back(f"adm:adsv:{code}")))
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:adst:[a-z0-9]+$"))
+async def adm_ad_toggle(cb: CallbackQuery):
+    code = cb.data.split(":")[2]
+    link = ADS["links"].get(code)
+    if not link:
+        await cb.answer("Ссылка не найдена", show_alert=True)
+        return
+    link["active"] = not link.get("active", True)
+    _save_ads()
+    ledger("admin_ad_toggle", admin=cb.from_user.id, code=code, active=link["active"])
+    await cb.answer("Ссылка включена" if link["active"] else "Ссылка выключена: клики не считаются")
+    _, rows = await get_stats()
+    url = _ad_url(await _bot_username(cb.bot), code)
+    await _show(cb, _ad_card(code, link, rows, url), _ad_kb(code, link))
+
+
+@router.callback_query(F.data.regexp(r"^adm:adsx:[a-z0-9]+$"))
+async def adm_ad_delete_confirm(cb: CallbackQuery):
+    code = cb.data.split(":")[2]
+    link = ADS["links"].get(code)
+    if not link:
+        await cb.answer("Ссылка не найдена", show_alert=True)
+        return
+    await _show(
+        cb,
+        f"<b>Удалить ссылку «{escape(link['name'])}»?</b>\n\nСтатистика ссылки пропадёт, "
+        "а сама ссылка перестанет считаться. Игроки останутся в базе.",
+        _confirm_kb(f"adm:adsxc:{code}", f"adm:adsv:{code}"),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:adsxc:[a-z0-9]+$"))
+async def adm_ad_delete(cb: CallbackQuery):
+    code = cb.data.split(":")[2]
+    link = ADS["links"].pop(code, None)
+    if link is None:
+        await cb.answer("Ссылка не найдена", show_alert=True)
+        return
+    _save_ads()
+    ledger("admin_ad_delete", admin=cb.from_user.id, code=code, name=link.get("name"),
+           clicks=link.get("clicks", 0), regs=link.get("regs", 0))
+    await cb.answer("Удалено")
+    await _render_ads_list(cb)
+
 
 
 # ---------- Боссы ----------
