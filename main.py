@@ -29,6 +29,7 @@ import admin
 import boss
 import cases
 import equipment
+import exrn
 import mine
 from guard import Guard, on_error
 from storage import ProcessLock, UserStore, atomic_write_json, read_json_safe
@@ -522,6 +523,13 @@ def menu_kb() -> InlineKeyboardMarkup:
                 btn("Босс", "menu:boss", ButtonStyle.DANGER, boss.BOSS_EMOJI[0]),
                 btn("Сокровищница", "menu:cases", ButtonStyle.PRIMARY, TREASURY_EMOJI[0]),
             ],
+            [
+                InlineKeyboardButton(
+                    text="🧭 Исследователи",
+                    callback_data="menu:exrn",
+                    style=ButtonStyle.PRIMARY,
+                )
+            ],
         ]
     )
 
@@ -723,6 +731,7 @@ IMG_TARGETS: dict[str, str] = {
     **boss.IMG_TARGETS,
     **cases.IMG_TARGETS,
     **equipment.IMG_TARGETS,
+    **exrn.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -901,6 +910,23 @@ boss.setup(
     STAT_EMOJI=STAT_EMOJI,
 )
 dp.include_router(boss.router)
+
+# Раздел «Исследователи» живёт в exrn.py
+exrn.setup(
+    get_user=get_user,
+    save_users=save_users,
+    show_rich_card=show_rich_card,
+    custom_emoji=custom_emoji,
+    COIN_EMOJI=COIN_EMOJI,
+    INFO_EMOJI=INFO_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    MEAT_EMOJI=MEAT_EMOJI,
+    FRUIT_EMOJI=FRUIT_EMOJI,
+    drop_artifact=drop_any_artifact,   # выдать артефакт игроку по редкости
+    result_block=artifact_block,       # карточка выпавшего артефакта
+    tiers=list(equipment.TIERS),       # редкости по порядку: до мифической
+)
+dp.include_router(exrn.router)
 
 
 # ---------- Хендлеры ----------
