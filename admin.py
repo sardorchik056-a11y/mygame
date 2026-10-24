@@ -71,6 +71,7 @@ from aiogram.types import (
 import boss
 import cases
 import equipment
+import exrn
 import mine
 from storage import atomic_write_json, ledger, read_json_safe
 
@@ -485,6 +486,7 @@ def _scan(items) -> tuple[dict, list[dict]]:
         "new1": 0, "new7": 0, "new30": 0, "join_unknown": 0,
         "mines": 0, "running": 0, "miners": 0, "stored": 0.0, "income": 0.0,
         "with_pet_arts": 0, "pet_arts": 0, "with_mine_arts": 0, "mine_arts": 0,
+        "exrn_players": 0, "exrn_trips": 0, "exrn_going": 0, "with_exrn_arts": 0, "exrn_arts": 0,
         "banned": 0,
     }
     rows: list[dict] = []
@@ -549,6 +551,17 @@ def _scan(items) -> tuple[dict, list[dict]]:
         if parts:
             S["with_pet_arts"] += 1
             S["pet_arts"] += len(parts)
+        ex = u.get("exrn")
+        if isinstance(ex, dict):
+            trips = _int((ex.get("stats") or {}).get("trips", 0))
+            if trips or ex.get("trips"):
+                S["exrn_players"] += 1
+            S["exrn_trips"] += trips
+            S["exrn_going"] += len(ex.get("trips") or {})
+            earts = set(ex.get("arts", [])) | set(ex.get("worn", []))
+            if earts:
+                S["with_exrn_arts"] += 1
+                S["exrn_arts"] += len(earts)
 
         if str(uid) in STATE["banned"]:
             S["banned"] += 1
@@ -665,6 +678,7 @@ def stats_economy(S: dict, rows: list[dict]) -> str:
 
 def stats_game(S: dict, rows: list[dict]) -> str:
     n_pet, n_mine = len(equipment.ARTIFACTS), len(mine.ARTIFACTS)
+    n_exrn = len(exrn.ARTIFACTS)
     lines = [
         "<b>Статистика · Игра</b>", "",
         "<b>Шахты</b>",
@@ -675,6 +689,10 @@ def stats_game(S: dict, rows: list[dict]) -> str:
         "", "<b>Снаряжение</b>",
         f"Артефактов питомцев у игроков: <b>{fmt(S['pet_arts'])}</b> (у {fmt(S['with_pet_arts'])} игроков, всего видов {n_pet})",
         f"Артефактов шахт: <b>{fmt(S['mine_arts'])}</b> (у {fmt(S['with_mine_arts'])} игроков, всего видов {n_mine})",
+        f"Артефактов исследователей: <b>{fmt(S['exrn_arts'])}</b> (у {fmt(S['with_exrn_arts'])} игроков, всего видов {n_exrn})",
+        "", "<b>Исследователи</b>",
+        f"Игроков в разделе: <b>{fmt(S['exrn_players'])}</b> · экспедиций завершено: <b>{fmt(S['exrn_trips'])}</b>",
+        f"Сейчас в пути или ждут добычу: <b>{fmt(S['exrn_going'])}</b>",
         "", "<b>Боссы</b>",
     ]
     for btype in boss.TYPE_ORDER:
@@ -984,7 +1002,8 @@ def card_text(uid: str, user: dict) -> str:
     mine_keys = set((m or {}).get("arts", [])) | set((m or {}).get("worn", [])) if isinstance(m, dict) else set()
     lines.append(
         f"Артефакты: питомца <b>{len(pet_keys)}/{len(equipment.ARTIFACTS)}</b> "
-        f"(надето {len(user.get('equipment', []))}) · шахты <b>{len(mine_keys)}/{len(mine.ARTIFACTS)}</b>"
+        f"(надето {len(user.get('equipment', []))}) · шахты <b>{len(mine_keys)}/{len(mine.ARTIFACTS)}</b> "
+        f"· исследователей <b>{len(exrn.owned_keys(user))}/{len(exrn.ARTIFACTS)}</b>"
     )
 
     try:
@@ -1344,6 +1363,7 @@ def _sections() -> dict[str, tuple[str, list[dict], dict]]:
     return {
         "p": ("питомца", equipment.ARTIFACTS, equipment.TIERS),
         "m": ("шахты", mine.ARTIFACTS, mine.TIERS),
+        "e": ("исследователей", exrn.ARTIFACTS, exrn.TIERS),
     }
 
 
@@ -1352,12 +1372,17 @@ def _find_art(key: str) -> tuple[str, dict] | None:
     if art:
         return "p", art
     art = mine.BY_KEY.get(key)
-    return ("m", art) if art else None
+    if art:
+        return "m", art
+    art = exrn.BY_ART.get(key)
+    return ("e", art) if art else None
 
 
 def _owned_keys(user: dict, sec: str) -> set[str]:
     if sec == "p":
         return set(user.get("artifacts", [])) | set(user.get("equipment", []))
+    if sec == "e":
+        return exrn.owned_keys(user)
     m = user.get("mine")
     return (set(m.get("arts", [])) | set(m.get("worn", []))) if isinstance(m, dict) else set()
 
@@ -1372,6 +1397,8 @@ def grant_art(user: dict, key: str) -> bool:
         return False
     if sec == "p":
         user.setdefault("artifacts", []).append(key)
+    elif sec == "e":
+        exrn.grant(user, key)
     else:
         mine.get_mine(user)["arts"].append(key)
     return True
@@ -1385,6 +1412,8 @@ def revoke_art(user: dict, key: str) -> bool:
         for field in ("artifacts", "equipment"):
             if key in user.get(field, []):
                 user[field].remove(key)
+    elif found[0] == "e":
+        exrn.revoke(user, key)
     else:
         m = user["mine"]
         for field in ("arts", "worn"):
@@ -1398,14 +1427,17 @@ def _art_title(art: dict) -> str:
 
 
 async def _render_arts(cb: CallbackQuery, uid: str, user: dict) -> None:
-    n_p, n_m = len(_owned_keys(user, "p")), len(_owned_keys(user, "m"))
+    n_p, n_m, n_e = (len(_owned_keys(user, "p")), len(_owned_keys(user, "m")),
+                     len(_owned_keys(user, "e")))
     await _show(
         cb,
         f"<b>Артефакты</b>\n\nИгрок: {player_label(uid, user)}\n"
-        f"Питомца: <b>{n_p}/{len(equipment.ARTIFACTS)}</b> · шахты: <b>{n_m}/{len(mine.ARTIFACTS)}</b>",
+        f"Питомца: <b>{n_p}/{len(equipment.ARTIFACTS)}</b> · шахты: <b>{n_m}/{len(mine.ARTIFACTS)}</b>"
+        f" · исследователей: <b>{n_e}/{len(exrn.ARTIFACTS)}</b>",
         _kb(
             [_b("Выдать питомцу", f"adm:ag:p:{uid}", ButtonStyle.SUCCESS),
              _b("Выдать шахте", f"adm:ag:m:{uid}", ButtonStyle.SUCCESS)],
+            [_b("Выдать исследователям", f"adm:ag:e:{uid}", ButtonStyle.SUCCESS)],
             [_b("Забрать артефакт", f"adm:ax:{uid}", ButtonStyle.DANGER)],
             [_b("Выдать все", f"adm:aall:{uid}", ButtonStyle.SUCCESS)],
             _back(f"adm:u:{uid}"),
@@ -1423,7 +1455,7 @@ async def adm_arts(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data.regexp(r"^adm:ag:(p|m):\d+$"))
+@router.callback_query(F.data.regexp(r"^adm:ag:(p|m|e):\d+$"))
 async def adm_art_tiers(cb: CallbackQuery):
     _, _, sec, uid = cb.data.split(":")
     user = await _need_user(cb, uid)
@@ -1455,7 +1487,7 @@ async def _render_tier(cb: CallbackQuery, sec: str, ti: int, uid: str, user: dic
                 _kb(*_pairs(buttons), _back(f"adm:ag:{sec}:{uid}")))
 
 
-@router.callback_query(F.data.regexp(r"^adm:at:(p|m):\d+:\d+$"))
+@router.callback_query(F.data.regexp(r"^adm:at:(p|m|e):\d+:\d+$"))
 async def adm_art_list(cb: CallbackQuery):
     _, _, sec, ti, uid = cb.data.split(":")
     user = await _need_user(cb, uid)
@@ -1534,7 +1566,7 @@ async def adm_art_all_confirm(cb: CallbackQuery):
         return
     await _show(
         cb, f"<b>Выдать все артефакты?</b>\n\nИгрок: {player_label(uid, user)}\n"
-            f"<i>Он получит все {len(equipment.ARTIFACTS) + len(mine.ARTIFACTS)} артефактов.</i>",
+            f"<i>Он получит все {len(equipment.ARTIFACTS) + len(mine.ARTIFACTS) + len(exrn.ARTIFACTS)} артефактов.</i>",
         _kb([_b("Да, выдать", f"adm:aallc:{uid}", ButtonStyle.SUCCESS),
              _b("Отмена", f"adm:ar:{uid}", ButtonStyle.DANGER)]),
     )
@@ -1547,7 +1579,7 @@ async def adm_art_all(cb: CallbackQuery):
     user = await _need_user(cb, uid)
     if user is None:
         return
-    added = sum(grant_art(user, a["key"]) for a in equipment.ARTIFACTS + mine.ARTIFACTS)
+    added = sum(grant_art(user, a["key"]) for a in equipment.ARTIFACTS + mine.ARTIFACTS + exrn.ARTIFACTS)
     ledger("admin_artifact_all", admin=cb.from_user.id, uid=uid, added=added)
     D.store.flush()
     await cb.answer(f"Выдано новых: {added}", show_alert=True)
@@ -2675,6 +2707,8 @@ async def img_receive(message: Message, state: FSMContext):
         await cases.send_preview(bot, chat_id, uid, pet_key)
     elif pet_key in equipment.IMG_TARGETS:
         await equipment.send_preview(bot, chat_id, uid, pet_key)
+    elif pet_key in exrn.IMG_TARGETS:
+        await exrn.send_preview(bot, chat_id, uid, pet_key)
     elif pet_key == "stock":
         await D.send_rich_card(bot, chat_id, "stock", lambda with_image: D.stock_html(uid, with_image))
     else:
