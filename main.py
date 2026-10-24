@@ -28,6 +28,8 @@ import boss
 import cases
 import equipment
 import mine
+from guard import Guard, on_error
+from storage import ProcessLock, UserStore, atomic_write_json, ledger, read_json_safe
 
 BOT_TOKEN = "8867617327:AAGP427kiEOg1aI8hRIUOyiH3Mu7eQGaEbE"
 
@@ -42,38 +44,31 @@ IMAGES_FILE = Path(__file__).with_name("pet_images.json")
 
 def load_images() -> dict[str, str]:
     try:
-        return json.loads(IMAGES_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+        return read_json_safe(IMAGES_FILE)   # при поломке файла берёт копию .bak
+    except RuntimeError:
+        logging.getLogger(__name__).critical("pet_images.json повреждён и копии нет")
         return {}
 
 
 def save_images() -> None:
-    IMAGES_FILE.write_text(
-        json.dumps(pet_images, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    atomic_write_json(IMAGES_FILE, pet_images, backup_every=300)
 
 
 pet_images: dict[str, str] = load_images()
 
-# Данные игроков хранятся в файле рядом с ботом.
-# "user_id": {"pet": key, "level": 1, "wins": 0, "losses": 0}
-USERS_FILE = Path(__file__).with_name("users.json")
-
-
-def load_users() -> dict[str, dict]:
-    try:
-        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+# Данные игроков лежат в SQLite (users.db) рядом с ботом, подробности в storage.py:
+# запись пачками раз в секунду, в памяти только недавно активные игроки, бэкапы каждый час.
+# Старый users.json при первом запуске переносится в базу автоматически.
+# "user_id": {"pet": key, "level": 1, "wins": 0, "losses": 0, ...}
+USERS_FILE = Path(__file__).with_name("users.json")        # старый формат, нужен только для переноса
+ProcessLock(Path(__file__).with_name("bot.lock")).acquire()  # вторая копия бота не запустится
+store = UserStore(Path(__file__).with_name("users.db"), legacy_json=USERS_FILE)
+users = store   # ведёт себя как словарь: users.get("123"), users["123"] = {...}
 
 
 def save_users() -> None:
-    USERS_FILE.write_text(
-        json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-users: dict[str, dict] = load_users()
+    """Отметить, что данные игроков менялись. Запись на диск пойдёт пачкой в течение секунды."""
+    store.request_flush()
 
 
 START_MEAT = 3
@@ -887,6 +882,13 @@ async def remember_username(handler, event, data):
     return await handler(event, data)
 
 
+# Защита обработчиков (guard.py): антифлуд и очередь на игрока, чтобы частые нажатия
+# не приводили к двойным тратам и двойным наградам; глобальный обработчик ошибок.
+guard = Guard(admin_ids=ADMIN_IDS)
+dp.message.outer_middleware(guard)
+dp.callback_query.outer_middleware(guard)
+dp.errors.register(on_error)
+
 dp.message.outer_middleware(remember_username)
 dp.callback_query.outer_middleware(remember_username)
 
@@ -926,17 +928,14 @@ def find_player(kind: str, raw: str) -> tuple[str, dict] | None:
     Возвращает (id, данные игрока) или None."""
     raw = raw.strip()
     if kind == "id":
-        if not raw.isdigit():
+        if not raw.isdigit() or len(raw) > 15:
             return None
         user = users.get(str(int(raw)))
         return (str(int(raw)), user) if user is not None else None
     name = raw.rsplit("/", 1)[-1].lstrip("@").lower()   # принимаем и @name, и t.me/name
     if not name:
         return None
-    for uid, user in users.items():
-        if (user.get("username") or "").lower() == name:
-            return uid, user
-    return None
+    return store.find_by_username(name)
 
 
 def player_label(uid: str, user: dict) -> str:
@@ -945,11 +944,15 @@ def player_label(uid: str, user: dict) -> str:
     return f"{who} · ID <code>{uid}</code>" + (f" · {escape(pet)}" if pet else "")
 
 
-def give_resource(user: dict, res: str, amount: int) -> None:
-    """Начисляет ресурс игроку и сохраняет данные."""
+def give_resource(user: dict, res: str, amount: int,
+                  admin_id: int | None = None, uid: str | None = None) -> None:
+    """Начисляет ресурс игроку, пишет операцию в audit.log и сразу сохраняет данные на диск."""
     field = GIVE_RESOURCES[res][1]
-    user[field] = give_balance(user, res) + amount
-    save_users()
+    before = give_balance(user, res)
+    user[field] = before + amount
+    ledger("admin_give", admin=admin_id, uid=uid, res=res, amount=amount,
+           before=before, after=user[field])
+    store.flush()   # выдачу пишем сразу, не дожидаясь пачки
 
 
 def _adm_btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY,
@@ -1120,7 +1123,7 @@ async def give_receive_amount(message: Message, state: FSMContext):
         return
 
     raw = message.text.replace(" ", "").replace("_", "")
-    if not raw.isdigit() or not 1 <= int(raw) <= MAX_GIVE:
+    if not raw.isdigit() or len(raw) > 15 or not 1 <= int(raw) <= MAX_GIVE:
         await message.answer(
             f"<i>Нужно целое число от 1 до {cases.fmt(MAX_GIVE)}. "
             "Попробуй ещё раз или нажми «Отмена».</i>",
@@ -1129,7 +1132,7 @@ async def give_receive_amount(message: Message, state: FSMContext):
         return
 
     amount = int(raw)
-    give_resource(user, res, amount)
+    give_resource(user, res, amount, admin_id=message.from_user.id, uid=uid)
     await state.clear()
     await message.answer(
         "<b>Выдано</b>\n\n"
@@ -1556,10 +1559,14 @@ async def cmd_give(message: Message):
             "<i>Формат: /give 5 5 50 (мясо, фрукты, монеты)</i>"
         )
         return
+    if any(not 0 <= v <= MAX_GIVE for v in (meat, fruit, coins)):
+        await message.answer(f"<i>Числа должны быть от 0 до {cases.fmt(MAX_GIVE)}.</i>")
+        return
     user["meat"] += meat
     user["fruit"] += fruit
     user["coins"] += coins
-    save_users()
+    ledger("admin_give_self", admin=message.from_user.id, meat=meat, fruit=fruit, coins=coins)
+    store.flush()
     await message.answer(
         "<b>Выдано</b>\n"
         f"{custom_emoji(COIN_EMOJI)} +{coins}  {MEAT_EMOJI} +{meat}  "
@@ -1588,7 +1595,13 @@ async def main():
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    await dp.start_polling(bot)
+    maintenance = asyncio.create_task(store.run_maintenance())   # пачечная запись, бэкапы, выгрузка из памяти
+    logging.info("Игроков в базе: %d", len(store))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        maintenance.cancel()
+        store.close()   # финальная запись всего, что не успело уйти на диск
 
 
 if __name__ == "__main__":
