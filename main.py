@@ -667,15 +667,18 @@ async def show_rich_card(
     pet_key: str,
     build_html,
     reply_markup: InlineKeyboardMarkup | None = None,
+    force_new: bool = False,
 ):
     """Показывает rich-экран вместо сообщения, на котором нажали кнопку.
 
     Картинка та же (или её нет и там и там): сообщение обновляется на месте.
-    Картинка другая или сообщение другого вида: старое удаляется, отправляется новое."""
+    Картинка другая или сообщение другого вида: старое удаляется, отправляется новое.
+    force_new=True: всегда удалить старое и отправить новое (переход из главного меню)."""
     msg = callback.message
     bot, chat_id = callback.bot, msg.chat.id
     cur = _MSG_STATE.get((chat_id, msg.message_id))
-    if cur is not None and cur[0] == "rich" and cur[1] == pet_images.get(pet_key):
+    if (not force_new and cur is not None and cur[0] == "rich"
+            and cur[1] == pet_images.get(pet_key)):
         try:
             rich, image = _rich_input(pet_key, build_html)
             edited = await bot.edit_message_text(
@@ -990,11 +993,13 @@ async def on_menu_pet(callback: CallbackQuery):
         return
 
     await callback.answer()
+    # Из главного меню в раздел: всегда новое сообщение
     await show_rich_card(
         callback,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
         profile_kb(),
+        force_new=True,
     )
 
 
@@ -1011,6 +1016,7 @@ async def on_menu_stock(callback: CallbackQuery):
         "stock",
         lambda with_image: stock_html(callback.from_user.id, with_image),
         profile_back_kb(),
+        force_new=True,
     )
 
 
