@@ -348,7 +348,8 @@ _TIER_LIST = list(TIERS)
 
 # Куда админ может добавить фото
 IMG_TARGETS.update({
-    "exrn_arts": "Исследователи: артефакты",
+    "exrn_arts": "Исследователи: снаряжение",
+    "exrn_arts_list": "Исследователи: мои артефакты",
     "exrn_art_item": "Исследователи: карточка артефакта",
 })
 
@@ -1190,7 +1191,7 @@ def loot_html(gi: int, hours: int, loot: dict, art, is_new: bool, dup: int, info
 # ---------------------------------------------------------------------------
 
 def arts_html(user: dict, with_image: bool = False) -> str:
-    ex = _state(user)
+    """Главное окно артефактов: слоты и суммарные бонусы (как «Снаряжение» у питомца)."""
     worn = equipped(user)
     slots = []
     for n in range(SLOTS):
@@ -1202,30 +1203,69 @@ def arts_html(user: dict, with_image: bool = False) -> str:
     total = {k: v for k, v in bonuses(user).items() if v}
     summary = (_tree(_bonus_rows(total), "Общие бонусы") if total
                else _tree([("Артефакты не надеты", "")], "Общие бонусы"))
-    have = len(owned_keys(user))
     return (
         f"{_image(with_image)}"
-        f"<p><b>🎒 АРТЕФАКТЫ ИССЛЕДОВАТЕЛЕЙ</b><br>&nbsp;<br>"
-        f"<b>Занято слотов: {len(worn)}/{SLOTS} · найдено {have} из {len(ARTIFACTS)}</b></p>"
-        "<blockquote><i>Эти находки делают экспедиции богаче, короче и удачливее. "
-        "Надень до трёх артефактов, и их бонусы сложатся.</i></blockquote>"
+        f"<p><b>🎒 СНАРЯЖЕНИЕ ИССЛЕДОВАТЕЛЕЙ</b><br>&nbsp;<br>"
+        f"<b>Занято {len(worn)}/{SLOTS}</b></p>"
+        "<blockquote><i>Артефакты делают экспедиции богаче и короче. Надень до трёх, "
+        "и их бонусы сложатся.</i></blockquote>"
         + _tree(slots, "Слоты")
         + _gap()
         + summary
-        + _gap()
-        + _p("<i>Артефакты находят в экспедициях (до мифических) и достают из сундуков «Сокровищницы».</i>")
     )
 
 
 def arts_kb(user: dict) -> InlineKeyboardMarkup:
+    """Три слота в ряд (надетый открывает карточку, пустой открывает список), ниже
+    «Мои артефакты» и «Назад»."""
+    worn = equipped(user)
+    slots = []
+    for n in range(SLOTS):
+        if n < len(worn):
+            slots.append(_btn(worn[n]["icon"], f"exrn:ai:{worn[n]['key']}", ButtonStyle.SUCCESS))
+        else:
+            slots.append(_btn("➕", "exrn:alist", ButtonStyle.PRIMARY))
+    return _kb(slots, [_btn("Мои артефакты", "exrn:alist", ButtonStyle.SUCCESS)], [_back("exrn:main")])
+
+
+def alist_html(user: dict, with_image: bool = False) -> str:
+    """Мои артефакты по редкостям."""
+    mine_ = owned(user)
+    head = (
+        f"{_image(with_image)}"
+        "<p><b>🎒 МОИ АРТЕФАКТЫ</b><br>&nbsp;<br>"
+        f"<b>Всего: {len(mine_)} из {len(ARTIFACTS)}</b></p>"
+    )
+    if not mine_:
+        return head + (
+            "<blockquote><i>У тебя пока нет артефактов. Их находят в экспедициях "
+            "и достают из сундуков «Сокровищницы».</i></blockquote>"
+        )
+    blocks = []
+    for tier, (_, plural) in TIERS.items():
+        rows = []
+        for a in mine_:
+            if a["tier"] != tier:
+                continue
+            kind, pct = next(iter(a["bonus"].items()))
+            rows.append((f"{a['icon']} {a['name']}", f"{BONUS_KINDS[kind][0]} {fmt_bonus(kind, pct)}"))
+        if rows:
+            blocks.append(_tree(rows, f"{_tier_icon(tier)} {plural}"))
+    return head + "<blockquote><i>Выбери артефакт, чтобы надеть или снять.</i></blockquote>" + _gap().join(blocks)
+
+
+def alist_kb(user: dict) -> InlineKeyboardMarkup:
+    """Мои артефакты по два в ряд: надетые зелёные, не надетые синие."""
     worn = set(_state(user)["worn"])
     buttons = [
         _btn(f"{a['icon']} {a['name']}", f"exrn:ai:{a['key']}",
              ButtonStyle.SUCCESS if a["key"] in worn else ButtonStyle.PRIMARY)
         for a in owned(user)
     ]
-    rows = [[b] for b in buttons]
-    rows.append([_back("exrn:main")])
+    rows = _pairs(buttons, 2)
+    if not buttons:
+        rows.append([_btn("В сокровищницу", "menu:cases", ButtonStyle.SUCCESS)])
+    rows.append([_back("exrn:arts")])
     return _kb(*rows)
 
 
@@ -1257,7 +1297,7 @@ def art_item_kb(user: dict, key: str) -> InlineKeyboardMarkup:
         free = len(ex["worn"]) < SLOTS
         action = _btn("Надеть", f"exrn:aw:{a['key']}",
                       ButtonStyle.SUCCESS if free else ButtonStyle.DANGER)
-    return _kb([action], [_back("exrn:arts")])
+    return _kb([action], [_back("exrn:alist")])
 
 
 # ---------------------------------------------------------------------------
@@ -1559,6 +1599,15 @@ async def on_arts(callback: CallbackQuery):
     await _show(callback, lambda wi: arts_html(user, wi), arts_kb(user), key="exrn_arts")
 
 
+@router.callback_query(F.data == "exrn:alist")
+async def on_art_list(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show(callback, lambda wi: alist_html(user, wi), alist_kb(user), key="exrn_arts_list")
+
+
 @router.callback_query(F.data.regexp(r"^exrn:ai:\w+$"))
 async def on_art_item(callback: CallbackQuery):
     user = await _need_user(callback)
@@ -1629,6 +1678,7 @@ async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
     builders = {
         "exrn": lambda wi: main_html(user, wi),
         "exrn_arts": lambda wi: arts_html(user, wi),
+        "exrn_arts_list": lambda wi: alist_html(user, wi),
         "exrn_art_item": lambda wi: art_item_html(user, ARTIFACTS[0]["key"], wi),
     }
     await _send_rich_card(bot, chat_id, key, builders[key])
