@@ -30,6 +30,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from aiogram import F, Router
+from storage import atomic_write_json, read_json_safe
 from aiogram.enums import ButtonStyle
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
@@ -207,6 +208,16 @@ IMG_TARGETS: dict[str, str] = {
 BOSS_FILE = Path(__file__).with_name("boss.json")
 
 
+def _read_boss_file() -> dict:
+    """Читает boss.json. При поломке файла берёт копию .bak, а повреждённый файл
+    откладывает рядом (boss.json.corrupt-...), поэтому данные не пропадают молча."""
+    try:
+        return read_json_safe(BOSS_FILE)
+    except RuntimeError:
+        logging.getLogger(__name__).critical("boss.json повреждён и копии нет: начинаем с чистого состояния")
+        return {}
+
+
 def all_ids(btype: str | None = None) -> list[str]:
     """Идентификаторы боссов вида «normal:0», «normal:1», ..."""
     types = [btype] if btype else TYPE_ORDER
@@ -239,10 +250,7 @@ def _fresh(btype: str, kills: int = 0) -> dict:
 
 
 def _load() -> dict[str, dict]:
-    try:
-        data = json.loads(BOSS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
+    data = _read_boss_file()
     saved = data.get("bosses")
     if saved is None and "hp" in data:  # старый формат: один босс, он становится первым обычным
         saved = {"normal:0": data}
@@ -271,10 +279,7 @@ def _zero() -> dict:
 def _load_stats() -> dict:
     """Статистика бойцов: {"names": {uid: ник}, "total": {uid: {...}}, "days": {дата: {uid: {...}}}}.
     dmg: урон по боссам, kills: убито боссов с участием игрока, last: добивающих ударов."""
-    try:
-        data = json.loads(BOSS_FILE.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        data = {}
+    data = _read_boss_file()
     stats = data.get("stats")
     if stats:
         stats.setdefault("names", {})
@@ -301,10 +306,8 @@ STATS: dict = _load_stats()
 
 
 def save_boss() -> None:
-    BOSS_FILE.write_text(
-        json.dumps({"bosses": BOSSES, "stats": STATS}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # атомарная запись: при обрыве остаётся целая старая версия; копия .bak не чаще раза в 5 минут
+    atomic_write_json(BOSS_FILE, {"bosses": BOSSES, "stats": STATS}, backup_every=300)
 
 
 def stat_add(uid: str, name: str | None = None, **inc: int) -> None:
