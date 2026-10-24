@@ -55,10 +55,11 @@ RARITY_DECAY = 0.35          # чем меньше, тем реже выпада
 RARITY_SKILL = 0.35          # насколько сильные отряды чаще находят редкое
 
 # 10 групп исследователей: цена найма и добыча в час.
+# Первая группа базовая: бесплатная и есть у каждого игрока с самого начала.
 # art: шанс артефакта за экспедицию на 4 часа (для длинных растёт, см. art_chance()).
 GROUPS: list[dict] = [
     {
-        "key": "scouts", "icon": "🌱", "name": "Юные следопыты", "price": 500,
+        "key": "scouts", "icon": "🌱", "name": "Юные следопыты", "price": 0,
         "coins_h": 25, "meat_h": 0.5, "fruit_h": 0.4, "art": 0.020,
         "desc": "Бойкие ребята с картой, нарисованной на салфетке. Знают каждый куст "
                 "у околицы и не боятся ничего, кроме маминого голоса.",
@@ -148,6 +149,9 @@ SCENES = [
     "шаг по ним может стать открытием.",
 ]
 PAGE_SIZE = 5
+ARROW_TEXT = "\u2800"   # кнопка только со стрелкой: текст невидимый
+ARROW_PREV_ID = "5255703720078879038"   # стрелка «назад» на кнопках страниц
+ARROW_NEXT_ID = "5253767677670862169"   # стрелка «вперёд»
 
 # Фразы при возвращении отряда
 RETURN_LINES = [
@@ -249,7 +253,9 @@ def _state(user: dict) -> dict:
     if not isinstance(ex, dict):
         ex = {}
         user["exrn"] = ex
-    ex.setdefault("hired", [])
+    hired = ex.setdefault("hired", [])
+    if GROUPS[0]["key"] not in hired:
+        hired.insert(0, GROUPS[0]["key"])      # базовый отряд есть у всех
     ex.setdefault("trips", {})
     times = ex.setdefault("times", [DURATIONS[0]])
     if DURATIONS[0] not in times:
@@ -355,31 +361,51 @@ def roll_trip(gi: int, hours: int) -> dict:
 # Экраны
 # ---------------------------------------------------------------------------
 
+GAP = "<br>&nbsp;<br>"      # пустая строка внутри абзаца (так же сделано в других разделах)
+
+
+def _p(*lines: str) -> str:
+    return "<p>" + "<br>".join(lines) + "</p>"
+
+
+def _rank(gi: int) -> str:
+    return "★" * (gi + 1) + "☆" * (len(GROUPS) - gi - 1)
+
+
+def _loot_rows(gi: int, hours: int) -> str:
+    g = GROUPS[gi]
+    mult = DURATION_BONUS.get(hours, 1.0)
+
+    def span(rate: float) -> str:
+        lo = max(1, round(rate * hours * mult * SPREAD[0]))
+        hi = max(1, round(rate * hours * mult * SPREAD[1]))
+        return f"{_num(lo)} – {_num(hi)}"
+
+    return (
+        f"<tr><td><b>{_coin()} Монеты</b></td><td align=\"center\">{span(g['coins_h'])}</td></tr>"
+        f"<tr><td><b>{_MEAT} Мясо</b></td><td align=\"center\">{span(g['meat_h'])}</td></tr>"
+        f"<tr><td><b>{_FRUIT} Фрукты</b></td><td align=\"center\">{span(g['fruit_h'])}</td></tr>"
+    )
+
+
 def main_html(user: dict, with_image: bool = False) -> str:
     ex = _state(user)
     now = time.time()
     rows = ""
+    ready = going = 0
     for g in GROUPS:
         if g["key"] not in ex["hired"]:
             continue
         code, text = _trip_status(ex, g["key"], now)
-        mark = {"ready": "✅", "going": "⏳", "idle": "💤"}.get(code, "")
-        rows += (
-            f"<tr><td><b>{g['icon']} {g['name']}</b></td>"
-            f'<td align="center">{mark} {text}</td></tr>'
-        )
-    hired = len(ex["hired"])
-    if rows:
-        squads = (
-            "<table bordered striped>"
-            "<tr><th><b>Отряд</b></th><th><b>Статус</b></th></tr>"
-            f"{rows}</table>"
-        )
-    else:
-        squads = (
-            "<p><i>Пока ни одного отряда. Загляни в «Нанять отряд»: "
-            "первая дорога начинается с первого шага.</i></p>"
-        )
+        if code == "ready":
+            ready += 1
+            cell = "✅ Вернулись"
+        elif code == "going":
+            going += 1
+            cell = f"⏳ {_dur(ex['trips'][g['key']]['end'] - now)}"
+        else:
+            cell = "💤 Свободны"
+        rows += f"<tr><td><b>{g['icon']} {g['name']}</b></td><td align=\"center\">{cell}</td></tr>"
     longest = max(ex["times"])
     return (
         f"{_image(with_image)}"
@@ -387,29 +413,38 @@ def main_html(user: dict, with_image: bool = False) -> str:
         "<blockquote><i>За краем карты лежат забытые руины, шепчущие леса и пещеры, "
         "полные золота. Нанимай смелых искателей, отправляй их в путь и жди: "
         "дорога щедро платит тем, кто умеет ждать.</i></blockquote>"
-        f"{squads}"
-        f"<p><b>{_info()} Нанято отрядов: {hired}/{len(GROUPS)} · "
-        f"самая длинная экспедиция: {longest} ч</b></p>"
-        f"<p><b>Найти можно:</b> {_coin()} монеты, {_MEAT} мясо, {_FRUIT} фрукты "
-        "и, если повезёт, редкий артефакт.</p>"
+        "<table bordered striped>"
+        "<tr><th><b>Отряд</b></th><th><b>Статус</b></th></tr>"
+        f"{rows}</table>"
+        + _p(
+            "<b>📋 СВОДКА</b>",
+            f"<b>👥 Нанято отрядов: {len(ex['hired'])} из {len(GROUPS)}</b>",
+            f"<b>🎁 Ждут добычу: {ready}</b>",
+            f"<b>⏳ В пути: {going}</b>",
+            f"<b>⏱ Самая дальняя экспедиция: {longest} ч</b>",
+        )
+        + _p(
+            f"<b>{_info()} Что можно найти</b>",
+            f"{_coin()} монеты · {_MEAT} мясо · {_FRUIT} фрукты · 💎 артефакты",
+            "<i>Артефакты редкие, но чем сильнее отряд и дольше путь, тем выше шанс.</i>",
+        )
     )
 
 
 def main_kb(user: dict) -> InlineKeyboardMarkup:
     ex = _state(user)
-    now = time.time()
     squad_buttons = []
     for gi, g in enumerate(GROUPS):
         if g["key"] not in ex["hired"]:
             continue
-        code, _ = _trip_status(ex, g["key"], now)
-        style = {"ready": ButtonStyle.SUCCESS, "going": ButtonStyle.PRIMARY}.get(code, ButtonStyle.PRIMARY)
+        code, _ = _trip_status(ex, g["key"], time.time())
         mark = {"ready": "✅ ", "going": "⏳ "}.get(code, "")
-        squad_buttons.append(_btn(f"{mark}{g['icon']} {g['name']}", f"exrn:g:{gi}", style))
+        squad_buttons.append(_btn(f"{mark}{g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS))
+    rows = [[b] for b in squad_buttons]          # по одной кнопке в ряд, название полностью
     return _kb(
-        *_pairs(squad_buttons),
-        [_btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.SUCCESS),
-         _btn("⏱ Время экспедиций", "exrn:times", ButtonStyle.PRIMARY)],
+        *rows,
+        [_btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.PRIMARY),
+         _btn("⏱ Время", "exrn:times", ButtonStyle.PRIMARY)],
         [_back("menu:back")],
     )
 
@@ -419,13 +454,20 @@ def _pages() -> int:
 
 
 def list_html(user: dict, page: int = 0, with_image: bool = False) -> str:
+    ex = _state(user)
     page = max(0, min(page, _pages() - 1))
     return (
         f"{_image(with_image)}"
-        f"<p><b>➕ НАЙМ ИССЛЕДОВАТЕЛЕЙ · страница {page + 1}/{_pages()}</b></p>"
+        f"<p><b>➕ НАЙМ ИССЛЕДОВАТЕЛЕЙ</b> · страница {page + 1} из {_pages()}</p>"
         f"<blockquote><i>{random.choice(SCENES)}</i></blockquote>"
-        "<p><b>Выбери отряд, и я расскажу о нём подробнее.</b></p>"
-        f"<p><b>{_info()} Твои монеты: {_num(user['coins'])} {_coin()}</b></p>"
+        + _p(
+            "<b>Выбери отряд, чтобы узнать о нём подробнее.</b>",
+            "<i>Чем выше ранг отряда, тем богаче добыча и тем реже артефакты проходят мимо него.</i>",
+        )
+        + _p(
+            f"<b>{_info()} Твои монеты: {_num(user['coins'])} {_coin()}</b>",
+            f"<b>👥 Нанято отрядов: {len(ex['hired'])} из {len(GROUPS)}</b>",
+        )
     )
 
 
@@ -437,16 +479,16 @@ def list_kb(user: dict, page: int = 0) -> InlineKeyboardMarkup:
     for gi in range(start, min(start + PAGE_SIZE, len(GROUPS))):
         g = GROUPS[gi]
         owned = g["key"] in ex["hired"]
-        rows.append([_btn(
-            f"{'✅' if owned else g['icon']} {g['name']}",
-            f"exrn:g:{gi}",
-            ButtonStyle.SUCCESS if owned else ButtonStyle.PRIMARY,
-        )])
+        rows.append([_btn(f"{'✅' if owned else g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS)])
     nav = []
     if page > 0:
-        nav.append(_btn(f"◀ Страница {page}", f"exrn:list:{page - 1}", ButtonStyle.PRIMARY))
+        nav.append(InlineKeyboardButton(
+            text=ARROW_TEXT, callback_data=f"exrn:list:{page - 1}",
+            style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_PREV_ID))
     if page < _pages() - 1:
-        nav.append(_btn(f"Страница {page + 2} ▶", f"exrn:list:{page + 1}", ButtonStyle.PRIMARY))
+        nav.append(InlineKeyboardButton(
+            text=ARROW_TEXT, callback_data=f"exrn:list:{page + 1}",
+            style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_NEXT_ID))
     return _kb(*rows, nav, [_back("exrn:main")])
 
 
@@ -457,54 +499,69 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     code, status = _trip_status(ex, g["key"], now)
     cap = _tier_cap(gi)
     h0 = DURATIONS[0]
-    unlocked = sorted(ex["times"])
+    base = gi == 0
 
-    def span(rate: float, hours: int) -> str:
-        mult = DURATION_BONUS.get(hours, 1.0)
-        return f"{_num(max(1, round(rate * hours * mult * SPREAD[0])))}–" \
-               f"{_num(max(1, round(rate * hours * mult * SPREAD[1])))}"
-
+    price = "Базовый отряд · всегда с тобой" if base else (
+        "Нанят ✅" if code != "locked" else f"{_num(g['price'])} {_coin()}")
     table = (
         "<table bordered striped>"
-        f"<tr><th><b>За {h0} ч</b></th><th><b>Добыча</b></th></tr>"
-        f"<tr><td><b>{_coin()} Монеты</b></td><td align=\"center\">{span(g['coins_h'], h0)}</td></tr>"
-        f"<tr><td><b>{_MEAT} Мясо</b></td><td align=\"center\">{span(g['meat_h'], h0)}</td></tr>"
-        f"<tr><td><b>{_FRUIT} Фрукты</b></td><td align=\"center\">{span(g['fruit_h'], h0)}</td></tr>"
-        f"<tr><td><b>💎 Артефакт</b></td><td align=\"center\">"
-        f"{art_chance(gi, h0) * 100:.1f}%</td></tr>"
-        f"<tr><td><b>✨ Редкость до</b></td><td align=\"center\">{escape(_tier_name(cap))}</td></tr>"
+        "<tr><th><b>Характеристика</b></th><th><b>Значение</b></th></tr>"
+        f"<tr><td><b>🎖 Ранг</b></td><td align=\"center\">{_rank(gi)}</td></tr>"
+        f"<tr><td><b>💰 Найм</b></td><td align=\"center\">{price}</td></tr>"
+        f"<tr><td><b>💎 Шанс артефакта за {h0} ч</b></td>"
+        f"<td align=\"center\">{art_chance(gi, h0) * 100:.1f}%</td></tr>"
+        f"<tr><td><b>✨ Редкость находок</b></td>"
+        f"<td align=\"center\">до «{escape(_tier_name(cap))}»</td></tr>"
         "</table>"
     )
-
+    loot = (
+        "<table bordered striped>"
+        f"<tr><th><b>Добыча за {h0} ч</b></th><th><b>Примерно</b></th></tr>"
+        f"{_loot_rows(gi, h0)}"
+        "</table>"
+    )
     head = (
         f"{_image(with_image)}"
         f"<p><b>{g['icon']} {g['name'].upper()}</b></p>"
         f"<blockquote><i>{g['desc']}</i></blockquote>"
-        f"{table}"
-        "<p><i>Чем дольше экспедиция, тем больше добыча и выше шанс на артефакт.</i></p>"
+        f"{table}{loot}"
     )
 
     if code == "locked":
-        return head + (
-            f"<p><b>Цена найма: {_num(g['price'])} {_coin()}</b></p>"
-            f"<p><b>{_info()} У тебя: {_num(user['coins'])} {_coin()}</b></p>"
+        return head + _p(
+            f"<b>{_info()} Цена найма: {_num(g['price'])} {_coin()}</b>",
+            f"<b>У тебя: {_num(user['coins'])} {_coin()}</b>",
         )
     if code == "idle":
+        rows = ""
+        for h in sorted(ex["times"]):
+            mult = DURATION_BONUS.get(h, 1.0)
+            lo = max(1, round(g["coins_h"] * h * mult * SPREAD[0]))
+            hi = max(1, round(g["coins_h"] * h * mult * SPREAD[1]))
+            rows += (
+                f"<tr><td><b>⏱ {h} ч</b></td>"
+                f"<td align=\"center\">{_num(lo)} – {_num(hi)}</td>"
+                f"<td align=\"center\">{art_chance(gi, h) * 100:.1f}%</td></tr>"
+            )
         return head + (
-            f"<p><b>{_info()} Отряд ждёт приказа. Открытые экспедиции: "
-            f"{', '.join(str(t) + ' ч' for t in unlocked)}.</b></p>"
+            "<table bordered striped>"
+            "<tr><th><b>Экспедиция</b></th><th><b>Монеты</b></th><th><b>💎 Шанс</b></th></tr>"
+            f"{rows}</table>"
+        ) + _p(
+            "<b>💤 Отряд отдохнул и готов к походу.</b>",
+            "<i>Выбери длительность экспедиции кнопкой ниже.</i>",
         )
     trip = ex["trips"][g["key"]]
     total = trip["end"] - trip["start"]
     if code == "ready":
-        return head + (
-            f"<p><b>✅ Отряд вернулся из экспедиции на {trip['hours']} ч!</b></p>"
-            "<p><i>Добыча сложена у входа. Осталось её забрать.</i></p>"
+        return head + _p(
+            f"<b>✅ Отряд вернулся из экспедиции на {trip['hours']} ч!</b>",
+            "<i>Добыча сложена у входа в лагерь. Осталось её забрать.</i>",
         )
-    return head + (
-        f"<p><b>⏳ В пути: экспедиция на {trip['hours']} ч</b></p>"
-        f"<p><b>{_bar(now - trip['start'], total)}</b></p>"
-        f"<p><b>Вернутся через {_dur(trip['end'] - now)}</b></p>"
+    return head + _p(
+        f"<b>⏳ В ПУТИ · экспедиция на {trip['hours']} ч</b>",
+        f"<b>{_bar(now - trip['start'], total)}</b>",
+        f"<b>Вернутся через {_dur(trip['end'] - now)}</b>",
     )
 
 
@@ -512,10 +569,11 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
     g = GROUPS[gi]
     ex = _state(user)
     code, _ = _trip_status(ex, g["key"], time.time())
+    back_to = "exrn:main" if code != "locked" and gi == 0 else f"exrn:list:{gi // PAGE_SIZE}"
     if code == "locked":
         return _kb(
             [_btn(f"Нанять за {_num(g['price'])}", f"exrn:buy:{gi}", ButtonStyle.SUCCESS)],
-            [_back(f"exrn:list:{gi // PAGE_SIZE}")],
+            [_back(back_to)],
         )
     if code == "idle":
         go = [_btn(f"{h} ч", f"exrn:go:{gi}:{h}", ButtonStyle.SUCCESS) for h in sorted(ex["times"])]
@@ -535,27 +593,37 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
     )
 
 
+def _next_time(ex: dict) -> int | None:
+    for h in DURATIONS:
+        if h not in ex["times"]:
+            return h
+    return None
+
+
 def times_html(user: dict, with_image: bool = False) -> str:
     ex = _state(user)
     rows = ""
     nxt = _next_time(ex)
     for h in DURATIONS:
         if h in ex["times"]:
-            state = "✅ открыто"
+            state = "✅ Открыто"
         elif h == nxt:
             state = f"{_num(DURATION_PRICE[h])} {_coin()}"
         else:
-            state = "🔒 закрыто"
+            state = "🔒 Закрыто"
         bonus = int(round((DURATION_BONUS.get(h, 1.0) - 1) * 100))
         rows += (
             f"<tr><td><b>⏱ {h} ч</b></td>"
             f'<td align="center">{"+" + str(bonus) + "%" if bonus else "база"}</td>'
             f'<td align="center">{state}</td></tr>'
         )
-    tail = (
-        f"<p><b>{_info()} Следующая: {nxt} ч за {_num(DURATION_PRICE[nxt])} {_coin()}</b></p>"
-        if nxt else "<p><b>🏆 Все экспедиции открыты!</b></p>"
-    )
+    if nxt:
+        tail = _p(
+            f"<b>{_info()} Следующая экспедиция: {nxt} ч</b>",
+            f"<b>Цена: {_num(DURATION_PRICE[nxt])} {_coin()}</b>",
+        )
+    else:
+        tail = _p("<b>🏆 Все экспедиции открыты!</b>", "<i>Дальше только легенды.</i>")
     return (
         f"{_image(with_image)}"
         "<p><b>⏱ ВРЕМЯ ЭКСПЕДИЦИЙ</b></p>"
@@ -565,15 +633,8 @@ def times_html(user: dict, with_image: bool = False) -> str:
         "<tr><th><b>Время</b></th><th><b>Бонус добычи</b></th><th><b>Статус</b></th></tr>"
         f"{rows}</table>"
         f"{tail}"
-        f"<p><b>Твои монеты: {_num(user['coins'])} {_coin()}</b></p>"
+        + _p(f"<b>Твои монеты: {_num(user['coins'])} {_coin()}</b>")
     )
-
-
-def _next_time(ex: dict) -> int | None:
-    for h in DURATIONS:
-        if h not in ex["times"]:
-            return h
-    return None
 
 
 def times_kb(user: dict) -> InlineKeyboardMarkup:
@@ -596,27 +657,29 @@ def loot_html(gi: int, hours: int, loot: dict, art, with_image: bool = False) ->
     )
     text = (
         f"{_image(with_image)}"
-        f"<p><b>{g['icon']} {g['name'].upper()}: ДОБЫЧА</b></p>"
+        f"<p><b>{g['icon']} {g['name'].upper()} · ДОБЫЧА</b></p>"
         f"<blockquote><i>{line}</i></blockquote>"
-        f"<p><b>Экспедиция на {hours} ч{' · ✨ счастливая находка!' if loot['lucky'] else ''}</b></p>"
-        "<table bordered striped>"
+        + _p(
+            f"<b>⏱ Экспедиция: {hours} ч</b>",
+            "<b>✨ Счастливая находка! Добыча увеличена</b>" if loot["lucky"]
+            else "<b>📦 Обычная добыча</b>",
+        )
+        + "<table bordered striped>"
         "<tr><th><b>Трофей</b></th><th><b>Получено</b></th></tr>"
         f"{rows}</table>"
     )
     if art is not None:
         try:
-            text += (
-                "<p><b>💎 В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b></p>"
-                f"{_result_block(art)}"
-            )
+            text += _p("<b>💎 В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b>") + f"{_result_block(art)}"
         except Exception:  # карточка не должна ломать выдачу добычи
             log.exception("не удалось нарисовать карточку артефакта")
-            text += "<p><b>💎 Отряд принёс артефакт! Загляни в «Снаряжение».</b></p>"
+            text += _p("<b>💎 Отряд принёс артефакт!</b>", "<i>Загляни в «Снаряжение».</i>")
     elif loot["tier"] is not None:
-        text += (
-            "<p><b>💎 Отряд нашёл артефакт, но такой у тебя уже есть: "
-            "его обменяли на монеты.</b></p>"
+        text += _p(
+            "<b>💎 Отряд нашёл артефакт, но такой у тебя уже есть.</b>",
+            "<i>Его обменяли на дополнительные монеты.</i>",
         )
+    text += _p("<i>Всё добытое уже лежит в твоих запасах.</i>")
     return text
 
 
