@@ -853,19 +853,19 @@ mine.setup(
 dp.include_router(mine.router)
 
 def drop_any_artifact(user: dict, tier: str):
-    """Из сундука выпадает артефакт питомца или шахты (поровну, в каждой редкости по 5 + 5)."""
-    return random.choice((equipment.drop_artifact, mine.drop_artifact))(user, tier)
+    """Из сундука выпадает артефакт питомца, шахты или исследователей (поровну, в каждой редкости по 5 + 5 + 5)."""
+    return random.choice((equipment.drop_artifact, mine.drop_artifact, exrn.drop_artifact))(user, tier)
 
 
 def artifact_block(art: dict) -> str:
     """Карточка выпавшего артефакта: у артефактов шахты поле section == "mine"."""
-    owner = mine if art.get("section") == "mine" else equipment
+    owner = {"mine": mine, "exrn": exrn}.get(art.get("section"), equipment)
     return owner.result_block(art)
 
 
 # Раздел «Сокровищница» живёт в cases.py
 cases.setup(
-    artifacts=equipment.ARTIFACTS + mine.ARTIFACTS,  # что может выпасть (все 50)
+    artifacts=equipment.ARTIFACTS + mine.ARTIFACTS + exrn.ARTIFACTS,  # что может выпасть (все 75)
     drop_artifact=drop_any_artifact,           # выдать артефакт игроку
     result_block=artifact_block,               # карточка выпавшего артефакта
     get_user=get_user,
@@ -916,15 +916,13 @@ exrn.setup(
     get_user=get_user,
     save_users=save_users,
     show_rich_card=show_rich_card,
+    send_rich_card=send_rich_card,
     custom_emoji=custom_emoji,
     COIN_EMOJI=COIN_EMOJI,
     INFO_EMOJI=INFO_EMOJI,
     BACK_EMOJI_ID=BACK_EMOJI_ID,
     MEAT_EMOJI=MEAT_EMOJI,
     FRUIT_EMOJI=FRUIT_EMOJI,
-    drop_artifact=drop_any_artifact,   # выдать артефакт игроку по редкости
-    result_block=artifact_block,       # карточка выпавшего артефакта
-    tiers=list(equipment.TIERS),       # редкости по порядку: до мифической
 )
 dp.include_router(exrn.router)
 
