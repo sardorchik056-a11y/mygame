@@ -500,48 +500,26 @@ def stock_html(user_id: int | None = None, with_image: bool = False) -> str:
     )
 
 
+TREASURY_EMOJI = ("6192975148681793540", "💰")  # кнопка «Сокровищница»
+
+
 def menu_kb() -> InlineKeyboardMarkup:
+    def btn(text: str, data: str, style: ButtonStyle, emoji_id: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=text, callback_data=data, style=style, icon_custom_emoji_id=emoji_id
+        )
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            # Главная кнопка на всю ширину, зелёная
+            [btn("Мой питомец", "menu:pet", ButtonStyle.SUCCESS, PET_BTN_EMOJI[0])],
             [
-                InlineKeyboardButton(
-                    text="Мой питомец",
-                    callback_data="menu:pet",
-                    style=ButtonStyle.PRIMARY,
-                    icon_custom_emoji_id=PET_BTN_EMOJI[0],
-                )
+                btn("Запасы", "menu:stock", ButtonStyle.PRIMARY, COIN_EMOJI[0]),
+                btn("Шахты", "menu:mine", ButtonStyle.PRIMARY, mine.MINE_EMOJI[0]),
             ],
             [
-                InlineKeyboardButton(
-                    text="Запасы",
-                    callback_data="menu:stock",
-                    style=ButtonStyle.PRIMARY,
-                    icon_custom_emoji_id=COIN_EMOJI[0],
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Шахты",
-                    callback_data="menu:mine",
-                    style=ButtonStyle.PRIMARY,
-                    icon_custom_emoji_id=mine.MINE_EMOJI[0],
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Босс",
-                    callback_data="menu:boss",
-                    style=ButtonStyle.DANGER,
-                    icon_custom_emoji_id=boss.BOSS_EMOJI[0],
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Сокровищница",
-                    callback_data="menu:cases",
-                    style=ButtonStyle.PRIMARY,
-                    icon_custom_emoji_id=cases.MENU_EMOJI[0],
-                )
+                btn("Босс", "menu:boss", ButtonStyle.DANGER, boss.BOSS_EMOJI[0]),
+                btn("Сокровищница", "menu:cases", ButtonStyle.PRIMARY, TREASURY_EMOJI[0]),
             ],
         ]
     )
