@@ -782,10 +782,9 @@ def arts_html(user_id: int, with_image: bool = False) -> str:
 
 
 def arts_list_html(user_id: int, with_image: bool = False) -> str:
-    """Мои артефакты по редкостям; надетые отмечены галочкой."""
+    """Мои артефакты по редкостям."""
     user, m = load(user_id)
     mine = owned_arts(m)
-    worn_keys = {a["key"] for a in worn_arts(m)}
     head = (
         f"{_image(with_image)}"
         "<p><b>🎒 МОИ АРТЕФАКТЫ ШАХТЫ</b><br>&nbsp;<br>"
@@ -804,8 +803,7 @@ def arts_list_html(user_id: int, with_image: bool = False) -> str:
             if a["tier"] != tier:
                 continue
             kind, pct = next(iter(a["bonus"].items()))
-            mark = f" {D.custom_emoji(EQUIPPED_EMOJI)}" if a["key"] in worn_keys else ""
-            rows.append((f"{_aicon(a)} {a['name']}{mark}",
+            rows.append((f"{_aicon(a)} {a['name']}",
                          f"{ART_KINDS[kind][0]} {fmt_art_bonus(kind, pct)}"))
         if rows:
             blocks.append(_tree(rows, f"{_tier_icon(tier)} {plural}"))
@@ -966,15 +964,14 @@ def arts_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def arts_list_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Мои артефакты по два в ряд: свободные зелёные, надетые синие с галочкой."""
+    """Мои артефакты по два в ряд: надетые зелёные, не надетые синие."""
     _, m = load(user_id)
     worn_keys = {a["key"] for a in worn_arts(m)}
     buttons = []
     for a in owned_arts(m):
         on = a["key"] in worn_keys
-        label = f"{a['name']} ✅" if on else a["name"]
-        buttons.append(_art_btn(a, label, f"mine:art:{ARTIFACTS.index(a)}",
-                                ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
+        buttons.append(_art_btn(a, a["name"], f"mine:art:{ARTIFACTS.index(a)}",
+                                ButtonStyle.SUCCESS if on else ButtonStyle.PRIMARY))
     rows = _pairs(buttons)
     if not buttons:  # артефактов ещё нет: подсказываем, где их взять
         rows.append([_btn("В сокровищницу", "menu:cases")])
