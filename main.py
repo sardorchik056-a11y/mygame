@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+from collections import OrderedDict
 from html import escape
 from pathlib import Path
 
@@ -601,6 +602,37 @@ def back_kb() -> InlineKeyboardMarkup:
     )
 
 
+# Что показано в сообщениях бота: (chat_id, message_id) -> (вид, file_id картинки).
+# По этому решаем, можно ли обновить сообщение на месте (картинка та же) или нужно
+# удалить его и отправить новое (картинка другая или сменился вид сообщения).
+# После перезапуска бота память пуста: тогда безопасно удаляем и отправляем заново.
+_MSG_STATE: "OrderedDict[tuple[int, int], tuple[str, str | None]]" = OrderedDict()
+_MSG_STATE_MAX = 20000
+
+
+def _remember(msg, kind: str, image: str | None) -> None:
+    if msg is None or not hasattr(msg, "message_id"):
+        return
+    _MSG_STATE[(msg.chat.id, msg.message_id)] = (kind, image)
+    _MSG_STATE.move_to_end((msg.chat.id, msg.message_id))
+    while len(_MSG_STATE) > _MSG_STATE_MAX:
+        _MSG_STATE.popitem(last=False)
+
+
+def _rich_input(pet_key: str, build_html, use_image: bool = True):
+    """Собирает rich-сообщение; возвращает (InputRichMessage, file_id или None)."""
+    file_id = pet_images.get(pet_key) if use_image else None
+    if file_id:
+        return (
+            InputRichMessage(
+                html=build_html(True),
+                media=[InputRichMessageMedia(id="pet", media=InputMediaPhoto(media=file_id))],
+            ),
+            file_id,
+        )
+    return InputRichMessage(html=build_html(False)), None
+
+
 async def send_rich_card(
     bot: Bot,
     chat_id: int,
@@ -610,32 +642,60 @@ async def send_rich_card(
 ):
     """Отправляет rich-сообщение; если у питомца есть фото, ставит его сверху.
     Возвращает отправленное сообщение (нужно «живым» окнам босса)."""
-    file_id = pet_images.get(pet_key)
-
-    if file_id:
+    if pet_images.get(pet_key):
         try:
-            return await bot.send_rich_message(
-                chat_id=chat_id,
-                rich_message=InputRichMessage(
-                    html=build_html(True),
-                    media=[
-                        InputRichMessageMedia(
-                            id="pet", media=InputMediaPhoto(media=file_id)
-                        )
-                    ],
-                ),
-                reply_markup=reply_markup,
+            rich, image = _rich_input(pet_key, build_html)
+            msg = await bot.send_rich_message(
+                chat_id=chat_id, rich_message=rich, reply_markup=reply_markup
             )
-            return
+            _remember(msg, "rich", image)
+            return msg
         except TelegramBadRequest as e:
             # Например, file_id устарел: показываем без фото
             logging.warning("Не удалось отправить фото %s: %s", pet_key, e)
 
-    return await bot.send_rich_message(
-        chat_id=chat_id,
-        rich_message=InputRichMessage(html=build_html(False)),
-        reply_markup=reply_markup,
+    rich, _ = _rich_input(pet_key, build_html, use_image=False)
+    msg = await bot.send_rich_message(
+        chat_id=chat_id, rich_message=rich, reply_markup=reply_markup
     )
+    _remember(msg, "rich", None)
+    return msg
+
+
+async def show_rich_card(
+    callback: CallbackQuery,
+    pet_key: str,
+    build_html,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Показывает rich-экран вместо сообщения, на котором нажали кнопку.
+
+    Картинка та же (или её нет и там и там): сообщение обновляется на месте.
+    Картинка другая или сообщение другого вида: старое удаляется, отправляется новое."""
+    msg = callback.message
+    bot, chat_id = callback.bot, msg.chat.id
+    cur = _MSG_STATE.get((chat_id, msg.message_id))
+    if cur is not None and cur[0] == "rich" and cur[1] == pet_images.get(pet_key):
+        try:
+            rich, image = _rich_input(pet_key, build_html)
+            edited = await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                rich_message=rich,
+                reply_markup=reply_markup,
+            )
+            _remember(msg, "rich", image)
+            return edited if not isinstance(edited, bool) else msg
+        except TelegramBadRequest as e:
+            if "not modified" in str(e):
+                return msg
+            logging.warning("Не удалось обновить сообщение на месте, шлю новое: %s", e)
+    try:
+        await msg.delete()
+    except TelegramBadRequest:
+        pass
+    _MSG_STATE.pop((chat_id, msg.message_id), None)
+    return await send_rich_card(bot, chat_id, pet_key, build_html, reply_markup)
 
 
 async def send_pet_card(
@@ -670,21 +730,61 @@ async def send_screen(
     key: str,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
+):
     """Обычное сообщение; если для экрана добавлено фото, текст идёт подписью к нему."""
     file_id = pet_images.get(key)
 
     if file_id:
         try:
-            await bot.send_photo(
+            msg = await bot.send_photo(
                 chat_id=chat_id, photo=file_id, caption=text, reply_markup=reply_markup
             )
-            return
+            _remember(msg, "photo", file_id)
+            return msg
         except TelegramBadRequest as e:
             # Например, file_id устарел или подпись слишком длинная (лимит 1024)
             logging.warning("Не удалось отправить фото экрана %s: %s", key, e)
 
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    _remember(msg, "text", None)
+    return msg
+
+
+async def show_screen(
+    callback: CallbackQuery,
+    key: str,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Как show_rich_card, но для обычных экранов (текст или фото с подписью)."""
+    msg = callback.message
+    bot, chat_id = callback.bot, msg.chat.id
+    target = pet_images.get(key)
+    cur = _MSG_STATE.get((chat_id, msg.message_id))
+    if cur is not None and cur[1] == target and cur[0] in ("text", "photo") \
+            and (cur[0] == "photo") == bool(target):
+        try:
+            if target:
+                await bot.edit_message_caption(
+                    chat_id=chat_id, message_id=msg.message_id,
+                    caption=text, reply_markup=reply_markup,
+                )
+            else:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=msg.message_id,
+                    text=text, reply_markup=reply_markup,
+                )
+            return msg
+        except TelegramBadRequest as e:
+            if "not modified" in str(e):
+                return msg
+            logging.warning("Не удалось обновить экран на месте, шлю новый: %s", e)
+    try:
+        await msg.delete()
+    except TelegramBadRequest:
+        pass
+    _MSG_STATE.pop((chat_id, msg.message_id), None)
+    return await send_screen(bot, chat_id, key, text, reply_markup)
 
 
 # ---------- Админка ----------
@@ -817,15 +917,8 @@ async def cmd_start(message: Message):
 @dp.callback_query(F.data == "intro:continue")
 async def on_continue(callback: CallbackQuery):
     await callback.answer()
-    # Текст -> фото с подписью: надёжнее удалить и отправить новое
-    await callback.message.delete()
-    await send_screen(
-        callback.bot,
-        callback.message.chat.id,
-        "pets_list",
-        PETS_LIST_TEXT,
-        pets_list_kb(),
-    )
+    # Картинка та же: обновляем на месте, другая: удаляем и шлём новое
+    await show_screen(callback, "pets_list", PETS_LIST_TEXT, pets_list_kb())
 
 
 @dp.callback_query(F.data.startswith("pet:view:"))
@@ -836,22 +929,17 @@ async def on_pet_view(callback: CallbackQuery):
         return
 
     await callback.answer()
-    # Обычное сообщение -> rich: надёжнее удалить и отправить новое
-    await callback.message.delete()
-    await send_pet_card(callback.bot, callback.message.chat.id, pet_key)
+    await show_rich_card(
+        callback, pet_key,
+        lambda with_image: pet_card_html(pet_key, with_image, False),
+        back_kb(),
+    )
 
 
 @dp.callback_query(F.data == "pet:back")
 async def on_pet_back(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.delete()
-    await send_screen(
-        callback.bot,
-        callback.message.chat.id,
-        "pets_list",
-        PETS_LIST_TEXT,
-        pets_list_kb(),
-    )
+    await show_screen(callback, "pets_list", PETS_LIST_TEXT, pets_list_kb())
 
 
 @dp.callback_query(F.data.startswith("pet:pick:"))
@@ -902,10 +990,8 @@ async def on_menu_pet(callback: CallbackQuery):
         return
 
     await callback.answer()
-    await callback.message.delete()
-    await send_rich_card(
-        callback.bot,
-        callback.message.chat.id,
+    await show_rich_card(
+        callback,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
         profile_kb(),
@@ -920,10 +1006,8 @@ async def on_menu_stock(callback: CallbackQuery):
         return
 
     await callback.answer()
-    await callback.message.delete()
-    await send_rich_card(
-        callback.bot,
-        callback.message.chat.id,
+    await show_rich_card(
+        callback,
         "stock",
         lambda with_image: stock_html(callback.from_user.id, with_image),
         profile_back_kb(),
@@ -939,9 +1023,11 @@ async def on_stock_donate(callback: CallbackQuery):
 @dp.callback_query(F.data == "menu:back")
 async def on_menu_back(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.delete()
-    await send_menu(
-        callback.bot, callback.message.chat.id, callback.from_user.id
+    await show_rich_card(
+        callback,
+        "menu",
+        lambda with_image: menu_html(callback.from_user.id, with_image),
+        menu_kb(),
     )
 
 
@@ -1050,17 +1136,24 @@ async def send_upgrade_card(bot: Bot, chat_id: int, user_id: int) -> None:
     )
 
 
+async def show_upgrade_card(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    await show_rich_card(
+        callback,
+        user["pet"],
+        lambda with_image: upgrade_html(user_id, with_image),
+        upgrade_back_kb(),
+    )
+
+
 @dp.callback_query(F.data == "pet:upgrade")
 async def on_upgrade_open(callback: CallbackQuery):
     if get_user(callback.from_user.id) is None:
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return
     await callback.answer()
-    # Старое сообщение удаляем, присылаем новое
-    await callback.message.delete()
-    await send_upgrade_card(
-        callback.bot, callback.message.chat.id, callback.from_user.id
-    )
+    await show_upgrade_card(callback)
 
 
 @dp.callback_query(F.data == "upg:do")
@@ -1095,11 +1188,8 @@ async def on_upgrade_do(callback: CallbackQuery):
     else:
         await callback.answer(f"Уровень повышен до {user['level']}!")
 
-    # Старое сообщение удаляем, присылаем новое с обновлёнными шкалами
-    await callback.message.delete()
-    await send_upgrade_card(
-        callback.bot, callback.message.chat.id, callback.from_user.id
-    )
+    # Обновляем карточку на месте, чтобы шкалы показали новый уровень
+    await show_upgrade_card(callback)
 
 
 @dp.callback_query(F.data == "upg:back")
@@ -1109,10 +1199,8 @@ async def on_upgrade_back(callback: CallbackQuery):
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return
     await callback.answer()
-    await callback.message.delete()
-    await send_rich_card(
-        callback.bot,
-        callback.message.chat.id,
+    await show_rich_card(
+        callback,
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
         profile_kb(),
