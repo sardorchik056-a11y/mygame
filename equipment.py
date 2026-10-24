@@ -317,10 +317,9 @@ def equip_html(user_id: int, with_image: bool = False) -> str:
 
 
 def list_html(user_id: int, with_image: bool = False) -> str:
-    """Мои артефакты по редкостям; надетые отмечены галочкой."""
+    """Мои артефакты по редкостям."""
     user = D.get_user(user_id)
     mine = owned(user)
-    worn_keys = {a["key"] for a in equipped(user)}
     head = (
         f"{_image(with_image)}"
         "<p><b>🎒 МОИ АРТЕФАКТЫ</b><br>&nbsp;<br>"
@@ -340,8 +339,7 @@ def list_html(user_id: int, with_image: bool = False) -> str:
             if a["tier"] != tier:
                 continue
             kind, pct = next(iter(a["bonus"].items()))
-            mark = " ✅" if a["key"] in worn_keys else ""
-            rows.append((f"{_icon(a)} {a['name']}{mark}",
+            rows.append((f"{_icon(a)} {a['name']}",
                          f"{BONUS_KINDS[kind][0]} {fmt_bonus(kind, pct)}"))
         if rows:
             blocks.append(_tree(rows, f"{_tier_icon(tier)} {plural}"))
@@ -429,15 +427,14 @@ def equip_kb(user_id: int) -> InlineKeyboardMarkup:
 
 
 def list_kb(user_id: int) -> InlineKeyboardMarkup:
-    """Мои артефакты по два в ряд: свободные зелёные, надетые синие с галочкой."""
+    """Мои артефакты по два в ряд: надетые зелёные, не надетые синие."""
     user = D.get_user(user_id)
     worn_keys = {a["key"] for a in equipped(user)}
     buttons = []
     for a in owned(user):
         on = a["key"] in worn_keys
-        label = f"{a['name']} ✅" if on else a["name"]
-        buttons.append(_artifact_btn(a, label, f"equip:item:{a['key']}",
-                                     ButtonStyle.PRIMARY if on else ButtonStyle.SUCCESS))
+        buttons.append(_artifact_btn(a, a["name"], f"equip:item:{a['key']}",
+                                     ButtonStyle.SUCCESS if on else ButtonStyle.PRIMARY))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     if not buttons:  # артефактов ещё нет: подсказываем, где их взять
         rows.append([_btn("В сокровищницу", "menu:cases")])
