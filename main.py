@@ -24,12 +24,13 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+import admin
 import boss
 import cases
 import equipment
 import mine
 from guard import Guard, on_error
-from storage import ProcessLock, UserStore, atomic_write_json, ledger, read_json_safe
+from storage import ProcessLock, UserStore, atomic_write_json, read_json_safe
 
 BOT_TOKEN = "8867617327:AAGP427kiEOg1aI8hRIUOyiH3Mu7eQGaEbE"
 
@@ -708,179 +709,36 @@ async def send_screen(
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
 
-# ---------- Админка: /img ----------
-
-class ImgStates(StatesGroup):
-    waiting_photo = State()
-
-
-admin_router = Router()
-admin_router.message.filter(F.from_user.id.in_(ADMIN_IDS))
-admin_router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
-
-IMG_MENU_TEXT = (
-    "<b>Изображения питомцев</b>\n\n"
-    "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
-    "выбора питомцев, на меню, на запасы, на шахты или на карточку питомца. "
-    "Галочка значит, что фото уже есть.</i>"
+# ---------- Админка ----------
+# Всё админское (панель /admin, /img, /give, статистика, игроки, рассылка, боссы,
+# журнал, бан, технические работы) живёт в admin.py. Сюда передаём только нужные
+# функции, данные и эмодзи.
+admin.setup(
+    ADMIN_IDS=ADMIN_IDS,
+    users=users,
+    store=store,
+    get_user=get_user,
+    save_users=save_users,
+    pet_images=pet_images,
+    save_images=save_images,
+    IMG_TARGETS=IMG_TARGETS,
+    PETS=PETS,
+    MAX_LEVEL=MAX_LEVEL,
+    custom_emoji=custom_emoji,
+    COIN_EMOJI=COIN_EMOJI,
+    FRUIT_EMOJI=FRUIT_EMOJI,
+    MEAT_EMOJI=MEAT_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    send_pet_card=send_pet_card,
+    send_screen=send_screen,
+    send_rich_card=send_rich_card,
+    menu_html=menu_html,
+    stock_html=stock_html,
+    WELCOME_TEXT=WELCOME_TEXT,
+    PETS_LIST_TEXT=PETS_LIST_TEXT,
 )
-
-
-def img_pets_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{'✅' if key in pet_images else '➕'} {title}",
-                    callback_data=f"img:pet:{key}",
-                    style=ButtonStyle.PRIMARY,
-                )
-            ]
-            for key, title in IMG_TARGETS.items()
-        ]
-    )
-
-
-def img_prompt_kb(pet_key: str) -> InlineKeyboardMarkup:
-    row = [
-        InlineKeyboardButton(
-            text="Отмена", callback_data="img:cancel", style=ButtonStyle.DANGER
-        )
-    ]
-    if pet_key in pet_images:
-        row.insert(
-            0,
-            InlineKeyboardButton(
-                text="Удалить фото",
-                callback_data=f"img:del:{pet_key}",
-                style=ButtonStyle.DANGER,
-            ),
-        )
-    return InlineKeyboardMarkup(inline_keyboard=[row])
-
-
-@admin_router.message(Command("img"))
-async def cmd_img(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
-
-
-@admin_router.callback_query(F.data.startswith("img:pet:"))
-async def img_choose_pet(callback: CallbackQuery, state: FSMContext):
-    pet_key = callback.data.split(":")[2]
-    if pet_key not in IMG_TARGETS:
-        await callback.answer("Неизвестная цель", show_alert=True)
-        return
-
-    await state.set_state(ImgStates.waiting_photo)
-    await state.update_data(pet_key=pet_key)
-    await callback.message.edit_text(
-        f"<b>{IMG_TARGETS[pet_key]}</b>\n\n"
-        "<i>Отправь фото одним сообщением (как фото, не файлом).</i>",
-        reply_markup=img_prompt_kb(pet_key),
-    )
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data == "img:cancel")
-async def img_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(IMG_MENU_TEXT, reply_markup=img_pets_kb())
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.startswith("img:del:"))
-async def img_delete(callback: CallbackQuery, state: FSMContext):
-    pet_key = callback.data.split(":")[2]
-    pet_images.pop(pet_key, None)
-    save_images()
-    await state.clear()
-    await callback.message.edit_text(IMG_MENU_TEXT, reply_markup=img_pets_kb())
-    await callback.answer("Фото удалено")
-
-
-@admin_router.message(ImgStates.waiting_photo, F.photo)
-async def img_receive(message: Message, state: FSMContext):
-    data = await state.get_data()
-    pet_key = data.get("pet_key")
-    if pet_key not in IMG_TARGETS:
-        await state.clear()
-        return
-
-    # Берём самое большое разрешение
-    pet_images[pet_key] = message.photo[-1].file_id
-    save_images()
-    await state.clear()
-
-    await message.answer(f"<b>Фото для «{IMG_TARGETS[pet_key]}» сохранено</b>")
-    # Предпросмотр без кнопок
-    if pet_key in PETS:
-        await send_pet_card(message.bot, message.chat.id, pet_key, preview=True)
-    elif pet_key == "welcome":
-        await send_screen(message.bot, message.chat.id, "welcome", WELCOME_TEXT)
-    elif pet_key == "menu":
-        await send_rich_card(
-            message.bot,
-            message.chat.id,
-            "menu",
-            lambda with_image: menu_html(message.from_user.id, with_image),
-        )
-    elif pet_key in mine.IMG_TARGETS:
-        await mine.send_preview(
-            message.bot, message.chat.id, message.from_user.id, pet_key
-        )
-    elif pet_key in boss.IMG_TARGETS:
-        await boss.send_preview(
-            message.bot, message.chat.id, message.from_user.id, pet_key
-        )
-    elif pet_key in cases.IMG_TARGETS:
-        await cases.send_preview(
-            message.bot, message.chat.id, message.from_user.id, pet_key
-        )
-    elif pet_key in equipment.IMG_TARGETS:
-        await equipment.send_preview(
-            message.bot, message.chat.id, message.from_user.id, pet_key
-        )
-    elif pet_key == "stock":
-        await send_rich_card(
-            message.bot,
-            message.chat.id,
-            "stock",
-            lambda with_image: stock_html(message.from_user.id, with_image),
-        )
-    else:
-        await send_screen(message.bot, message.chat.id, "pets_list", PETS_LIST_TEXT)
-    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
-
-
-@admin_router.message(ImgStates.waiting_photo)
-async def img_not_photo(message: Message):
-    await message.answer("<i>Нужно отправить именно фото. Или нажми «Отмена».</i>")
-
-
-# ---------- Админка: /admin ----------
-#
-# /admin -> «Выдача» -> что выдать (фрагменты, монеты, фрукты, мясо)
-#        -> кому (по юзернейму или по Telegram ID) -> сколько.
-# Юзернейм бот запоминает сам, когда игрок пишет боту или нажимает кнопку
-# (поле "username" в users.json), поэтому по юзернейму находятся только те, кто
-# заходил в бота после этого обновления. По ID находится любой игрок с питомцем.
-
-MAX_GIVE = 10**12   # за одну выдачу не больше этого количества
-
-
-async def remember_username(handler, event, data):
-    """Запоминаем актуальный юзернейм игрока, чтобы можно было выдавать по нему."""
-    tg_user = getattr(event, "from_user", None)
-    user = users.get(str(tg_user.id)) if tg_user else None
-    if user is not None and user.get("username") != tg_user.username:
-        if tg_user.username:
-            user["username"] = tg_user.username
-        else:
-            user.pop("username", None)
-        save_users()
-    return await handler(event, data)
-
+# Бан, технические работы и учёт игроков (юзернейм, последний визит): до Guard
+admin.install(dp)
 
 # Защита обработчиков (guard.py): антифлуд и очередь на игрока, чтобы частые нажатия
 # не приводили к двойным тратам и двойным наградам; глобальный обработчик ошибок.
@@ -889,267 +747,7 @@ dp.message.outer_middleware(guard)
 dp.callback_query.outer_middleware(guard)
 dp.errors.register(on_error)
 
-dp.message.outer_middleware(remember_username)
-dp.callback_query.outer_middleware(remember_username)
-
-
-class GiveStates(StatesGroup):
-    waiting_target = State()   # ждём юзернейм или ID
-    waiting_amount = State()   # ждём количество
-
-
-# Что можно выдать: ключ -> (название, поле игрока)
-GIVE_RESOURCES: dict[str, tuple[str, str]] = {
-    "fragments": ("Фрагменты", "fragments"),
-    "coins": ("Монеты", "coins"),
-    "fruit": ("Фрукты", "fruit"),
-    "meat": ("Мясо", "meat"),
-}
-
-
-def give_icon(res: str) -> str:
-    """Значок ресурса в тексте."""
-    return {
-        "fragments": cases.FRAG,
-        "coins": custom_emoji(COIN_EMOJI),
-        "fruit": FRUIT_EMOJI,
-        "meat": MEAT_EMOJI,
-    }[res]
-
-
-def give_balance(user: dict, res: str) -> int:
-    if res == "fragments":
-        return cases.fragments_of(user)
-    return int(user.get(GIVE_RESOURCES[res][1], 0))
-
-
-def find_player(kind: str, raw: str) -> tuple[str, dict] | None:
-    """Ищет игрока по Telegram ID (kind == "id") или по юзернейму (kind == "name").
-    Возвращает (id, данные игрока) или None."""
-    raw = raw.strip()
-    if kind == "id":
-        if not raw.isdigit() or len(raw) > 15:
-            return None
-        user = users.get(str(int(raw)))
-        return (str(int(raw)), user) if user is not None else None
-    name = raw.rsplit("/", 1)[-1].lstrip("@").lower()   # принимаем и @name, и t.me/name
-    if not name:
-        return None
-    return store.find_by_username(name)
-
-
-def player_label(uid: str, user: dict) -> str:
-    pet = PETS.get(user.get("pet"), {}).get("name")
-    who = f"@{escape(user['username'])}" if user.get("username") else "без юзернейма"
-    return f"{who} · ID <code>{uid}</code>" + (f" · {escape(pet)}" if pet else "")
-
-
-def give_resource(user: dict, res: str, amount: int,
-                  admin_id: int | None = None, uid: str | None = None) -> None:
-    """Начисляет ресурс игроку, пишет операцию в audit.log и сразу сохраняет данные на диск."""
-    field = GIVE_RESOURCES[res][1]
-    before = give_balance(user, res)
-    user[field] = before + amount
-    ledger("admin_give", admin=admin_id, uid=uid, res=res, amount=amount,
-           before=before, after=user[field])
-    store.flush()   # выдачу пишем сразу, не дожидаясь пачки
-
-
-def _adm_btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY,
-             emoji_id: str | None = None) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=text, callback_data=data, style=style, icon_custom_emoji_id=emoji_id
-    )
-
-
-def _adm_back(data: str) -> list[InlineKeyboardButton]:
-    return [_adm_btn("Назад", data, ButtonStyle.PRIMARY, BACK_EMOJI_ID)]
-
-
-ADMIN_TEXT = "<b>Админ-панель</b>\n\n<i>Выбери раздел.</i>"
-GIVE_TEXT = "<b>Выдача</b>\n\n<i>Что выдать игроку?</i>"
-
-
-def admin_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_adm_btn("Выдача", "adm:give", ButtonStyle.SUCCESS)]]
-    )
-
-
-def give_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                _adm_btn(f"{cases.FRAG} Фрагменты", "adm:res:fragments", ButtonStyle.SUCCESS),
-                _adm_btn("Монеты", "adm:res:coins", ButtonStyle.SUCCESS, COIN_EMOJI[0]),
-            ],
-            [
-                _adm_btn(f"{FRUIT_EMOJI} Фрукты", "adm:res:fruit", ButtonStyle.SUCCESS),
-                _adm_btn(f"{MEAT_EMOJI} Мясо", "adm:res:meat", ButtonStyle.SUCCESS),
-            ],
-            _adm_back("adm:main"),
-        ]
-    )
-
-
-def method_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                _adm_btn("По юзернейму", "adm:by:name", ButtonStyle.SUCCESS),
-                _adm_btn("По Telegram ID", "adm:by:id", ButtonStyle.SUCCESS),
-            ],
-            _adm_back("adm:give"),
-        ]
-    )
-
-
-def cancel_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[_adm_btn("Отмена", "adm:main", ButtonStyle.DANGER)]]
-    )
-
-
-def after_give_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_adm_btn("Выдать ещё", "adm:give", ButtonStyle.SUCCESS)],
-            [_adm_btn("Админ-панель", "adm:main", ButtonStyle.PRIMARY)],
-        ]
-    )
-
-
-@admin_router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer(ADMIN_TEXT, reply_markup=admin_kb())
-
-
-@admin_router.callback_query(F.data == "adm:main")
-async def adm_main(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(ADMIN_TEXT, reply_markup=admin_kb())
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data == "adm:give")
-async def adm_give(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(GIVE_TEXT, reply_markup=give_kb())
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.regexp(r"^adm:res:\w+$"))
-async def adm_choose_resource(callback: CallbackQuery, state: FSMContext):
-    res = callback.data.split(":")[2]
-    if res not in GIVE_RESOURCES:
-        await callback.answer("Неизвестный ресурс", show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(res=res)
-    await callback.message.edit_text(
-        f"<b>Выдача: {give_icon(res)} {GIVE_RESOURCES[res][0]}</b>\n\n"
-        "<i>Как найти игрока?</i>",
-        reply_markup=method_kb(),
-    )
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.regexp(r"^adm:by:(name|id)$"))
-async def adm_choose_method(callback: CallbackQuery, state: FSMContext):
-    kind = callback.data.split(":")[2]
-    data = await state.get_data()
-    res = data.get("res")
-    if res not in GIVE_RESOURCES:  # состояние потерялось (например, перезапуск бота)
-        await state.clear()
-        await callback.message.edit_text(GIVE_TEXT, reply_markup=give_kb())
-        await callback.answer("Начни заново")
-        return
-    await state.set_state(GiveStates.waiting_target)
-    await state.update_data(kind=kind)
-    ask = (
-        "Отправь юзернейм игрока, например <code>@username</code>."
-        if kind == "name" else "Отправь Telegram ID игрока, только цифры."
-    )
-    await callback.message.edit_text(
-        f"<b>Выдача: {give_icon(res)} {GIVE_RESOURCES[res][0]}</b>\n\n<i>{ask}</i>",
-        reply_markup=cancel_kb(),
-    )
-    await callback.answer()
-
-
-@admin_router.message(GiveStates.waiting_target, F.text, ~F.text.startswith("/"))
-async def give_receive_target(message: Message, state: FSMContext):
-    data = await state.get_data()
-    kind, res = data.get("kind"), data.get("res")
-    if kind not in ("name", "id") or res not in GIVE_RESOURCES:
-        await state.clear()
-        await message.answer(ADMIN_TEXT, reply_markup=admin_kb())
-        return
-
-    found = find_player(kind, message.text)
-    if found is None:
-        hint = (
-            "Игрок с таким ID не найден. Он должен был выбрать питомца (/start)."
-            if kind == "id" else
-            "Игрок с таким юзернеймом не найден. Бот запоминает юзернейм, когда игрок "
-            "пишет боту или нажимает кнопку, так что если он давно не заходил, "
-            "выдай по ID."
-        )
-        await message.answer(f"<i>{hint}\nПопробуй ещё раз или нажми «Отмена».</i>",
-                             reply_markup=cancel_kb())
-        return
-
-    uid, user = found
-    await state.set_state(GiveStates.waiting_amount)
-    await state.update_data(uid=uid)
-    await message.answer(
-        f"<b>Выдача: {give_icon(res)} {GIVE_RESOURCES[res][0]}</b>\n\n"
-        f"Игрок: {player_label(uid, user)}\n"
-        f"Сейчас у него: <b>{cases.fmt(give_balance(user, res))}</b>\n\n"
-        "<i>Сколько выдать? Отправь число.</i>",
-        reply_markup=cancel_kb(),
-    )
-
-
-@admin_router.message(GiveStates.waiting_amount, F.text, ~F.text.startswith("/"))
-async def give_receive_amount(message: Message, state: FSMContext):
-    data = await state.get_data()
-    res, uid = data.get("res"), data.get("uid")
-    user = users.get(str(uid))
-    if res not in GIVE_RESOURCES or user is None:
-        await state.clear()
-        await message.answer(ADMIN_TEXT, reply_markup=admin_kb())
-        return
-
-    raw = message.text.replace(" ", "").replace("_", "")
-    if not raw.isdigit() or len(raw) > 15 or not 1 <= int(raw) <= MAX_GIVE:
-        await message.answer(
-            f"<i>Нужно целое число от 1 до {cases.fmt(MAX_GIVE)}. "
-            "Попробуй ещё раз или нажми «Отмена».</i>",
-            reply_markup=cancel_kb(),
-        )
-        return
-
-    amount = int(raw)
-    give_resource(user, res, amount, admin_id=message.from_user.id, uid=uid)
-    await state.clear()
-    await message.answer(
-        "<b>Выдано</b>\n\n"
-        f"{give_icon(res)} +{cases.fmt(amount)} {GIVE_RESOURCES[res][0].lower()}\n"
-        f"Игрок: {player_label(uid, user)}\n"
-        f"Теперь у него: <b>{cases.fmt(give_balance(user, res))}</b>",
-        reply_markup=after_give_kb(),
-    )
-
-
-@admin_router.message(GiveStates.waiting_target, ~F.text.startswith("/"))
-@admin_router.message(GiveStates.waiting_amount, ~F.text.startswith("/"))
-async def give_not_text(message: Message):
-    await message.answer("<i>Нужно отправить текстом. Или нажми «Отмена».</i>")
-
-
-dp.include_router(admin_router)
+dp.include_router(admin.router)
 
 # Раздел «Шахты» живёт в mine.py; ему передаём нужные функции и эмодзи
 mine.setup(
@@ -1540,37 +1138,6 @@ async def on_upgrade_back(callback: CallbackQuery):
         user["pet"],
         lambda with_image: profile_html(callback.from_user.id, with_image),
         profile_kb(),
-    )
-
-
-@admin_router.message(Command("give"))
-async def cmd_give(message: Message):
-    """/give <мясо> <фрукты> [монеты] — выдать себе ресурсы для теста."""
-    user = get_user(message.from_user.id)
-    if user is None:
-        await message.answer("<i>Сначала выбери питомца: /start</i>")
-        return
-    parts = (message.text or "").split()[1:]
-    try:
-        meat, fruit = int(parts[0]), int(parts[1])
-        coins = int(parts[2]) if len(parts) > 2 else 0
-    except (IndexError, ValueError):
-        await message.answer(
-            "<i>Формат: /give 5 5 50 (мясо, фрукты, монеты)</i>"
-        )
-        return
-    if any(not 0 <= v <= MAX_GIVE for v in (meat, fruit, coins)):
-        await message.answer(f"<i>Числа должны быть от 0 до {cases.fmt(MAX_GIVE)}.</i>")
-        return
-    user["meat"] += meat
-    user["fruit"] += fruit
-    user["coins"] += coins
-    ledger("admin_give_self", admin=message.from_user.id, meat=meat, fruit=fruit, coins=coins)
-    store.flush()
-    await message.answer(
-        "<b>Выдано</b>\n"
-        f"{custom_emoji(COIN_EMOJI)} +{coins}  {MEAT_EMOJI} +{meat}  "
-        f"{FRUIT_EMOJI} +{fruit}"
     )
 
 
