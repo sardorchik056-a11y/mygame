@@ -67,9 +67,19 @@ ARROW_NEXT_ID = "5253767677670862169"   # стрелка «вперёд»
 # Кастомные эмодзи на кнопках раздела
 ICON_SEND = "5974540576660393791"   # «Отправить в экспедицию»
 ICON_SWAP = "5206218803406456374"   # «Сменить отряд»
-ICON_HIRE = "6033108709213736873"   # «Нанять отряд»
+ICON_HIRE = "5440457429147997980"   # «Нанять отряд»
 ICON_TIME = "5891211339170326418"   # «Время»
 ICON_LOG = "5393180920234647059"    # «Журнал»
+
+# Кастомные эмодзи в тексте: (id, запасной обычный эмодзи)
+EXPLORE_EMOJI = ("5235794253149394263", "🗺")   # раздел «Исследование» (кнопка в меню и заголовок)
+EM_HIRE = ("5440457429147997980", "🫴")         # найм
+EM_RANK = ("5332415533952289417", "⭐")          # ранг
+EM_LEVEL = ("5408869739982246969", "⭐")         # уровень
+EM_STATUS = ("5325905536057615182", "🧘‍♀️")      # статус
+EM_TITLE = ("5424746623462823358", "🏅")        # звание
+EM_STREAK = ("5424972470023104089", "🔥")       # серия
+EM_SQUADS = ("6032594876506312598", "👥")       # отряды
 
 # Уровни отрядов: накопленный опыт (опыт = часы экспедиций). Каждый уровень +5% к добыче
 # и +4% к шансу артефакта (относительно).
@@ -410,6 +420,10 @@ def setup(
 
 def _num(n: int | float) -> str:
     return f"{int(n):,}".replace(",", " ")
+
+
+def _em(pair: tuple[str, str]) -> str:
+    return _custom_emoji(pair)
 
 
 def _coin() -> str:
@@ -769,8 +783,8 @@ def _loot_rows(gi: int, hours: int, level: int, bon: dict | None = None) -> list
 def _level_line(ex: dict, key: str) -> str:
     lvl, cur, need = _level_info(ex["xp"].get(key, 0))
     if need is None:
-        return f"⭐ Уровень {lvl} (максимум)"
-    return f"⭐ Уровень {lvl} · {_bar(cur, need, 8)} · {cur}/{need} опыта"
+        return f"{_em(EM_LEVEL)} Уровень {lvl} (максимум)"
+    return f"{_em(EM_LEVEL)} Уровень {lvl} · {_bar(cur, need, 8)} · {cur}/{need} опыта"
 
 
 def main_html(user: dict, with_image: bool = False) -> str:
@@ -787,23 +801,23 @@ def main_html(user: dict, with_image: bool = False) -> str:
     busy = _busy(ex)
 
     squad = [
-        ("🎖 Ранг", _rank_stars(gi)),
-        ("⭐ Уровень", f"{lvl} · +{int(LEVEL_LOOT_BONUS * (lvl - 1) * 100)}% к добыче"),
+        (f"{_em(EM_RANK)} Ранг", _rank_stars(gi)),
+        (f"{_em(EM_LEVEL)} Уровень", f"{lvl} · +{int(LEVEL_LOOT_BONUS * (lvl - 1) * 100)}% к добыче"),
     ]
     if code == "going":
         trip = ex["trips"][g["key"]]
         squad += [
-            ("📍 Статус", "⏳ в пути"),
+            (f"{_em(EM_STATUS)} Статус", "⏳ в пути"),
             ("🧭 Экспедиция", f"{trip['hours']} ч"),
             ("📊 Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
             ("⏱ Вернутся через", _dur(trip["end"] - now)),
         ]
         hint = ""
     elif code == "ready":
-        squad.append(("📍 Статус", "✅ вернулся с добычей"))
+        squad.append((f"{_em(EM_STATUS)} Статус", "✅ вернулся с добычей"))
         hint = "<i>Добыча сложена у входа в лагерь. Осталось её забрать.</i>"
     else:
-        squad.append(("📍 Статус", "💤 отдыхает в лагере"))
+        squad.append((f"{_em(EM_STATUS)} Статус", "💤 отдыхает в лагере"))
         if busy:
             other = BY_KEY[busy]
             hint = (f"<i>В экспедиции сейчас {other['icon']} {other['name']}. "
@@ -812,14 +826,14 @@ def main_html(user: dict, with_image: bool = False) -> str:
             hint = "<i>Отряд отдохнул и готов к походу. Чем дольше путь, тем щедрее награда.</i>"
 
     player = [
-        ("🏅 Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
-        ("🔥 Серия", f"{streak} дн." + (f" · +{bonus_pct}% к добыче" if bonus_pct else " · зайди завтра за бонусом")),
-        ("👥 Отрядов", f"{len(ex['hired'])} из {len(GROUPS)}"),
+        (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
+        (f"{_em(EM_STREAK)} Серия", f"{streak} дн." + (f" · +{bonus_pct}% к добыче" if bonus_pct else " · зайди завтра за бонусом")),
+        (f"{_em(EM_SQUADS)} Отрядов", f"{len(ex['hired'])} из {len(GROUPS)}"),
         ("🎒 Артефакты", f"надето {len(ex['worn'])} из {SLOTS}"),
     ]
     return (
         f"{_image(with_image)}"
-        "<p><b>🧭 ИССЛЕДОВАТЕЛИ</b></p>"
+        f"<p><b>{_em(EXPLORE_EMOJI)} ИССЛЕДОВАТЕЛИ</b></p>"
         "<blockquote><i>За краем карты лежат забытые руины и пещеры, полные золота. "
         "Веди отряды в путь: каждая дорога приносит добычу, опыт и новые истории.</i></blockquote>"
         + _tree(squad, f"{g['icon']} {g['name']}")
@@ -892,7 +906,7 @@ def list_html(user: dict, page: int = 0, with_image: bool = False) -> str:
     page = max(0, min(page, _pages() - 1))
     return (
         f"{_image(with_image)}"
-        f"<p><b>➕ НАЙМ ИССЛЕДОВАТЕЛЕЙ</b> · страница {page + 1} из {_pages()}</p>"
+        f"<p><b>{_em(EM_HIRE)} НАЙМ ИССЛЕДОВАТЕЛЕЙ</b> · страница {page + 1} из {_pages()}</p>"
         f"<blockquote><i>{random.choice(SCENES)}</i></blockquote>"
         + _p(
             "<b>Выбери отряд, чтобы узнать о нём подробнее.</b>",
@@ -900,7 +914,7 @@ def list_html(user: dict, page: int = 0, with_image: bool = False) -> str:
         )
         + _p(
             f"<b>{_info()} Твои монеты: {_num(user['coins'])} {_coin()}</b>",
-            f"<b>👥 Нанято отрядов: {len(ex['hired'])} из {len(GROUPS)}</b>",
+            f"<b>{_em(EM_SQUADS)} Нанято отрядов: {len(ex['hired'])} из {len(GROUPS)}</b>",
         )
     )
 
@@ -945,11 +959,11 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     else:
         price = "нанят ✅"
     stats = [
-        ("🎖 Ранг", _rank_stars(gi)),
-        ("💰 Найм", price),
+        (f"{_em(EM_RANK)} Ранг", _rank_stars(gi)),
+        (f"{_em(EM_HIRE)} Найм", price),
     ]
     if code != "locked":
-        stats.append(("⭐ Уровень", str(lvl)))
+        stats.append((f"{_em(EM_LEVEL)} Уровень", str(lvl)))
     stats += [
         (f"💎 Шанс артефакта за {h0} ч", f"{art_chance(gi, h0, lvl, 1.0, bon['art']) * 100:.1f}%"),
         ("✨ Редкость находок", f"до «{escape(_tier_name(cap))}»"),
@@ -967,7 +981,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
         return head + _gap() + _tree([
             ("Цена найма", f"{_num(g['price'])} {_coin()}"),
             ("У тебя", f"{_num(user['coins'])} {_coin()}"),
-        ], f"{_info()} Найм")
+        ], f"{_em(EM_HIRE)} Найм")
     if code == "idle":
         busy = _busy(ex)
         if busy:
@@ -1107,8 +1121,8 @@ def log_html(user: dict, with_image: bool = False) -> str:
         "<p><b>📜 ЖУРНАЛ ИССЛЕДОВАТЕЛЯ</b></p>"
         "<blockquote><i>Каждый поход становится строкой в истории. Пусть эта книга будет толстой.</i></blockquote>"
         + _tree([
-            ("🏅 Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
-            ("🔥 Серия", f"{streak} дн."),
+            (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
+            (f"{_em(EM_STREAK)} Серия", f"{streak} дн."),
         ], "Исследователь")
         + _gap()
         + _tree([
@@ -1141,9 +1155,9 @@ def loot_html(gi: int, hours: int, loot: dict, art, is_new: bool, dup: int, info
     text += _tree(rows, "Трофеи")
     summary = [("⏱ Экспедиция", f"{hours} ч"), ("✨ Опыт отряда", f"+{loot['xp']}")]
     if info["level_bonus"]:
-        summary.append(("⭐ Бонус уровня отряда", f"+{info['level_bonus']}%"))
+        summary.append((f"{_em(EM_LEVEL)} Бонус уровня отряда", f"+{info['level_bonus']}%"))
     if info["streak_bonus"]:
-        summary.append((f"🔥 Бонус серии ({info['streak']} дн.)", f"+{info['streak_bonus']}%"))
+        summary.append((f"{_em(EM_STREAK)} Бонус серии ({info['streak']} дн.)", f"+{info['streak_bonus']}%"))
     for kind, pct in info.get("art_bonus", {}).items():
         if pct and kind != "time":
             summary.append((f"🎒 {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct)))
