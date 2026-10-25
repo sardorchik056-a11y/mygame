@@ -15,6 +15,12 @@
 выше шанс артефакта и события, быстрее опыт, короче путь. Из экспедиций выпадают артефакты
 до мифической редкости, а легендарные можно получить только из сундуков «Сокровищницы».
 
+Защита и слежка: каждый вход игрока в раздел проходит проверку данных (_sanitize), которая
+чинит повреждённые или подделанные значения и пишет об этом в audit.log. Все денежные и
+игровые действия (найм, открытие времени, отправка, получение добычи) тоже пишутся в audit.log
+событиями exrn_*, а подозрительные случаи событием exrn_suspicious. Параллельные нажатия
+одного игрока выстраивает в очередь Guard (guard.py).
+
 Данные игрока лежат в user["exrn"]:
     {"hired": [ключи нанятых групп], "sel": ключ выбранного отряда,
      "times": [открытые длительности в часах],
@@ -35,6 +41,20 @@ from html import escape
 from aiogram import F, Router
 from aiogram.enums import ButtonStyle
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+
+try:                                    # журнал операций (audit.log), как в остальных разделах
+    from storage import ledger as _ledger
+except ImportError:                     # на случай запуска модуля отдельно
+    _ledger = None
+
+
+def _led(name: str, /, **fields) -> None:
+    if _ledger is None:
+        return
+    try:
+        _ledger(name, **fields)
+    except Exception:
+        log.exception("не удалось записать в audit.log: %s", name)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -730,6 +750,187 @@ def result_block(a: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Защита данных, слежка и инструменты админа
+# ---------------------------------------------------------------------------
+
+def _int_ge0(value, cap: int = 10**9) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(n, cap))
+
+
+def _sanitize(user: dict, uid) -> list[str]:
+    """Проверяет и чинит user["exrn"]. Вызывается при входе игрока в раздел.
+    Возвращает список исправлений (и пишет их в audit.log)."""
+    ex = user.get("exrn")
+    if not isinstance(ex, dict):
+        return []
+    fixes: list[str] = []
+    now = time.time()
+
+    def uniq(value, valid) -> list[str]:
+        out: list[str] = []
+        for k in value if isinstance(value, list) else []:
+            if isinstance(k, str) and k in valid and k not in out:
+                out.append(k)
+        return out
+
+    hired = uniq(ex.get("hired"), BY_KEY)
+    if GROUPS[0]["key"] not in hired:
+        hired.insert(0, GROUPS[0]["key"])
+    if hired != ex.get("hired"):
+        fixes.append("hired")
+        ex["hired"] = hired
+
+    times = sorted({t for t in (ex.get("times") if isinstance(ex.get("times"), list) else [])
+                    if isinstance(t, int) and not isinstance(t, bool) and t in DURATIONS} | {DURATIONS[0]})
+    if times != ex.get("times"):
+        fixes.append("times")
+        ex["times"] = times
+
+    # Экспедиции: только у нанятых, длительность из списка, сроки в разумных пределах,
+    # в пути не больше одного отряда.
+    raw_trips = ex.get("trips") if isinstance(ex.get("trips"), dict) else {}
+    clean: dict[str, dict] = {}
+    for key, t in raw_trips.items():
+        if key not in hired or not isinstance(t, dict):
+            fixes.append(f"trip:{key}")
+            continue
+        try:
+            start, end, hours = float(t["start"]), float(t["end"]), int(t["hours"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            fixes.append(f"trip:{key}")
+            continue
+        if hours not in DURATIONS:
+            fixes.append(f"trip_hours:{key}")
+            continue
+        full = hours * 3600
+        shortest = full * (1 - MAX_TIME_CUT / 100)
+        changed = False
+        if not math.isfinite(start) or start > now + 60:
+            start, changed = now, True
+        if not math.isfinite(end) or end - start > full + 60:
+            end, changed = start + full, True
+        if end - start < shortest - 60:
+            end, changed = start + shortest, True
+        if changed:
+            fixes.append(f"trip_time:{key}")
+        clean[key] = {"start": start, "end": end, "hours": hours}
+    if len(clean) > 1:
+        keep = min(clean, key=lambda k: clean[k]["start"])
+        fixes.append("trips_many:" + ",".join(k for k in clean if k != keep))
+        clean = {keep: clean[keep]}
+    if clean != raw_trips:
+        ex["trips"] = clean
+
+    raw_xp = ex.get("xp") if isinstance(ex.get("xp"), dict) else {}
+    xp = {k: _int_ge0(v, 10**7) for k, v in raw_xp.items() if k in BY_KEY}
+    if xp != raw_xp:
+        fixes.append("xp")
+        ex["xp"] = xp
+
+    raw_stats = ex.get("stats") if isinstance(ex.get("stats"), dict) else {}
+    stats = {k: _int_ge0(raw_stats.get(k, 0), 10**12) for k in ("trips", "coins", "meat", "fruit", "arts")}
+    if any(raw_stats.get(k) != v for k, v in stats.items()):
+        fixes.append("stats")
+        ex["stats"] = stats
+
+    worn = uniq(ex.get("worn"), BY_ART)
+    if len(worn) > SLOTS:
+        worn = worn[:SLOTS]
+    arts = [k for k in uniq(ex.get("arts"), BY_ART) if k not in worn]
+    if worn != ex.get("worn") or arts != ex.get("arts"):
+        fixes.append("artifacts")
+        ex["worn"], ex["arts"] = worn, arts
+
+    streak = _int_ge0(ex.get("streak", 0), 3650)
+    if streak != ex.get("streak", 0):
+        fixes.append("streak")
+        ex["streak"] = streak
+    last = ex.get("last_day")
+    if last is not None:
+        try:
+            time.strptime(last, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            fixes.append("last_day")
+            ex.pop("last_day", None)
+
+    raw_log = ex.get("log") if isinstance(ex.get("log"), list) else []
+    clean_log = [
+        e for e in raw_log
+        if isinstance(e, dict) and isinstance(e.get("gi"), int) and 0 <= e["gi"] < len(GROUPS)
+        and isinstance(e.get("hours"), int) and isinstance(e.get("coins"), int)
+    ][-5:]
+    if clean_log != raw_log:
+        fixes.append("log")
+        ex["log"] = clean_log
+
+    if fixes:
+        log.warning("исправлены данные исследователей игрока %s: %s", uid, fixes)
+        _led("exrn_integrity_fix", uid=str(uid), fixes=",".join(fixes))
+    return fixes
+
+
+def _max_loot(gi: int, hours: int, kind: str, level: int, streak_bonus: float, bon: dict) -> int:
+    """Наибольшее значение добычи, которое вообще возможно (для проверки на подлог)."""
+    rate = GROUPS[gi][f"{kind}_h"]
+    ev = max((e.get("all", 1.0) * e.get(kind, 1.0) for e in EVENTS), default=1.0)
+    mult = (DURATION_BONUS.get(hours, 1.0) * (1 + LEVEL_LOOT_BONUS * (level - 1))
+            * (1 + streak_bonus) * (1 + (bon.get("loot", 0) + bon.get(kind, 0)) / 100) * ev)
+    return int(math.ceil(rate * hours * mult * SPREAD[1])) + 1
+
+
+def admin_lines(user: dict) -> list[str]:
+    """Строки для карточки игрока в админке."""
+    ex = user.get("exrn")
+    if not isinstance(ex, dict):
+        return ["Исследователи: <i>ещё не открывал</i>"]
+    ex = _state(user)
+    now = time.time()
+    lines = [
+        f"Исследователи: отрядов <b>{len(ex['hired'])}/{len(GROUPS)}</b> · экспедиций "
+        f"<b>{_num(ex['stats']['trips'])}</b> · серия <b>{_streak_now(ex)}</b> дн.",
+    ]
+    for key, trip in ex["trips"].items():
+        g = BY_KEY.get(key)
+        if g is None:
+            continue
+        if now >= trip["end"]:
+            lines.append(f"В экспедиции: {g['icon']} {g['name']} ({trip['hours']} ч): <b>вернулся, добыча не забрана</b>")
+        else:
+            lines.append(f"В экспедиции: {g['icon']} {g['name']} ({trip['hours']} ч): ещё <b>{_dur(trip['end'] - now)}</b>")
+    lines.append(
+        f"Найдено: монет <b>{_num(ex['stats']['coins'])}</b> · мяса <b>{_num(ex['stats']['meat'])}</b> · "
+        f"фруктов <b>{_num(ex['stats']['fruit'])}</b>"
+    )
+    return lines
+
+
+def admin_finish(user: dict) -> int:
+    """Завершает все экспедиции игрока (добычу он забирает сам). Возвращает их число."""
+    ex = user.get("exrn")
+    if not isinstance(ex, dict):
+        return 0
+    n = 0
+    now = time.time()
+    for trip in (ex.get("trips") or {}).values():
+        if isinstance(trip, dict) and trip.get("end", 0) > now:
+            # Сдвигаем и начало, чтобы запись осталась «законной» (проверка не вернёт срок назад)
+            shortest = trip.get("hours", DURATIONS[0]) * 3600 * (1 - MAX_TIME_CUT / 100)
+            trip["start"] = min(trip.get("start", now), now - shortest)
+            trip["end"] = now
+            n += 1
+    return n
+
+
+def admin_reset(user: dict) -> dict | None:
+    """Полностью сбрасывает раздел игрока. Возвращает прежние данные (для audit.log)."""
+    return user.pop("exrn", None)
+
+
+# ---------------------------------------------------------------------------
 # Добыча
 # ---------------------------------------------------------------------------
 
@@ -1320,6 +1521,7 @@ async def _need_user(callback: CallbackQuery):
         await callback.answer("Сначала выбери питомца: /start", show_alert=True)
         return None
     _state(user)
+    _sanitize(user, callback.from_user.id)
     return user
 
 
@@ -1433,6 +1635,8 @@ async def on_buy(callback: CallbackQuery):
         ex["hired"].append(g["key"])
         ex["sel"] = g["key"]
         _save_users()
+        _led("exrn_hire", uid=str(callback.from_user.id), group=g["key"], price=g["price"],
+             coins_left=user["coins"])
         await callback.answer(f"{g['name']} теперь служат тебе!", show_alert=True)
     await _show(callback, lambda wi: group_html(user, gi, wi), group_kb(user, gi))
 
@@ -1467,6 +1671,7 @@ async def on_go(callback: CallbackQuery):
         ex["trips"][g["key"]] = {"start": now, "end": now + real, "hours": hours}
         ex["sel"] = g["key"]
         _save_users()
+        _led("exrn_go", uid=str(callback.from_user.id), group=g["key"], hours=hours, cut=cut)
         note = f" Артефакты сократили путь до {_dur(real)}." if cut else ""
         await callback.answer(f"{g['name']} отправились в путь на {hours} ч!{note}")
         await _show_main(callback, user)
@@ -1515,7 +1720,16 @@ async def on_take(callback: CallbackQuery):
     old_rank = _rank_title(ex["stats"]["trips"])[0]
 
     bon = bonuses(user)
+    elapsed = time.time() - trip["start"]
+    if elapsed < hours * 3600 * (1 - MAX_TIME_CUT / 100) - 60:
+        _led("exrn_suspicious", uid=str(callback.from_user.id), reason="claimed_early",
+             group=g["key"], hours=hours, elapsed=int(elapsed))
     loot = roll_trip(gi, hours, old_level, sb, bon)
+    for kind in ("coins", "meat", "fruit"):
+        limit = _max_loot(gi, hours, kind, old_level, sb, bon)
+        if loot[kind] > limit:
+            _led("exrn_suspicious", uid=str(callback.from_user.id), reason="loot_over_max",
+                 kind=kind, value=loot[kind], limit=limit, group=g["key"], hours=hours)
     user["coins"] += loot["coins"]
     user["meat"] += loot["meat"]
     user["fruit"] += loot["fruit"]
@@ -1541,6 +1755,10 @@ async def on_take(callback: CallbackQuery):
                       "ts": int(time.time())})
     del ex["log"][:-5]          # в журнале хранятся и показываются последние 5 походов
     _save_users()
+    _led("exrn_claim", uid=str(callback.from_user.id), group=g["key"], hours=hours,
+         coins=loot["coins"], meat=loot["meat"], fruit=loot["fruit"], xp=loot["xp"],
+         trip_event=(loot["event"] or {}).get("key"), art=(art or {}).get("key"), art_new=is_new,
+         dup_coins=dup, level=new_level, streak=streak, coins_total=user["coins"])
 
     info = {
         "old_level": old_level, "new_level": new_level,
@@ -1598,6 +1816,8 @@ async def on_time_buy(callback: CallbackQuery):
         ex["times"].append(nxt)
         ex["times"].sort()
         _save_users()
+        _led("exrn_time", uid=str(callback.from_user.id), hours=nxt, price=DURATION_PRICE[nxt],
+             coins_left=user["coins"])
         await callback.answer(f"Открыта экспедиция на {nxt} ч!", show_alert=True)
     await _show(callback, lambda wi: times_html(user, wi), times_kb(user))
 
