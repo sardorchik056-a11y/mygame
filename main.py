@@ -503,6 +503,7 @@ def stock_html(user_id: int | None = None, with_image: bool = False) -> str:
 
 
 TREASURY_EMOJI = ("6192975148681793540", "💰")  # кнопка «Сокровищница»
+STOCK_BTN_EMOJI = ("5854908544712707500", "📦")  # кнопка «Запасы»
 
 
 def menu_kb() -> InlineKeyboardMarkup:
@@ -516,7 +517,7 @@ def menu_kb() -> InlineKeyboardMarkup:
             # Главная кнопка на всю ширину, зелёная
             [btn("Мой питомец", "menu:pet", ButtonStyle.SUCCESS, PET_BTN_EMOJI[0])],
             [
-                btn("Запасы", "menu:stock", ButtonStyle.PRIMARY, COIN_EMOJI[0]),
+                btn("Запасы", "menu:stock", ButtonStyle.PRIMARY, STOCK_BTN_EMOJI[0]),
                 btn("Шахты", "menu:mine", ButtonStyle.PRIMARY, mine.MINE_EMOJI[0]),
             ],
             # Исследование на всю ширину, зелёная
