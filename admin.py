@@ -15,6 +15,8 @@
   * Боссы: состояние всех боссов, сброс отдельного босса или всех сразу, топ урона.
   * Журнал: последние записи audit.log, фильтр по игроку, выгрузка файла.
   * Управление: технические работы, бэкап базы, скачать базу и журнал.
+  * Исследователи: карточка игрока (отряды, экспедиции), завершение экспедиции, сброс раздела,
+    журнал событий и подозрительных случаев по разделу.
   * Реклама: рекламные ссылки (t.me/бот?start=ad_код), клики, уникальные, регистрации,
     активность и удержание по каждой ссылке, динамика по дням.
   * Изображения (/img): фото экранов, питомцев, шахт, боссов, сундуков.
@@ -998,6 +1000,8 @@ def card_text(uid: str, user: dict) -> str:
     else:
         lines += ["", "Шахта: <i>ещё не открывал</i>"]
 
+    lines += [""] + exrn.admin_lines(user)
+
     pet_keys = set(user.get("artifacts", [])) | set(user.get("equipment", []))
     mine_keys = set((m or {}).get("arts", [])) | set((m or {}).get("worn", [])) if isinstance(m, dict) else set()
     lines.append(
@@ -1035,6 +1039,8 @@ def card_kb(uid: str) -> InlineKeyboardMarkup:
         [_b("Написать", f"adm:ut:{uid}", G), _b("Вылечить питомца", f"adm:uh:{uid}", S)],
         [_b("Разбанить" if banned else "Забанить", f"adm:ub:{uid}", S if banned else R),
          _b("Сбросить шахту", f"adm:um:{uid}", R)],
+        [_b("Завершить экспедицию", f"adm:ux:{uid}", S),
+         _b("Сбросить исследователей", f"adm:ue:{uid}", R)],
         [_b("Удалить игрока", f"adm:ud:{uid}", R)],
         [_b("Обновить", f"adm:u:{uid}", G)],
         _back("adm:pl"),
@@ -1711,6 +1717,50 @@ async def adm_mine_reset(cb: CallbackQuery):
     user.pop("mine", None)
     D.store.flush()
     await cb.answer("Шахта сброшена")
+    await _show(cb, card_text(uid, user), card_kb(uid))
+
+
+@router.callback_query(F.data.regexp(r"^adm:ux:\d+$"))
+async def adm_exrn_finish(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    n = exrn.admin_finish(user)
+    if not n:
+        await cb.answer("У игрока нет экспедиции в пути", show_alert=True)
+        return
+    ledger("admin_exrn_finish", admin=cb.from_user.id, uid=uid, count=n)
+    D.store.flush()
+    await cb.answer("Экспедиция завершена: игрок может забрать добычу")
+    await _show(cb, card_text(uid, user), card_kb(uid))
+
+
+@router.callback_query(F.data.regexp(r"^adm:ue:\d+$"))
+async def adm_exrn_confirm(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    await _show(cb, f"<b>Сбросить исследователей?</b>\n\nИгрок: {player_label(uid, user)}\n"
+                    "<i>Нанятые отряды, уровни, экспедиции, артефакты исследователей, серия "
+                    "и журнал будут стёрты. Игрок получит базовый отряд. Копия данных "
+                    "останется в audit.log.</i>",
+                _confirm_kb(f"adm:uec:{uid}", f"adm:u:{uid}"))
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:uec:\d+$"))
+async def adm_exrn_reset(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    old = exrn.admin_reset(user)
+    ledger("admin_exrn_reset", admin=cb.from_user.id, uid=uid,
+           snapshot=json.dumps(old, ensure_ascii=False, default=str))
+    D.store.flush()
+    await cb.answer("Раздел исследователей сброшен")
     await _show(cb, card_text(uid, user), card_kb(uid))
 
 
@@ -2401,6 +2451,10 @@ EVENT_TITLES = {
     "admin_delete": "Удаление игрока", "admin_dm": "Сообщение игроку",
     "admin_boss_reset": "Сброс босса", "admin_boss_reset_type": "Сброс боссов вида",
     "admin_boss_stats_reset": "Сброс статистики боссов", "broadcast": "Рассылка",
+    "admin_exrn_reset": "Сброс исследователей", "admin_exrn_finish": "Завершение экспедиции",
+    "exrn_hire": "Найм отряда", "exrn_time": "Открытие времени", "exrn_go": "Отправка экспедиции",
+    "exrn_claim": "Добыча экспедиции", "exrn_integrity_fix": "Исправление данных исследователей",
+    "exrn_suspicious": "⚠ Подозрительно (исследователи)",
     "admin_maintenance": "Тех. работы", "admin_backup": "Бэкап",
     "integrity_fix": "Исправление данных", "integrity_huge": "Огромное значение",
     "flush_error": "Ошибка записи", "backup_error": "Ошибка бэкапа",
@@ -2457,9 +2511,36 @@ async def adm_log(cb: CallbackQuery, state: FSMContext):
     rows = [nav] if nav else []
     rows.append([_b("Фильтр по игроку", "adm:lgf", ButtonStyle.SUCCESS)]
                 + ([_b("Сбросить фильтр", "adm:lg:0:0", ButtonStyle.DANGER)] if uid != "0" else []))
-    rows.append([_b("Скачать audit.log", "adm:lgd", ButtonStyle.PRIMARY)])
+    rows.append([_b("Исследователи", "adm:lgx:0", ButtonStyle.PRIMARY),
+                 _b("Скачать audit.log", "adm:lgd", ButtonStyle.PRIMARY)])
     rows.append(_back())
     await _show(cb, text, _kb(*rows))
+    await cb.answer()
+
+
+EXRN_EVENT_PREFIXES = ("exrn_", "admin_exrn")
+EXRN_ALERT_EVENTS = ("exrn_suspicious", "exrn_integrity_fix")
+
+
+@router.callback_query(F.data.regexp(r"^adm:lgx:[01]$"))
+async def adm_log_exrn(cb: CallbackQuery):
+    """События раздела «Исследователи»: все или только подозрительные и исправления данных."""
+    only_alerts = cb.data.endswith(":1")
+    recs = await asyncio.to_thread(_read_log, "0", 4000)
+    recs = [r for r in recs if str(r.get("event", "")).startswith(EXRN_EVENT_PREFIXES)]
+    alerts = sum(1 for r in recs if r.get("event") in EXRN_ALERT_EVENTS)
+    if only_alerts:
+        recs = [r for r in recs if r.get("event") in EXRN_ALERT_EVENTS]
+    chunk = recs[:LOG_PAGE]
+    head = ("<b>Журнал · исследователи · подозрительные</b>" if only_alerts
+            else "<b>Журнал · исследователи</b>")
+    text = (head + f"\n<i>Подозрительных случаев и исправлений данных в журнале: {alerts}</i>\n\n"
+            + ("\n".join(_log_line(r) for r in chunk) if chunk else "<i>Записей нет.</i>"))
+    await _show(cb, text, _kb(
+        [_b("Все события", "adm:lgx:0", ButtonStyle.SUCCESS if only_alerts else ButtonStyle.PRIMARY),
+         _b("⚠ Подозрительные", "adm:lgx:1", ButtonStyle.DANGER if not only_alerts else ButtonStyle.PRIMARY)],
+        _back("adm:lg:0:0"),
+    ))
     await cb.answer()
 
 
@@ -2608,18 +2689,60 @@ class ImgStates(StatesGroup):
 
 
 IMG_MENU_TEXT = (
-    "<b>Изображения питомцев</b>\n\n"
-    "<i>Выбери, куда добавить или заменить фото: на приветствие, на экран "
-    "выбора питомцев, на меню, на запасы, на шахты или на карточку питомца. "
-    "Галочка значит, что фото уже есть.</i>"
+    "<b>Изображения</b>\n\n"
+    "<i>Выбери раздел бота, в котором нужно добавить или заменить фото. "
+    "Рядом с названием видно, у скольких экранов фото уже есть.</i>"
 )
 
 
-def img_pets_kb() -> InlineKeyboardMarkup:
+def _img_groups() -> list[tuple[str, str, list[str]]]:
+    """Экраны с фото, разложенные по разделам: (код, название, ключи)."""
+    all_keys = list(D.IMG_TARGETS)
+    general = [k for k in ("welcome", "pets_list", "menu", "stock") if k in D.IMG_TARGETS]
+    parts = [
+        ("g", "Общие экраны", general),
+        ("p", "Питомцы", [k for k in all_keys if k in D.PETS]),
+        ("q", "Снаряжение", [k for k in equipment.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("m", "Шахты", [k for k in mine.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("b", "Боссы", [k for k in boss.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("c", "Сокровищница", [k for k in cases.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("x", "Исследователи", [k for k in exrn.IMG_TARGETS if k in D.IMG_TARGETS]),
+    ]
+    placed = {k for _, _, keys in parts for k in keys}
+    rest = [k for k in all_keys if k not in placed]       # всё новое попадёт в «Общие»
+    if rest:
+        parts[0] = ("g", "Общие экраны", general + rest)
+    return [p for p in parts if p[2]]
+
+
+def _img_group_of(key: str) -> str:
+    for gid, _, keys in _img_groups():
+        if key in keys:
+            return gid
+    return "g"
+
+
+def img_cats_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for gid, title, keys in _img_groups():
+        done = sum(1 for k in keys if k in D.pet_images)
+        rows.append([_b(f"{title} · {done}/{len(keys)}", f"adm:imgc:{gid}",
+                        ButtonStyle.SUCCESS if done == len(keys) else ButtonStyle.PRIMARY)])
+    return _kb(*rows, _back())
+
+
+def img_group_text(gid: str) -> str:
+    title = next((t for g, t, _ in _img_groups() if g == gid), "Общие экраны")
+    return (f"<b>Изображения · {title}</b>\n\n"
+            "<i>Выбери экран, чтобы добавить или заменить фото. Галочка значит, что фото уже есть.</i>")
+
+
+def img_pets_kb(gid: str = "g") -> InlineKeyboardMarkup:
+    keys = next((ks for g, _, ks in _img_groups() if g == gid), [])
     return _kb(
-        *[[_b(f"{'✅' if key in D.pet_images else '➕'} {title}", f"img:pet:{key}")]
-          for key, title in D.IMG_TARGETS.items()],
-        _back(),
+        *[[_b(f"{'✅' if key in D.pet_images else '➕'} {D.IMG_TARGETS[key]}", f"img:pet:{key}")]
+          for key in keys],
+        _back("adm:img"),
     )
 
 
@@ -2630,16 +2753,32 @@ def img_prompt_kb(pet_key: str) -> InlineKeyboardMarkup:
     return _kb(row)
 
 
+async def _show_img_group(cb: CallbackQuery, key: str | None) -> None:
+    gid = _img_group_of(key) if key else "g"
+    await _show(cb, img_group_text(gid), img_pets_kb(gid))
+
+
 @router.message(Command("img"))
 async def cmd_img(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+    await message.answer(IMG_MENU_TEXT, reply_markup=img_cats_kb())
 
 
 @router.callback_query(F.data == "adm:img")
 async def adm_img(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await _show(cb, IMG_MENU_TEXT, img_pets_kb())
+    await _show(cb, IMG_MENU_TEXT, img_cats_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:imgc:\w+$"))
+async def adm_img_group(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    gid = cb.data.split(":")[2]
+    if gid not in {g for g, _, _ in _img_groups()}:
+        await cb.answer("Раздел не найден", show_alert=True)
+        return
+    await _show(cb, img_group_text(gid), img_pets_kb(gid))
     await cb.answer()
 
 
@@ -2662,8 +2801,9 @@ async def img_choose_pet(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "img:cancel")
 async def img_cancel(cb: CallbackQuery, state: FSMContext):
+    key = (await state.get_data()).get("pet_key")
     await state.clear()
-    await _show(cb, IMG_MENU_TEXT, img_pets_kb())
+    await _show_img_group(cb, key)
     await cb.answer()
 
 
@@ -2673,7 +2813,7 @@ async def img_delete(cb: CallbackQuery, state: FSMContext):
     D.pet_images.pop(pet_key, None)
     D.save_images()
     await state.clear()
-    await _show(cb, IMG_MENU_TEXT, img_pets_kb())
+    await _show_img_group(cb, pet_key)
     await cb.answer("Фото удалено")
 
 
@@ -2713,7 +2853,8 @@ async def img_receive(message: Message, state: FSMContext):
         await D.send_rich_card(bot, chat_id, "stock", lambda with_image: D.stock_html(uid, with_image))
     else:
         await D.send_screen(bot, chat_id, "pets_list", D.PETS_LIST_TEXT)
-    await message.answer(IMG_MENU_TEXT, reply_markup=img_pets_kb())
+    gid = _img_group_of(pet_key)
+    await message.answer(img_group_text(gid), reply_markup=img_pets_kb(gid))
 
 
 @router.message(ImgStates.waiting_photo)
