@@ -524,11 +524,7 @@ def menu_kb() -> InlineKeyboardMarkup:
                 btn("Сокровищница", "menu:cases", ButtonStyle.PRIMARY, TREASURY_EMOJI[0]),
             ],
             [
-                InlineKeyboardButton(
-                    text="🧭 Исследователи",
-                    callback_data="menu:exrn",
-                    style=ButtonStyle.PRIMARY,
-                )
+                btn("Исследование", "menu:exrn", ButtonStyle.PRIMARY, exrn.EXPLORE_EMOJI[0])
             ],
         ]
     )
