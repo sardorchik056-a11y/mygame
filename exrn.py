@@ -83,6 +83,9 @@ EM_SQUADS = ("6032594876506312598", "👥")       # отряды
 EM_ART = ("5339290256174770336", "💎")          # артефакт и шанс артефакта
 EM_LOCK = ("5296369303661067030", "🔒")         # замок: закрытые экспедиции
 EM_TIME = ("5891211339170326418", "⌛")         # время и длительность
+EM_PROGRESS = ("5231200819986047254", "📊")      # прогресс экспедиции
+EM_EXPED = ("5974540576660393791", "🗺")         # экспедиция
+ICON_REFRESH = "5386367538735104399"            # кнопка «Обновить»
 ICON_LOCK = "5296369303661067030"               # замок на кнопках
 
 # Уровни отрядов: накопленный опыт (опыт = часы экспедиций). Каждый уровень +5% к добыче
@@ -821,8 +824,8 @@ def main_html(user: dict, with_image: bool = False) -> str:
         trip = ex["trips"][g["key"]]
         squad += [
             (f"{_em(EM_STATUS)} Статус", "⏳ в пути"),
-            ("🧭 Экспедиция", f"{trip['hours']} ч"),
-            ("📊 Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
+            (f"{_em(EM_EXPED)} Экспедиция", f"{trip['hours']} ч"),
+            (f"{_em(EM_PROGRESS)} Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
             (f"{_em(EM_TIME)} Вернутся через", _dur(trip["end"] - now)),
         ]
         hint = ""
@@ -865,7 +868,7 @@ def main_kb(user: dict) -> InlineKeyboardMarkup:
     if code == "ready":
         action = _btn("🎁 Забрать добычу", f"exrn:take:{gi}", ButtonStyle.SUCCESS)
     elif code == "going":
-        action = _btn("🔄 Обновить статус", "exrn:main", ButtonStyle.SUCCESS)
+        action = _ibtn("Обновить статус", "exrn:main", ICON_REFRESH, ButtonStyle.SUCCESS)
     elif busy:
         bi = next(i for i, x in enumerate(GROUPS) if x["key"] == busy)
         action = _btn(f"👀 В пути: {GROUPS[bi]['name']}", f"exrn:g:{bi}", ButtonStyle.PRIMARY)
@@ -891,24 +894,22 @@ def sel_html(user: dict, with_image: bool = False) -> str:
         "<blockquote><i>Кого сегодня позовёт дорога? Выбери отряд, и он станет главным в лагере.</i></blockquote>"
         + _p(
             f"<b>Сейчас выбран: {g['icon']} {g['name']}</b>",
-            "<i>Отметки: ⏳ в пути, ✅ вернулся и ждёт добычу, ⭐ уровень отряда.</i>",
+            "<i>Выбранный отряд подсвечен зелёным.</i>",
         )
     )
 
 
 def sel_kb(user: dict) -> InlineKeyboardMarkup:
+    """Выбранный отряд зелёный, остальные синие. В кнопке только название и уровень."""
     ex = _state(user)
-    now = time.time()
     rows = []
     for gi, g in enumerate(GROUPS):
         if g["key"] not in ex["hired"]:
             continue
-        code, _ = _trip_status(ex, g["key"], now)
-        mark = {"ready": "✅ ", "going": "⏳ "}.get(code, "")
-        sel = "▶ " if g["key"] == ex["sel"] else ""
-        rows.append([_btn(f"{sel}{mark}{g['icon']} {g['name']} · ⭐{_level(ex, g['key'])}",
-                          f"exrn:pick:{gi}", ButtonStyle.SUCCESS)])
+        style = ButtonStyle.SUCCESS if g["key"] == ex["sel"] else ButtonStyle.PRIMARY
+        rows.append([_btn(f"{g['icon']} {g['name']} · ур. {_level(ex, g['key'])}", f"exrn:pick:{gi}", style)])
     return _kb(*rows, [_ibtn("Нанять ещё", "exrn:list:0", ICON_HIRE, ButtonStyle.PRIMARY), _back("exrn:main")])
+
 
 def _pages() -> int:
     return math.ceil(len(GROUPS) / PAGE_SIZE)
@@ -1025,8 +1026,8 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
             "<i>Добыча сложена у входа в лагерь. Осталось её забрать.</i>",
         )
     return head + _gap() + _tree([
-        ("🧭 Экспедиция", f"{trip['hours']} ч"),
-        ("📊 Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
+        (f"{_em(EM_EXPED)} Экспедиция", f"{trip['hours']} ч"),
+        (f"{_em(EM_PROGRESS)} Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
         (f"{_em(EM_TIME)} Вернутся через", _dur(trip["end"] - now)),
     ], "⏳ В пути")
 
@@ -1064,7 +1065,7 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
             [_btn("🎁 Забрать добычу", f"exrn:take:{gi}", ButtonStyle.SUCCESS)],
             [_back("exrn:main")],
         )
-    return _kb([_btn("🔄 Обновить", f"exrn:g:{gi}", ButtonStyle.SUCCESS), _back("exrn:main")])
+    return _kb([_ibtn("Обновить", f"exrn:g:{gi}", ICON_REFRESH, ButtonStyle.SUCCESS), _back("exrn:main")])
 
 def _next_time(ex: dict) -> int | None:
     for h in DURATIONS:
@@ -1139,7 +1140,7 @@ def log_html(user: dict, with_image: bool = False) -> str:
         ], "Исследователь")
         + _gap()
         + _tree([
-            ("🧭 Экспедиций", _num(st["trips"])),
+            (f"{_em(EM_EXPED)} Экспедиций", _num(st["trips"])),
             (f"{_coin()} Монет найдено", _num(st["coins"])),
             (f"{_MEAT} Мяса найдено", _num(st["meat"])),
             (f"{_FRUIT} Фруктов найдено", _num(st["fruit"])),
@@ -1166,7 +1167,7 @@ def loot_html(gi: int, hours: int, loot: dict, art, is_new: bool, dup: int, info
     if event:
         text += _p(f"<b>📖 В ПУТИ ПРОИЗОШЛО: {event['name']}</b>", f"<i>{event['text']}</i>")
     text += _tree(rows, "Трофеи")
-    summary = [(f"{_em(EM_TIME)} Экспедиция", f"{hours} ч"), ("✨ Опыт отряда", f"+{loot['xp']}")]
+    summary = [(f"{_em(EM_EXPED)} Экспедиция", f"{hours} ч"), ("✨ Опыт отряда", f"+{loot['xp']}")]
     if info["level_bonus"]:
         summary.append((f"{_em(EM_LEVEL)} Бонус уровня отряда", f"+{info['level_bonus']}%"))
     if info["streak_bonus"]:
