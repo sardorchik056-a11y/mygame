@@ -519,12 +519,11 @@ def menu_kb() -> InlineKeyboardMarkup:
                 btn("Запасы", "menu:stock", ButtonStyle.PRIMARY, COIN_EMOJI[0]),
                 btn("Шахты", "menu:mine", ButtonStyle.PRIMARY, mine.MINE_EMOJI[0]),
             ],
+            # Исследование на всю ширину, зелёная
+            [btn("Исследование", "menu:exrn", ButtonStyle.SUCCESS, exrn.EXPLORE_EMOJI[0])],
             [
-                btn("Босс", "menu:boss", ButtonStyle.DANGER, boss.BOSS_EMOJI[0]),
+                btn("Босс", "menu:boss", ButtonStyle.PRIMARY, boss.BOSS_EMOJI[0]),
                 btn("Сокровищница", "menu:cases", ButtonStyle.PRIMARY, TREASURY_EMOJI[0]),
-            ],
-            [
-                btn("Исследование", "menu:exrn", ButtonStyle.PRIMARY, exrn.EXPLORE_EMOJI[0])
             ],
         ]
     )
