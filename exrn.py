@@ -822,6 +822,7 @@ def main_html(user: dict, with_image: bool = False) -> str:
 
 
 def main_kb(user: dict) -> InlineKeyboardMarkup:
+    """Главная кнопка действия сверху, остальное аккуратными парами."""
     ex = _state(user)
     gi = _sel_index(ex)
     g = GROUPS[gi]
@@ -830,22 +831,21 @@ def main_kb(user: dict) -> InlineKeyboardMarkup:
     if code == "ready":
         action = _btn("🎁 Забрать добычу", f"exrn:take:{gi}", ButtonStyle.SUCCESS)
     elif code == "going":
-        action = _btn("🔄 Обновить", "exrn:main", ButtonStyle.SUCCESS)
+        action = _btn("🔄 Обновить статус", "exrn:main", ButtonStyle.SUCCESS)
     elif busy:
         bi = next(i for i, x in enumerate(GROUPS) if x["key"] == busy)
         action = _btn(f"👀 В пути: {GROUPS[bi]['name']}", f"exrn:g:{bi}", ButtonStyle.PRIMARY)
     else:
         action = _btn("🚀 Отправить в экспедицию", f"exrn:g:{gi}", ButtonStyle.SUCCESS)
-    rows = [[action]]
-    if len(ex["hired"]) > 1:
-        rows.append([_btn("🔁 Сменить отряд", "exrn:sel", ButtonStyle.SUCCESS)])
-    rows.append([_btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.PRIMARY),
-                 _btn("⏱ Время", "exrn:times", ButtonStyle.PRIMARY)])
-    rows.append([_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS),
-                 _btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY)])
-    rows.append([_back("menu:back")])
-    return _kb(*rows)
-
+    squad = (_btn("🔁 Сменить отряд", "exrn:sel", ButtonStyle.SUCCESS)
+             if len(ex["hired"]) > 1 else _btn("🧭 Об отряде", f"exrn:g:{gi}", ButtonStyle.PRIMARY))
+    return _kb(
+        [action],
+        [squad, _btn("➕ Нанять отряд", "exrn:list:0", ButtonStyle.PRIMARY)],
+        [_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS),
+         _btn("⏱ Время", "exrn:times", ButtonStyle.PRIMARY)],
+        [_btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY), _back("menu:back")],
+    )
 
 def sel_html(user: dict, with_image: bool = False) -> str:
     ex = _state(user)
@@ -873,8 +873,7 @@ def sel_kb(user: dict) -> InlineKeyboardMarkup:
         sel = "▶ " if g["key"] == ex["sel"] else ""
         rows.append([_btn(f"{sel}{mark}{g['icon']} {g['name']} · ⭐{_level(ex, g['key'])}",
                           f"exrn:pick:{gi}", ButtonStyle.SUCCESS)])
-    return _kb(*rows, [_back("exrn:main")])
-
+    return _kb(*rows, [_btn("➕ Нанять ещё", "exrn:list:0", ButtonStyle.PRIMARY), _back("exrn:main")])
 
 def _pages() -> int:
     return math.ceil(len(GROUPS) / PAGE_SIZE)
@@ -905,19 +904,21 @@ def list_kb(user: dict, page: int = 0) -> InlineKeyboardMarkup:
     rows = []
     for gi in range(start, min(start + PAGE_SIZE, len(GROUPS))):
         g = GROUPS[gi]
-        owned = g["key"] in ex["hired"]
-        rows.append([_btn(f"{'✅' if owned else g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS)])
+        owned_ = g["key"] in ex["hired"]
+        rows.append([_btn(f"{'✅' if owned_ else g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS)])
+    # Навигация: [◀] [1/2] [▶], счётчик страниц в центре
+    counter = _btn(f"{page + 1}/{_pages()}", "exrn:noop", ButtonStyle.PRIMARY)
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(
             text=ARROW_TEXT, callback_data=f"exrn:list:{page - 1}",
             style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_PREV_ID))
+    nav.append(counter)
     if page < _pages() - 1:
         nav.append(InlineKeyboardButton(
             text=ARROW_TEXT, callback_data=f"exrn:list:{page + 1}",
             style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_NEXT_ID))
     return _kb(*rows, nav, [_back("exrn:main")])
-
 
 def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     g = GROUPS[gi]
@@ -1011,8 +1012,10 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
     ex = _state(user)
     code, _ = _trip_status(ex, g["key"], time.time())
     if code == "locked":
+        can = user["coins"] >= g["price"]
         return _kb(
-            [_btn(f"Нанять за {_num(g['price'])}", f"exrn:buy:{gi}", ButtonStyle.SUCCESS)],
+            [_btn(f"💰 Нанять за {_num(g['price'])}", f"exrn:buy:{gi}",
+                  ButtonStyle.SUCCESS if can else ButtonStyle.DANGER)],
             [_back(f"exrn:list:{gi // PAGE_SIZE}")],
         )
     if code == "idle":
@@ -1023,22 +1026,22 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
                 [_btn(f"👀 В пути: {GROUPS[bi]['name']}", f"exrn:g:{bi}", ButtonStyle.SUCCESS)],
                 [_back("exrn:main")],
             )
-        go = [_btn(f"{h} ч", f"exrn:go:{gi}:{h}", ButtonStyle.SUCCESS) for h in sorted(ex["times"])]
-        return _kb(
-            *_pairs(go, 3),
-            [_btn("⏱ Открыть больше времени", "exrn:times", ButtonStyle.PRIMARY)],
-            [_back("exrn:main")],
-        )
+        # Все шесть длительностей: открытые зелёные, закрытые ведут к покупке времени
+        go = []
+        for h in DURATIONS:
+            if h in ex["times"]:
+                go.append(_btn(f"⏱ {h} ч", f"exrn:go:{gi}:{h}", ButtonStyle.SUCCESS))
+            else:
+                go.append(_btn(f"🔒 {h} ч", "exrn:times", ButtonStyle.PRIMARY))
+        rows = _pairs(go, 3)
+        extra = [_btn("🔁 Другой отряд", "exrn:sel", ButtonStyle.PRIMARY)] if len(ex["hired"]) > 1 else []
+        return _kb(*rows, extra + [_back("exrn:main")])
     if code == "ready":
         return _kb(
             [_btn("🎁 Забрать добычу", f"exrn:take:{gi}", ButtonStyle.SUCCESS)],
             [_back("exrn:main")],
         )
-    return _kb(
-        [_btn("🔄 Обновить", f"exrn:g:{gi}", ButtonStyle.SUCCESS)],
-        [_back("exrn:main")],
-    )
-
+    return _kb([_btn("🔄 Обновить", f"exrn:g:{gi}", ButtonStyle.SUCCESS), _back("exrn:main")])
 
 def _next_time(ex: dict) -> int | None:
     for h in DURATIONS:
@@ -1089,10 +1092,11 @@ def times_kb(user: dict) -> InlineKeyboardMarkup:
     nxt = _next_time(ex)
     rows = []
     if nxt:
-        rows.append([_btn(f"Открыть {nxt} ч за {_num(DURATION_PRICE[nxt])}", "exrn:tbuy", ButtonStyle.SUCCESS)])
+        can = user["coins"] >= DURATION_PRICE[nxt]
+        rows.append([_btn(f"🔓 Открыть {nxt} ч · {_num(DURATION_PRICE[nxt])}", "exrn:tbuy",
+                          ButtonStyle.SUCCESS if can else ButtonStyle.DANGER)])
     rows.append([_back("exrn:main")])
     return _kb(*rows)
-
 
 def log_html(user: dict, with_image: bool = False) -> str:
     ex = _state(user)
@@ -1541,9 +1545,10 @@ async def on_take(callback: CallbackQuery):
     }
     await callback.answer("Добыча у тебя в запасах!")
     kb = _kb(
-        [_btn("🚀 К лагерю", "exrn:main", ButtonStyle.SUCCESS)],
+        [_btn("🚀 Снова в путь", f"exrn:g:{gi}", ButtonStyle.SUCCESS)],
         [_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS),
          _btn("📜 Журнал", "exrn:log", ButtonStyle.PRIMARY)],
+        [_back("exrn:main", "В лагерь")],
     )
     await _show(callback, lambda wi: loot_html(gi, hours, loot, art, is_new, dup, info, wi), kb)
 
@@ -1554,7 +1559,8 @@ async def on_log(callback: CallbackQuery):
     if user is None:
         return
     await callback.answer()
-    await _show(callback, lambda wi: log_html(user, wi), _kb([_back("exrn:main")]))
+    await _show(callback, lambda wi: log_html(user, wi), _kb(
+        [_btn("🎒 Артефакты", "exrn:arts", ButtonStyle.SUCCESS), _back("exrn:main")]))
 
 
 @router.callback_query(F.data == "exrn:times")
@@ -1682,3 +1688,8 @@ async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
         "exrn_art_item": lambda wi: art_item_html(user, ARTIFACTS[0]["key"], wi),
     }
     await _send_rich_card(bot, chat_id, key, builders[key])
+
+
+@router.callback_query(F.data == "exrn:noop")
+async def on_noop(callback: CallbackQuery):
+    await callback.answer()
