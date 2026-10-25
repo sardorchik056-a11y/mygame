@@ -80,6 +80,10 @@ EM_STATUS = ("5325905536057615182", "🧘‍♀️")      # статус
 EM_TITLE = ("5424746623462823358", "🏅")        # звание
 EM_STREAK = ("5424972470023104089", "🔥")       # серия
 EM_SQUADS = ("6032594876506312598", "👥")       # отряды
+EM_ART = ("5339290256174770336", "💎")          # артефакт и шанс артефакта
+EM_LOCK = ("5296369303661067030", "🔒")         # замок: закрытые экспедиции
+EM_TIME = ("5891211339170326418", "⌛")         # время и длительность
+ICON_LOCK = "5296369303661067030"               # замок на кнопках
 
 # Уровни отрядов: накопленный опыт (опыт = часы экспедиций). Каждый уровень +5% к добыче
 # и +4% к шансу артефакта (относительно).
@@ -690,9 +694,18 @@ def _gap() -> str:
     return "<p>&nbsp;</p>"
 
 
+def _kind_icon(kind: str) -> str:
+    """Значок вида бонуса: для артефактов и времени кастомные эмодзи."""
+    if kind == "art":
+        return _em(EM_ART)
+    if kind == "time":
+        return _em(EM_TIME)
+    return BONUS_KINDS[kind][2]
+
+
 def _bonus_rows(bonuses_: dict[str, int]) -> list[tuple[str, str]]:
     return [
-        (f"{BONUS_KINDS[kind][2]} {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct))
+        (f"{_kind_icon(kind)} {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct))
         for kind, pct in bonuses_.items()
     ]
 
@@ -810,7 +823,7 @@ def main_html(user: dict, with_image: bool = False) -> str:
             (f"{_em(EM_STATUS)} Статус", "⏳ в пути"),
             ("🧭 Экспедиция", f"{trip['hours']} ч"),
             ("📊 Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
-            ("⏱ Вернутся через", _dur(trip["end"] - now)),
+            (f"{_em(EM_TIME)} Вернутся через", _dur(trip["end"] - now)),
         ]
         hint = ""
     elif code == "ready":
@@ -965,7 +978,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     if code != "locked":
         stats.append((f"{_em(EM_LEVEL)} Уровень", str(lvl)))
     stats += [
-        (f"💎 Шанс артефакта за {h0} ч", f"{art_chance(gi, h0, lvl, 1.0, bon['art']) * 100:.1f}%"),
+        (f"{_em(EM_ART)} Шанс артефакта за {h0} ч", f"{art_chance(gi, h0, lvl, 1.0, bon['art']) * 100:.1f}%"),
         ("✨ Редкость находок", f"до «{escape(_tier_name(cap))}»"),
     ]
     head = (
@@ -998,8 +1011,8 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
             lo = max(1, round(g["coins_h"] * h * mult * SPREAD[0]))
             hi = max(1, round(g["coins_h"] * h * mult * SPREAD[1]))
             real = f" · в пути {_dur(h * 3600 * (1 - bon['time'] / 100))}" if bon["time"] else ""
-            rows.append((f"⏱ {h} ч{real}",
-                         f"{_num(lo)} – {_num(hi)} монет · 💎 {art_chance(gi, h, lvl, 1.0, bon['art']) * 100:.1f}%"))
+            rows.append((f"{_em(EM_TIME)} {h} ч{real}",
+                         f"{_num(lo)} – {_num(hi)} монет · {_em(EM_ART)} {art_chance(gi, h, lvl, 1.0, bon['art']) * 100:.1f}%"))
         return head + _gap() + _tree(rows, "Доступные экспедиции") + _p(
             "<b>💤 Отряд отдохнул и готов к походу.</b>",
             "<i>В пути может случиться что угодно: сундук, торговец, отшельник с картой. "
@@ -1014,7 +1027,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     return head + _gap() + _tree([
         ("🧭 Экспедиция", f"{trip['hours']} ч"),
         ("📊 Прогресс", _bar(now - trip["start"], trip["end"] - trip["start"])),
-        ("⏱ Вернутся через", _dur(trip["end"] - now)),
+        (f"{_em(EM_TIME)} Вернутся через", _dur(trip["end"] - now)),
     ], "⏳ В пути")
 
 def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
@@ -1040,9 +1053,9 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
         go = []
         for h in DURATIONS:
             if h in ex["times"]:
-                go.append(_btn(f"⏱ {h} ч", f"exrn:go:{gi}:{h}", ButtonStyle.SUCCESS))
+                go.append(_ibtn(f"{h} ч", f"exrn:go:{gi}:{h}", ICON_TIME, ButtonStyle.SUCCESS))
             else:
-                go.append(_btn(f"🔒 {h} ч", "exrn:times", ButtonStyle.PRIMARY))
+                go.append(_ibtn(f"{h} ч", "exrn:times", ICON_LOCK, ButtonStyle.PRIMARY))
         rows = _pairs(go, 3)
         extra = [_ibtn("Другой отряд", "exrn:sel", ICON_SWAP, ButtonStyle.PRIMARY)] if len(ex["hired"]) > 1 else []
         return _kb(*rows, extra + [_back("exrn:main")])
@@ -1070,9 +1083,9 @@ def times_html(user: dict, with_image: bool = False) -> str:
         elif h == nxt:
             state = f"{_num(DURATION_PRICE[h])} {_coin()}"
         else:
-            state = "🔒 закрыто"
+            state = f"{_em(EM_LOCK)} закрыто"
         bonus_pct = int(round((DURATION_BONUS.get(h, 1.0) - 1) * 100))
-        rows.append((f"⏱ {h} ч", f"{'бонус +' + str(bonus_pct) + '%' if bonus_pct else 'без бонуса'} · {state}"))
+        rows.append((f"{_em(EM_TIME)} {h} ч", f"{'бонус +' + str(bonus_pct) + '%' if bonus_pct else 'без бонуса'} · {state}"))
     if nxt:
         tail = _tree([
             ("Следующая", f"{nxt} ч"),
@@ -1111,7 +1124,7 @@ def log_html(user: dict, with_image: bool = False) -> str:
     for e in reversed(ex["log"][-5:]):
         g = GROUPS[e["gi"]]
         recent.append((f"{g['icon']} {g['name']}",
-                       f"{e['hours']} ч · +{_num(e['coins'])}{' · 💎' if e.get('art') else ''}"))
+                       f"{e['hours']} ч · +{_num(e['coins'])}{(' · ' + _em(EM_ART)) if e.get('art') else ''}"))
     if not recent:
         recent_html = _p("<i>Журнал пока пуст. Первая же экспедиция оставит в нём запись.</i>")
     else:
@@ -1130,7 +1143,7 @@ def log_html(user: dict, with_image: bool = False) -> str:
             (f"{_coin()} Монет найдено", _num(st["coins"])),
             (f"{_MEAT} Мяса найдено", _num(st["meat"])),
             (f"{_FRUIT} Фруктов найдено", _num(st["fruit"])),
-            ("💎 Артефактов найдено", _num(st["arts"])),
+            (f"{_em(EM_ART)} Артефактов найдено", _num(st["arts"])),
         ], "За всё время")
         + _gap()
         + recent_html
@@ -1153,17 +1166,17 @@ def loot_html(gi: int, hours: int, loot: dict, art, is_new: bool, dup: int, info
     if event:
         text += _p(f"<b>📖 В ПУТИ ПРОИЗОШЛО: {event['name']}</b>", f"<i>{event['text']}</i>")
     text += _tree(rows, "Трофеи")
-    summary = [("⏱ Экспедиция", f"{hours} ч"), ("✨ Опыт отряда", f"+{loot['xp']}")]
+    summary = [(f"{_em(EM_TIME)} Экспедиция", f"{hours} ч"), ("✨ Опыт отряда", f"+{loot['xp']}")]
     if info["level_bonus"]:
         summary.append((f"{_em(EM_LEVEL)} Бонус уровня отряда", f"+{info['level_bonus']}%"))
     if info["streak_bonus"]:
         summary.append((f"{_em(EM_STREAK)} Бонус серии ({info['streak']} дн.)", f"+{info['streak_bonus']}%"))
     for kind, pct in info.get("art_bonus", {}).items():
         if pct and kind != "time":
-            summary.append((f"🎒 {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct)))
+            summary.append((f"{_kind_icon(kind) if kind == 'art' else '🎒'} {BONUS_KINDS[kind][0]}", fmt_bonus(kind, pct)))
     text += _gap() + _tree(summary, "Итоги")
     if art is not None:
-        text += _p("<b>💎 В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b>") + result_block(art)
+        text += _p(f"<b>{_em(EM_ART)} В ЗАБРОШЕННОМ ТАЙНИКЕ НАШЛИ АРТЕФАКТ!</b>") + result_block(art)
         if is_new:
             text += _p("<i>Он уже ждёт тебя в разделе «🎒 Артефакты».</i>")
         else:
