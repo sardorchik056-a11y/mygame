@@ -1144,7 +1144,10 @@ def list_kb(user: dict, page: int = 0) -> InlineKeyboardMarkup:
     for gi in range(start, min(start + PAGE_SIZE, len(GROUPS))):
         g = GROUPS[gi]
         owned_ = g["key"] in ex["hired"]
-        rows.append([_btn(f"{'✅' if owned_ else g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS)])
+        if owned_:     # куплен: твоя галочка слева от названия
+            rows.append([_ibtn(g["name"], f"exrn:g:{gi}", EM_OK[0], ButtonStyle.SUCCESS)])
+        else:
+            rows.append([_btn(f"{g['icon']} {g['name']}", f"exrn:g:{gi}", ButtonStyle.SUCCESS)])
     # Навигация: [◀] [1/2] [▶], счётчик страниц в центре
     counter = _btn(f"{page + 1}/{_pages()}", "exrn:noop", ButtonStyle.PRIMARY)
     nav = []
@@ -1174,7 +1177,7 @@ def group_html(user: dict, gi: int, with_image: bool = False) -> str:
     elif code == "locked":
         price = f"{_num(g['price'])} {_coin()}"
     else:
-        price = "нанят ✅"
+        price = f"нанят {_em(EM_OK)}"
     stats = [
         (f"{_em(EM_RANK)} Ранг", _rank_stars(gi)),
         (f"{_em(EM_HIRE)} Найм", price),
