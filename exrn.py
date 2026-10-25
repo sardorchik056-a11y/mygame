@@ -83,6 +83,8 @@ EM_SQUADS = ("6032594876506312598", "👥")       # отряды
 EM_ART = ("5339290256174770336", "💎")          # артефакт и шанс артефакта
 EM_LOCK = ("5296369303661067030", "🔒")         # замок: закрытые экспедиции
 EM_TIME = ("5891211339170326418", "⌛")         # время и длительность
+EM_OK = ("5390846416530716134", "✅")           # «открыто», «все экспедиции открыты»
+EM_LOG = ("5393180920234647059", "🗞")          # журнал
 EM_PROGRESS = ("5231200819986047254", "📊")      # прогресс экспедиции
 EM_EXPED = ("5974540576660393791", "🗺")         # экспедиция
 ICON_REFRESH = "5386367538735104399"            # кнопка «Обновить»
@@ -1080,7 +1082,7 @@ def times_html(user: dict, with_image: bool = False) -> str:
     rows = []
     for h in DURATIONS:
         if h in ex["times"]:
-            state = "✅ открыто"
+            state = f"{_em(EM_OK)} открыто"
         elif h == nxt:
             state = f"{_num(DURATION_PRICE[h])} {_coin()}"
         else:
@@ -1094,10 +1096,10 @@ def times_html(user: dict, with_image: bool = False) -> str:
             ("У тебя", f"{_num(user['coins'])} {_coin()}"),
         ], f"{_info()} Открытие")
     else:
-        tail = _p("<b>🏆 Все экспедиции открыты!</b>", "<i>Дальше только легенды.</i>")
+        tail = _p(f"<b>{_em(EM_OK)} Все экспедиции открыты!</b>", "<i>Дальше только легенды.</i>")
     return (
         f"{_image(with_image)}"
-        "<p><b>⏱ ВРЕМЯ ЭКСПЕДИЦИЙ</b></p>"
+        f"<p><b>{_em(EM_TIME)} ВРЕМЯ ЭКСПЕДИЦИЙ</b></p>"
         "<blockquote><i>Чем дальше путь, тем щедрее награда. Открывай новые маршруты "
         "по порядку: сначала короткие вылазки, потом дальние походы.</i></blockquote>"
         + _tree(rows, "Экспедиции")
@@ -1129,10 +1131,10 @@ def log_html(user: dict, with_image: bool = False) -> str:
     if not recent:
         recent_html = _p("<i>Журнал пока пуст. Первая же экспедиция оставит в нём запись.</i>")
     else:
-        recent_html = _tree(recent, "📖 Последние походы")
+        recent_html = _tree(recent, f"{_em(EM_LOG)} Последние 5 походов")
     return (
         f"{_image(with_image)}"
-        "<p><b>📜 ЖУРНАЛ ИССЛЕДОВАТЕЛЯ</b></p>"
+        f"<p><b>{_em(EM_LOG)} ЖУРНАЛ ИССЛЕДОВАТЕЛЯ</b></p>"
         "<blockquote><i>Каждый поход становится строкой в истории. Пусть эта книга будет толстой.</i></blockquote>"
         + _tree([
             (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
@@ -1537,7 +1539,7 @@ async def on_take(callback: CallbackQuery):
     new_rank = _rank_title(st["trips"])[0]
     ex["log"].append({"gi": gi, "hours": hours, "coins": loot["coins"], "art": art is not None,
                       "ts": int(time.time())})
-    del ex["log"][:-10]
+    del ex["log"][:-5]          # в журнале хранятся и показываются последние 5 походов
     _save_users()
 
     info = {
