@@ -890,7 +890,7 @@ def sel_html(user: dict, with_image: bool = False) -> str:
     g = GROUPS[_sel_index(ex)]
     return (
         f"{_image(with_image)}"
-        "<p><b>🔁 ВЫБОР ОТРЯДА</b></p>"
+        f"<p><b>{_em(EM_SQUADS)} ВЫБОР ОТРЯДА</b></p>"
         "<blockquote><i>Кого сегодня позовёт дорога? Выбери отряд, и он станет главным в лагере.</i></blockquote>"
         + _p(
             f"<b>Сейчас выбран: {g['icon']} {g['name']}</b>",
@@ -1038,8 +1038,8 @@ def group_kb(user: dict, gi: int) -> InlineKeyboardMarkup:
     if code == "locked":
         can = user["coins"] >= g["price"]
         return _kb(
-            [_btn(f"💰 Нанять за {_num(g['price'])}", f"exrn:buy:{gi}",
-                  ButtonStyle.SUCCESS if can else ButtonStyle.DANGER)],
+            [_ibtn(_num(g["price"]), f"exrn:buy:{gi}", ICON_HIRE,
+                   ButtonStyle.SUCCESS if can else ButtonStyle.DANGER)],
             [_back(f"exrn:list:{gi // PAGE_SIZE}")],
         )
     if code == "idle":
