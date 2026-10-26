@@ -30,6 +30,7 @@ import boss
 import cases
 import equipment
 import exrn
+import settings
 import mine
 from guard import Guard, on_error
 from storage import ProcessLock, UserStore, atomic_write_json, read_json_safe
@@ -425,7 +426,8 @@ def profile_html(user_id: int, with_image: bool = False) -> str:
 
     return (
         f"{image}"
-        f"<p><b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
+        f"<p><b>👤 {settings.name_html(user)}</b><br>&nbsp;<br>"
+        f"<b>{escape(pet['name'].upper())} · {escape(pet['rarity'])}</b>"
         "<br>&nbsp;<br>"
         f"<b>{custom_emoji(ELEMENT_LABEL_EMOJI)} Стихия: "
         f"{escape(pet['element'])} {element_emoji}</b></p>"
@@ -568,13 +570,19 @@ def profile_back_kb() -> InlineKeyboardMarkup:
     )
 
 
+def _menu_greeting(user_id: int | None) -> str:
+    """Строка с никнейм игрока под заголовком меню."""
+    user = get_user(user_id) if user_id else None
+    return f"<br>&nbsp;<br><b>👤 {settings.name_html(user)}</b>" if user else ""
+
+
 def menu_html(user_id: int | None = None, with_image: bool = False) -> str:
     """Rich-карточка главного меню: своё изображение (ключ «menu») и короткий текст."""
     image = '<img src="tg://photo?id=pet"/>' if with_image else ""
 
     return (
         f"{image}"
-        f"<p><b>{custom_emoji(MENU_EMOJI)} ГЛАВНОЕ МЕНЮ</b></p>"
+        f"<p><b>{custom_emoji(MENU_EMOJI)} ГЛАВНОЕ МЕНЮ</b>{_menu_greeting(user_id)}</p>"
         "<blockquote><i>Здесь начинается твой путь. Навести питомца, "
         "проверь запасы и отправляйся навстречу новым победам.</i></blockquote>"
     )
@@ -728,6 +736,7 @@ IMG_TARGETS: dict[str, str] = {
     **cases.IMG_TARGETS,
     **equipment.IMG_TARGETS,
     **exrn.IMG_TARGETS,
+    **settings.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -921,6 +930,19 @@ exrn.setup(
     FRUIT_EMOJI=FRUIT_EMOJI,
 )
 dp.include_router(exrn.router)
+
+# Раздел «Настройки»: никнейм, уведомления
+settings.setup(
+    get_user=get_user,
+    save_users=save_users,
+    show_rich_card=show_rich_card,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    INFO_EMOJI=INFO_EMOJI,
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    alerts_path=Path(__file__).with_name("alerts.json"),   # ожидающие уведомления о возвращении отрядов
+)
+dp.include_router(settings.router)
 
 
 # ---------- Хендлеры ----------
@@ -1243,9 +1265,7 @@ async def open_market(message: Message):
     await message.answer("<b>Рынок</b>")
 
 
-@dp.message(F.text == "Настройки")
-async def open_settings(message: Message):
-    await message.answer("<b>Настройки</b>")
+# «Настройки» (никнейм, уведомления) живут в settings.py
 
 
 async def main():
@@ -1255,11 +1275,13 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     maintenance = asyncio.create_task(store.run_maintenance())   # пачечная запись, бэкапы, выгрузка из памяти
+    notifier = asyncio.create_task(settings.notifier_loop(bot))  # «отряд вернулся из экспедиции»
     logging.info("Игроков в базе: %d", len(store))
     try:
         await dp.start_polling(bot)
     finally:
         maintenance.cancel()
+        notifier.cancel()
         store.close()   # финальная запись всего, что не успело уйти на диск
 
 
