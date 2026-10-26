@@ -42,6 +42,8 @@ from aiogram import F, Router
 from aiogram.enums import ButtonStyle
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
+import settings                        # никнейм игрока и уведомления о возвращении отряда
+
 try:                                    # журнал операций (audit.log), как в остальных разделах
     from storage import ledger as _ledger
 except ImportError:                     # на случай запуска модуля отдельно
@@ -818,6 +820,8 @@ def _sanitize(user: dict, uid) -> list[str]:
         if changed:
             fixes.append(f"trip_time:{key}")
         clean[key] = {"start": start, "end": end, "hours": hours}
+        if t.get("notified"):
+            clean[key]["notified"] = True
     if len(clean) > 1:
         keep = min(clean, key=lambda k: clean[k]["start"])
         fixes.append("trips_many:" + ",".join(k for k in clean if k != keep))
@@ -1045,6 +1049,7 @@ def main_html(user: dict, with_image: bool = False) -> str:
             hint = "<i>Отряд отдохнул и готов к походу. Чем дольше путь, тем щедрее награда.</i>"
 
     player = [
+        ("👤 Имя", settings.name_html(user)),
         (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
         (f"{_em(EM_STREAK)} Серия", f"{streak} дн." + (f" · +{bonus_pct}% к добыче" if bonus_pct else " · зайди завтра за бонусом")),
         (f"{_em(EM_SQUADS)} Отрядов", f"{len(ex['hired'])} из {len(GROUPS)}"),
@@ -1341,6 +1346,7 @@ def log_html(user: dict, with_image: bool = False) -> str:
         f"<p><b>{_em(EM_LOG)} ЖУРНАЛ ИССЛЕДОВАТЕЛЯ</b></p>"
         "<blockquote><i>Каждый поход становится строкой в истории. Пусть эта книга будет толстой.</i></blockquote>"
         + _tree([
+            ("👤 Имя", settings.name_html(user)),
             (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
             (f"{_em(EM_STREAK)} Серия", f"{streak} дн."),
         ], "Исследователь")
@@ -1675,6 +1681,7 @@ async def on_go(callback: CallbackQuery):
         ex["sel"] = g["key"]
         _save_users()
         _led("exrn_go", uid=str(callback.from_user.id), group=g["key"], hours=hours, cut=cut)
+        settings.register_alert(callback.from_user.id, now + real)     # уведомление о возвращении
         note = f" Артефакты сократили путь до {_dur(real)}." if cut else ""
         await callback.answer(f"{g['name']} отправились в путь на {hours} ч!{note}")
         await _show_main(callback, user)
