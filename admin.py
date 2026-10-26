@@ -75,6 +75,7 @@ import cases
 import equipment
 import exrn
 import mine
+import settings
 from storage import atomic_write_json, ledger, read_json_safe
 
 log = logging.getLogger("admin")
@@ -287,6 +288,10 @@ def _track(tg) -> None:
         else:
             user.pop("username", None)
         changed = True
+    name = (tg.full_name or "")[:64]
+    if name and user.get("tg_name") != name:
+        user["tg_name"] = name          # запасное имя, пока у игрока нет никнейма
+        changed = True
     if "joined" not in user:
         # 0 значит «дата неизвестна» (игрок был в базе до подключения панели)
         user["joined"] = time.time() if uid in _PENDING_NEW else 0
@@ -401,7 +406,8 @@ def who(user: dict, uid: str) -> str:
 def player_label(uid: str, user: dict) -> str:
     name = f"@{escape(user['username'])}" if user.get("username") else "без юзернейма"
     pet = D.PETS.get(user.get("pet"), {}).get("name")
-    return f"{name} · ID <code>{uid}</code>" + (f" · {escape(pet)}" if pet else "")
+    nick = f"«{escape(settings.name_plain(user))}» · " if settings.has_nick(user) else ""
+    return f"{nick}{name} · ID <code>{uid}</code>" + (f" · {escape(pet)}" if pet else "")
 
 
 def parse_amount(raw: str) -> int | None:
@@ -1000,6 +1006,8 @@ def card_text(uid: str, user: dict) -> str:
     else:
         lines += ["", "Шахта: <i>ещё не открывал</i>"]
 
+    lines += ["", f"Никнейм: <b>{settings.name_html(user)}</b>" if settings.has_nick(user)
+              else "Никнейм: <i>не задан (показывается имя из Telegram)</i>"]
     lines += [""] + exrn.admin_lines(user)
 
     pet_keys = set(user.get("artifacts", [])) | set(user.get("equipment", []))
@@ -1041,6 +1049,7 @@ def card_kb(uid: str) -> InlineKeyboardMarkup:
          _b("Сбросить шахту", f"adm:um:{uid}", R)],
         [_b("Завершить экспедицию", f"adm:ux:{uid}", S),
          _b("Сбросить исследователей", f"adm:ue:{uid}", R)],
+        *([[_b("Сбросить никнейм", f"adm:un:{uid}", R)]] if settings.has_nick(D.users.get(uid) or {}) else []),
         [_b("Удалить игрока", f"adm:ud:{uid}", R)],
         [_b("Обновить", f"adm:u:{uid}", G)],
         _back("adm:pl"),
@@ -1717,6 +1726,20 @@ async def adm_mine_reset(cb: CallbackQuery):
     user.pop("mine", None)
     D.store.flush()
     await cb.answer("Шахта сброшена")
+    await _show(cb, card_text(uid, user), card_kb(uid))
+
+
+@router.callback_query(F.data.regexp(r"^adm:un:\d+$"))
+async def adm_nick_reset(cb: CallbackQuery):
+    """Модерация: убрать чужой никнейм (например, неподходящее имя)."""
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    old = settings.reset_nick(user)
+    ledger("admin_nick_reset", admin=cb.from_user.id, uid=uid, old=old)
+    D.store.flush()
+    await cb.answer("Никнейм сброшен")
     await _show(cb, card_text(uid, user), card_kb(uid))
 
 
@@ -2451,6 +2474,8 @@ EVENT_TITLES = {
     "admin_delete": "Удаление игрока", "admin_dm": "Сообщение игроку",
     "admin_boss_reset": "Сброс босса", "admin_boss_reset_type": "Сброс боссов вида",
     "admin_boss_stats_reset": "Сброс статистики боссов", "broadcast": "Рассылка",
+    "nick_change": "Смена никнейма", "nick_reset": "Сброс никнейма (игрок)",
+    "admin_nick_reset": "Сброс никнейма (админ)", "settings_toggle": "Переключатель в настройках",
     "admin_exrn_reset": "Сброс исследователей", "admin_exrn_finish": "Завершение экспедиции",
     "exrn_hire": "Найм отряда", "exrn_time": "Открытие времени", "exrn_go": "Отправка экспедиции",
     "exrn_claim": "Добыча экспедиции", "exrn_integrity_fix": "Исправление данных исследователей",
@@ -2707,6 +2732,7 @@ def _img_groups() -> list[tuple[str, str, list[str]]]:
         ("b", "Боссы", [k for k in boss.IMG_TARGETS if k in D.IMG_TARGETS]),
         ("c", "Сокровищница", [k for k in cases.IMG_TARGETS if k in D.IMG_TARGETS]),
         ("x", "Исследователи", [k for k in exrn.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("s", "Настройки", [k for k in settings.IMG_TARGETS if k in D.IMG_TARGETS]),
     ]
     placed = {k for _, _, keys in parts for k in keys}
     rest = [k for k in all_keys if k not in placed]       # всё новое попадёт в «Общие»
