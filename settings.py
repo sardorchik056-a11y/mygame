@@ -124,13 +124,29 @@ _ADMIN_IDS: set[int] = set()
 _GAME: dict = {}                 # числа игры для раздела «Помощь» (уровни, цены, шансы)
 
 
+# Кастомные эмодзи других разделов (передаёт main.py): ключ -> (id, запасной эмодзи)
+_EMOJI: dict[str, tuple[str, str]] = {}
+_FALLBACK = {"pet": "🐾", "level": "🆙", "wins": "⚔️", "losses": "☠️", "mine": "⛏", "boss": "⚔️",
+             "explore": "🗺", "treasury": "🧩", "coin": "🪙", "art": "💎", "expedition": "🗺",
+             "ok": "✅", "play": "🎮"}
+
+
+def _ic(key: str) -> str:
+    """Эмодзи раздела: кастомный из других модулей, а если его нет, обычный."""
+    pair = _EMOJI.get(key)
+    if pair and _custom_emoji:
+        return _custom_emoji(pair)
+    return _FALLBACK.get(key, "")
+
+
 def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji,
           BACK_EMOJI_ID, INFO_EMOJI=None, alerts_path=None, admin_ids=(), game=None,
-          **_ignored) -> None:
+          emoji=None, **_ignored) -> None:
     """game: числа игры для текстов помощи: MAX_LEVEL, EVO_EVERY, EVO_COST_MULT, STAT_GROWTH,
     EVO_GROWTH, upgrade_cost(level), SLOTS, DUPLICATE_COINS, FRAG_DAMAGE_STEP, FRAG_CHANCE."""
     global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji
     global _BACK_ID, _INFO, _ALERTS_FILE, _ADMIN_IDS, _GAME
+    _EMOJI.update(emoji or {})
     _ADMIN_IDS = set(admin_ids)
     _GAME = dict(game or {})
     _get_user, _save_users = get_user, save_users
@@ -435,18 +451,22 @@ def _date(ts) -> str:
         return "давно"
 
 
+def _onoff(value: bool, on: str = "включено", off: str = "выключено") -> str:
+    return f"{on} {_ic('ok')}" if value else f"{off} ❌"
+
+
 def settings_html(user: dict, uid: int, with_image: bool = False, note: str = "") -> str:
     notify = get_setting(user, "notify_exrn")
     profile = [
         ("👤 Никнейм", name_html(user)),
         ("🆔 ID", f"<code>{uid}</code>"),
         ("📅 В игре с", _date(user.get("joined", 0))),
-        ("⭐ Уровень питомца", str(user.get("level", 1))),
-        ("⚔️ Бои", f"{user.get('wins', 0)} побед · {user.get('losses', 0)} поражений"),
+        (f"{_ic('level')} Уровень питомца", str(user.get("level", 1))),
+        (f"{_ic('wins')} Бои", f"{user.get('wins', 0)} побед · {user.get('losses', 0)} поражений"),
     ]
     alerts = [
-        ("🗺 Возвращение экспедиции", "включено ✅" if notify else "выключено ❌"),
-        ("🕶 Режим скрытости", "включён ✅" if is_hidden(user) else "выключен ❌"),
+        (f"{_ic('expedition')} Возвращение экспедиции", _onoff(notify)),
+        ("🕶 Режим скрытости", _onoff(is_hidden(user), "включён", "выключен")),
     ]
     return (
         f"{_image(with_image)}"
@@ -514,7 +534,7 @@ def notif_html(user: dict, with_image: bool = False) -> str:
         "<p><b>🔔 УВЕДОМЛЕНИЯ</b></p>"
         "<blockquote><i>Бот может сообщить, когда твой отряд вернётся из экспедиции, "
         "чтобы добыча не ждала в лагере.</i></blockquote>"
-        + _tree([("🗺 Возвращение экспедиции", "включено ✅" if notify else "выключено ❌")], "Сейчас")
+        + _tree([(f"{_ic('expedition')} Возвращение экспедиции", _onoff(notify))], "Сейчас")
         + _p("<i>Сообщение приходит один раз, когда экспедиция завершилась.</i>")
     )
 
@@ -645,7 +665,7 @@ async def nick_receive(message: Message, state: FSMContext):
     uid = message.from_user.id
     await _send_rich_card(
         message.bot, message.chat.id, "settings",
-        lambda wi: settings_html(user, uid, wi, "<b>✅ Никнейм изменён!</b>"), settings_kb())
+        lambda wi: settings_html(user, uid, wi, f"<b>{_ic('ok')} Никнейм изменён!</b>"), settings_kb())
 
 
 @router.message(NickStates.waiting, ~F.text)
@@ -689,7 +709,7 @@ def priv_html(user: dict, with_image: bool = False) -> str:
         "<p><b>🕶 ПРИВАТНОСТЬ</b></p>"
         "<blockquote><i>Режим скрытости прячет твоё имя от других игроков. В рейтингах и топах "
         "вместо ника будет написано «Скрытый игрок». Сам ты видишь своё имя как обычно.</i></blockquote>"
-        + _tree([("🕶 Режим скрытости", "включён ✅" if hidden else "выключен ❌")], "Сейчас")
+        + _tree([("🕶 Режим скрытости", _onoff(hidden, "включён", "выключен"))], "Сейчас")
         + _gap()
         + _tree([
             ("Ты видишь себя", name_html(user)),
@@ -738,11 +758,11 @@ async def on_priv_toggle(callback: CallbackQuery):
 # ---------------------------------------------------------------------------
 
 HELP_SECTIONS: list[tuple[str, str, str]] = [
-    ("play", "🎮", "Как играть"),
-    ("level", "⭐", "Что даёт уровень"),
-    ("art", "💎", "Как работают артефакты"),
-    ("coins", "💰", "Как получить монеты"),
-]
+    ("play", "pet", "Как играть"),
+    ("level", "level", "Что даёт уровень"),
+    ("art", "art", "Как работают артефакты"),
+    ("coins", "coin", "Как получить монеты"),
+]       # второй элемент: ключ эмодзи темы (см. _ic)
 
 
 def _g(name: str, default):
@@ -779,10 +799,10 @@ def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]
                     ("3. Качай питомца", "в «Мой питомец» → «Прокачать», тратится мясо и фрукты"),
                 ]),
                 ("Разделы меню", [
-                    ("⛏ Шахты", "приносят доход в фоне, даже пока тебя нет"),
-                    ("🗺 Исследование", "отряды уходят в экспедиции и приносят монеты, еду и артефакты"),
-                    ("⚔️ Босс", "бей боссов и получай за урон фрагменты"),
-                    ("🧩 Сокровищница", "сундуки за фрагменты, из них падают артефакты"),
+                    (f"{_ic('mine')} Шахты", "приносят доход в фоне, даже пока тебя нет"),
+                    (f"{_ic('explore')} Исследование", "отряды уходят в экспедиции и приносят монеты, еду и артефакты"),
+                    (f"{_ic('boss')} Босс", "бей боссов и получай за урон фрагменты"),
+                    (f"{_ic('treasury')} Сокровищница", "сундуки за фрагменты, из них падают артефакты"),
                 ]),
                 ("Игровой круг", [
                     ("Добыча", "шахта и экспедиции дают монеты, мясо и фрукты"),
@@ -816,9 +836,9 @@ def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]
             "Артефакты дают процентные бонусы. Их можно надеть и усилить себя.",
             [
                 ("Виды артефактов", [
-                    ("🐾 Питомца", "усиливают характеристики и боевые умения, раздел «Снаряжение»"),
-                    ("⛏ Шахты", "усиливают шахту, раздел «Шахты»"),
-                    ("🗺 Исследователей", "богаче добыча, короче путь, выше шанс редкого"),
+                    (f"{_ic('pet')} Питомца", "усиливают характеристики и боевые умения, раздел «Снаряжение»"),
+                    (f"{_ic('mine')} Шахты", "усиливают шахту, раздел «Шахты»"),
+                    (f"{_ic('expedition')} Исследователей", "богаче добыча, короче путь, выше шанс редкого"),
                 ]),
                 ("Как пользоваться", [
                     ("Слоты", f"надеть можно до {slots} артефактов в каждом разделе"),
@@ -842,9 +862,9 @@ def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]
             "Монеты нужны для найма отрядов, времени экспедиций и других улучшений.",
             [
                 ("Основные источники", [
-                    ("⛏ Шахта", "доход каждый час: шахтёры и кирки повышают его"),
-                    ("🗺 Экспедиции", "чем сильнее отряд и дольше путь, тем больше монет"),
-                    ("♻️ Дубликаты", "повторный артефакт из сундука заменяется монетами"),
+                    (f"{_ic('mine')} Шахта", "доход каждый час: шахтёры и кирки повышают его"),
+                    (f"{_ic('expedition')} Экспедиции", "чем сильнее отряд и дольше путь, тем больше монет"),
+                    (f"{_ic('art')} Дубликаты", "повторный артефакт из сундука заменяется монетами"),
                 ]),
                 ("Как получать больше", [
                     ("Серия дней", "заходи каждый день: бонус к добыче экспедиций до +30%"),
@@ -862,7 +882,8 @@ def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]
 
 
 def help_section_html(key: str, with_image: bool = False) -> str:
-    icon, title = next(((i, t) for k, i, t in HELP_SECTIONS if k == key), ("❓", "Помощь"))
+    icon_key, title = next(((i, t) for k, i, t in HELP_SECTIONS if k == key), ("play", "Помощь"))
+    icon = _ic(icon_key)
     intro, blocks = _help_texts()[key]
     body = _gap().join(_tree(rows, head) for head, rows in blocks)
     keys = [k for k, _, _ in HELP_SECTIONS]
@@ -1044,7 +1065,7 @@ async def support_receive(message: Message, state: FSMContext):
     _save_users()
     _led("support_report", uid=str(uid), text=body[:300], photo=bool(message.photo), delivered=delivered)
     await state.clear()
-    note = ("<b>✅ Обращение отправлено!</b><br><i>Мы ответим в Telegram, как только прочитаем.</i>"
+    note = (f"<b>{_ic('ok')} Обращение отправлено!</b><br><i>Мы ответим в Telegram, как только прочитаем.</i>"
             if delivered else
             f"<b>⚠️ Не удалось доставить обращение.</b><br><i>Напиши напрямую: @{SUPPORT_USERNAME}.</i>")
     await _send_rich_card(message.bot, message.chat.id, "settings_support",
