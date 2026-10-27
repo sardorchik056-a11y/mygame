@@ -403,6 +403,12 @@ def who(user: dict, uid: str) -> str:
     return f"@{escape(user['username'])}" if user.get("username") else f"ID {uid}"
 
 
+def _real_name(uid) -> str:
+    """Настоящее имя для админа: никнейм или имя из Telegram (скрытость админа не касается)."""
+    user = D.users.get(str(uid))
+    return settings.name_plain(user) if user else f"ID {uid}"
+
+
 def player_label(uid: str, user: dict) -> str:
     name = f"@{escape(user['username'])}" if user.get("username") else "без юзернейма"
     pet = D.PETS.get(user.get("pet"), {}).get("name")
@@ -719,7 +725,7 @@ def stats_game(S: dict, rows: list[dict]) -> str:
     lines += ["", "<b>Топ урона сегодня</b>"]
     if today:
         for n, (uid, dmg) in enumerate(today, start=1):
-            name = boss.STATS["names"].get(uid) or f"ID {uid}"
+            name = _real_name(uid)
             lines.append(f"{n}. {escape(str(name))}: <b>{fmt(dmg)}</b>")
     else:
         lines.append("—")
@@ -2438,7 +2444,7 @@ async def adm_boss_top(cb: CallbackQuery):
         if not rank:
             lines.append("—")
         for n, (uid, dmg) in enumerate(rank, start=1):
-            name = boss.STATS["names"].get(uid) or f"ID {uid}"
+            name = _real_name(uid)
             lines.append(f"{n}. {escape(str(name))} (<code>{uid}</code>): <b>{fmt(dmg)}</b>")
     await _show(cb, "\n".join(lines), _kb(_back("adm:bs")))
     await cb.answer()
