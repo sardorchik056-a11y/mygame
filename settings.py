@@ -105,6 +105,15 @@ SUPPORT_PER_DAY = 5              # обращений в сутки от одн�
 # Кастомный эмодзи заголовка (тот же, что на кнопке «Настройки»)
 SETTINGS_EMOJI = ("5341715473882955310", "⚙️")
 
+# Эмодзи пунктов настроек: (id, запасной обычный эмодзи)
+EM_NICK = ("5197269100878907942", "✍️")        # никнейм
+EM_NOTIF = ("5458603043203327669", "🔔")       # уведомления
+EM_PRIV = ("5843826335088120045", "💬")        # приватность
+EM_HELP = ("5436113877181941026", "❓")        # помощь
+EM_SUPPORT = ("5393061004747750741", "🤩")     # поддержка
+EM_ID = ("5323442290708985472", "©")          # ID
+EM_DATE = ("5413879192267805083", "🗓")       # «в игре с»
+
 # ---------------------------------------------------------------------------
 # Подключение к боту
 # ---------------------------------------------------------------------------
@@ -439,6 +448,13 @@ def _btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY) -> Inli
     return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
+def _ibtn(text: str, data: str, pair: tuple[str, str],
+          style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
+    """Кнопка с кастомным эмодзи слева от текста."""
+    return InlineKeyboardButton(text=text, callback_data=data, style=style,
+                                icon_custom_emoji_id=pair[0])
+
+
 def _back(data: str, text: str = "Назад") -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data, style=ButtonStyle.PRIMARY,
                                 icon_custom_emoji_id=_BACK_ID)
@@ -458,15 +474,15 @@ def _onoff(value: bool, on: str = "включено", off: str = "выключе
 def settings_html(user: dict, uid: int, with_image: bool = False, note: str = "") -> str:
     notify = get_setting(user, "notify_exrn")
     profile = [
-        ("👤 Никнейм", name_html(user)),
-        ("🆔 ID", f"<code>{uid}</code>"),
-        ("📅 В игре с", _date(user.get("joined", 0))),
+        (f"{_em(EM_NICK)} Никнейм", name_html(user)),
+        (f"{_em(EM_ID)} ID", f"<code>{uid}</code>"),
+        (f"{_em(EM_DATE)} В игре с", _date(user.get("joined", 0))),
         (f"{_ic('level')} Уровень питомца", str(user.get("level", 1))),
         (f"{_ic('wins')} Бои", f"{user.get('wins', 0)} побед · {user.get('losses', 0)} поражений"),
     ]
     alerts = [
         (f"{_ic('expedition')} Возвращение экспедиции", _onoff(notify)),
-        ("🕶 Режим скрытости", _onoff(is_hidden(user), "включён", "выключен")),
+        (f"{_em(EM_PRIV)} Режим скрытости", _onoff(is_hidden(user), "включён", "выключен")),
     ]
     return (
         f"{_image(with_image)}"
@@ -482,11 +498,11 @@ def settings_html(user: dict, uid: int, with_image: bool = False, note: str = ""
 
 def settings_kb() -> InlineKeyboardMarkup:
     return _kb(
-        [_btn("✏️ Никнейм", "set:nick", ButtonStyle.SUCCESS),
-         _btn("🔔 Уведомления", "set:notif", ButtonStyle.PRIMARY)],
-        [_btn("🕶 Приватность", "set:priv", ButtonStyle.PRIMARY),
-         _btn("❓ Помощь", "set:help", ButtonStyle.PRIMARY)],
-        [_btn("🛟 Поддержка", "set:sup", ButtonStyle.SUCCESS)],
+        [_ibtn("Никнейм", "set:nick", EM_NICK, ButtonStyle.SUCCESS),
+         _ibtn("Уведомления", "set:notif", EM_NOTIF, ButtonStyle.PRIMARY)],
+        [_ibtn("Приватность", "set:priv", EM_PRIV, ButtonStyle.PRIMARY),
+         _ibtn("Помощь", "set:help", EM_HELP, ButtonStyle.PRIMARY)],
+        [_ibtn("Поддержка", "set:sup", EM_SUPPORT, ButtonStyle.SUCCESS)],
         [_btn("Закрыть", "set:close", ButtonStyle.DANGER)],
     )
 
@@ -501,7 +517,7 @@ def nick_html_screen(user: dict, with_image: bool = False, note: str = "") -> st
     ]
     return (
         f"{_image(with_image)}"
-        "<p><b>✏️ НИКНЕЙМ</b></p>"
+        f"<p><b>{_em(EM_NICK)} НИКНЕЙМ</b></p>"
         "<blockquote><i>Это имя будет показано везде в боте: в меню, профиле и разделах. "
         "Выдели часть текста и сделай её жирной или вставь кастомный эмодзи, "
         "и всё сохранится как есть.</i></blockquote>"
@@ -531,7 +547,7 @@ def notif_html(user: dict, with_image: bool = False) -> str:
     notify = get_setting(user, "notify_exrn")
     return (
         f"{_image(with_image)}"
-        "<p><b>🔔 УВЕДОМЛЕНИЯ</b></p>"
+        f"<p><b>{_em(EM_NOTIF)} УВЕДОМЛЕНИЯ</b></p>"
         "<blockquote><i>Бот может сообщить, когда твой отряд вернётся из экспедиции, "
         "чтобы добыча не ждала в лагере.</i></blockquote>"
         + _tree([(f"{_ic('expedition')} Возвращение экспедиции", _onoff(notify))], "Сейчас")
@@ -706,10 +722,10 @@ def priv_html(user: dict, with_image: bool = False) -> str:
     hidden = is_hidden(user)
     return (
         f"{_image(with_image)}"
-        "<p><b>🕶 ПРИВАТНОСТЬ</b></p>"
+        f"<p><b>{_em(EM_PRIV)} ПРИВАТНОСТЬ</b></p>"
         "<blockquote><i>Режим скрытости прячет твоё имя от других игроков. В рейтингах и топах "
         "вместо ника будет написано «Скрытый игрок». Сам ты видишь своё имя как обычно.</i></blockquote>"
-        + _tree([("🕶 Режим скрытости", _onoff(hidden, "включён", "выключен"))], "Сейчас")
+        + _tree([(f"{_em(EM_PRIV)} Режим скрытости", _onoff(hidden, "включён", "выключен"))], "Сейчас")
         + _gap()
         + _tree([
             ("Ты видишь себя", name_html(user)),
@@ -908,7 +924,7 @@ def help_section_kb(key: str) -> InlineKeyboardMarkup:
                               style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_PREV_ID),
          InlineKeyboardButton(text="Далее", callback_data=f"set:help:{next_key}",
                               style=ButtonStyle.SUCCESS, icon_custom_emoji_id=ARROW_NEXT_ID)],
-        [_btn("🛟 Поддержка", "set:sup", ButtonStyle.PRIMARY)],
+        [_ibtn("Поддержка", "set:sup", EM_SUPPORT, ButtonStyle.PRIMARY)],
         [_back("set:main", "К настройкам")],
     )
 
@@ -944,7 +960,7 @@ class SupportStates(StatesGroup):
 def support_html(user: dict, with_image: bool = False, note: str = "") -> str:
     return (
         f"{_image(with_image)}"
-        "<p><b>🛟 ПОДДЕРЖКА</b></p>"
+        f"<p><b>{_em(EM_SUPPORT)} ПОДДЕРЖКА</b></p>"
         "<blockquote><i>Что-то работает не так или есть вопрос? Напиши нам: мы читаем каждое "
         "обращение.</i></blockquote>"
         + _tree([
