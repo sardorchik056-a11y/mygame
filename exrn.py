@@ -1049,7 +1049,7 @@ def main_html(user: dict, with_image: bool = False) -> str:
             hint = "<i>Отряд отдохнул и готов к походу. Чем дольше путь, тем щедрее награда.</i>"
 
     player = [
-        ("👤 Имя", settings.name_html(user)),
+        (f"{_em(settings.EM_USER)} Имя", settings.name_html(user)),
         (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
         (f"{_em(EM_STREAK)} Серия", f"{streak} дн." + (f" · +{bonus_pct}% к добыче" if bonus_pct else " · зайди завтра за бонусом")),
         (f"{_em(EM_SQUADS)} Отрядов", f"{len(ex['hired'])} из {len(GROUPS)}"),
@@ -1346,7 +1346,7 @@ def log_html(user: dict, with_image: bool = False) -> str:
         f"<p><b>{_em(EM_LOG)} ЖУРНАЛ ИССЛЕДОВАТЕЛЯ</b></p>"
         "<blockquote><i>Каждый поход становится строкой в истории. Пусть эта книга будет толстой.</i></blockquote>"
         + _tree([
-            ("👤 Имя", settings.name_html(user)),
+            (f"{_em(settings.EM_USER)} Имя", settings.name_html(user)),
             (f"{_em(EM_TITLE)} Звание", rank + (f" · до следующего {to_next} эксп." if to_next else "")),
             (f"{_em(EM_STREAK)} Серия", f"{streak} дн."),
         ], "Исследователь")
