@@ -941,6 +941,13 @@ settings.setup(
     INFO_EMOJI=INFO_EMOJI,
     BACK_EMOJI_ID=BACK_EMOJI_ID,
     alerts_path=Path(__file__).with_name("alerts.json"),   # ожидающие уведомления о возвращении отрядов
+    admin_ids=ADMIN_IDS,                                    # кому приходят обращения в поддержку
+    game=dict(                                              # числа игры для раздела «Помощь»
+        MAX_LEVEL=MAX_LEVEL, EVO_EVERY=EVO_EVERY, EVO_COST_MULT=EVO_COST_MULT,
+        STAT_GROWTH=STAT_GROWTH, EVO_GROWTH=EVO_GROWTH, upgrade_cost=upgrade_cost,
+        SLOTS=equipment.SLOTS, DUPLICATE_COINS=cases.DUPLICATE_COINS,
+        FRAG_DAMAGE_STEP=cases.FRAG_DAMAGE_STEP, FRAG_CHANCE=cases.FRAG_CHANCE,
+    ),
 )
 dp.include_router(settings.router)
 
