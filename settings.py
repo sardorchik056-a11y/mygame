@@ -9,6 +9,12 @@
   * Уведомления: «отряд вернулся из экспедиции». Фоновая задача notifier_loop шлёт
     сообщение, когда экспедиция закончилась. Список ожидающих уведомлений хранится в
     alerts.json рядом с базой, поэтому бот не перебирает всех игроков.
+  * Приватность: режим скрытости. Скрытый игрок показывается другим как «Скрытый игрок»
+    (public_name_html / public_name_plain), а сам видит своё имя как обычно.
+  * Помощь и FAQ: «Как играть», «Что даёт уровень», «Как работают артефакты», «Как получить
+    монеты». Числа берутся из настроек игры, поэтому текст не расходится с реальным балансом.
+  * Поддержка: прямая ссылка на @IIARKII и «Сообщить о проблеме» (сообщение с ID игрока уходит
+    всем админам, с защитой от спама).
   * Информация об игроке: никнейм, ID, дата регистрации, уровень и бои.
 
 Защита никнейма: длина, запрет ссылок и упоминаний, запрет переносов строк, пауза между
@@ -20,7 +26,8 @@
     user["nick_plain"]  тот же никнейм обычным текстом
     user["nick_at"]     время последней смены
     user["tg_name"]     имя из Telegram (запасной вариант, обновляет панель админа)
-    user["settings"]    {"notify_exrn": True/False}
+    user["settings"]    {"notify_exrn": True/False, "hidden": True/False}
+    user["support_at"], user["support_day"]  защита обращений в поддержку
 
 Подключение в main.py: settings.setup(...), dp.include_router(settings.router) и запуск
 settings.notifier_loop(bot) отдельной задачей. Старый обработчик «Настройки» в main.py нужно убрать.
@@ -63,6 +70,9 @@ IMG_TARGETS: dict[str, str] = {
     "settings": "Настройки",
     "settings_nick": "Настройки: никнейм",
     "settings_notify": "Настройки: уведомления",
+    "settings_privacy": "Настройки: приватность",
+    "settings_help": "Настройки: помощь",
+    "settings_support": "Настройки: поддержка",
 }
 
 # ---------------------------------------------------------------------------
@@ -83,7 +93,14 @@ FORBIDDEN_ENTITIES = {"url", "text_link", "mention", "text_mention", "email", "p
 
 ALERT_TICK = 20                  # как часто проверять уведомления, секунд
 ALERTS_PER_TICK = 30             # сколько уведомлений отправлять за один проход
-DEFAULT_SETTINGS = {"notify_exrn": True}
+DEFAULT_SETTINGS = {"notify_exrn": True, "hidden": False}
+HIDDEN_NAME = "Скрытый игрок"    # так видят игрока с режимом скрытости
+
+SUPPORT_USERNAME = "IIARKII"                       # поддержка в Telegram
+SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
+SUPPORT_MAX_LEN = 800            # длина обращения
+SUPPORT_COOLDOWN = 60            # пауза между обращениями, секунд
+SUPPORT_PER_DAY = 5              # обращений в сутки от одного игрока
 
 # Кастомный эмодзи заголовка (тот же, что на кнопке «Настройки»)
 SETTINGS_EMOJI = ("5341715473882955310", "⚙️")
@@ -103,10 +120,19 @@ _ALERTS_FILE: Path | None = None
 _ALERTS: dict[str, float] = {}   # uid -> когда закончилась (или закончится) экспедиция
 
 
+_ADMIN_IDS: set[int] = set()
+_GAME: dict = {}                 # числа игры для раздела «Помощь» (уровни, цены, шансы)
+
+
 def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji,
-          BACK_EMOJI_ID, INFO_EMOJI=None, alerts_path=None, **_ignored) -> None:
+          BACK_EMOJI_ID, INFO_EMOJI=None, alerts_path=None, admin_ids=(), game=None,
+          **_ignored) -> None:
+    """game: числа игры для текстов помощи: MAX_LEVEL, EVO_EVERY, EVO_COST_MULT, STAT_GROWTH,
+    EVO_GROWTH, upgrade_cost(level), SLOTS, DUPLICATE_COINS, FRAG_DAMAGE_STEP, FRAG_CHANCE."""
     global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji
-    global _BACK_ID, _INFO, _ALERTS_FILE
+    global _BACK_ID, _INFO, _ALERTS_FILE, _ADMIN_IDS, _GAME
+    _ADMIN_IDS = set(admin_ids)
+    _GAME = dict(game or {})
     _get_user, _save_users = get_user, save_users
     _show_rich_card, _send_rich_card = show_rich_card, send_rich_card
     _custom_emoji, _BACK_ID = custom_emoji, BACK_EMOJI_ID
@@ -182,6 +208,19 @@ def name_plain(user: dict | None) -> str:
 
 def has_nick(user: dict) -> bool:
     return bool(user.get("nick")) and _valid_html(user.get("nick"))
+
+
+def is_hidden(user: dict | None) -> bool:
+    return bool(user) and get_setting(user, "hidden")
+
+
+def public_name_html(user: dict | None) -> str:
+    """Имя игрока для показа ДРУГИМ игрокам (рейтинги, топы боссов): учитывает режим скрытости."""
+    return escape(HIDDEN_NAME) if is_hidden(user) else name_html(user)
+
+
+def public_name_plain(user: dict | None) -> str:
+    return HIDDEN_NAME if is_hidden(user) else name_plain(user)
 
 
 def reset_nick(user: dict) -> str | None:
@@ -405,7 +444,10 @@ def settings_html(user: dict, uid: int, with_image: bool = False, note: str = ""
         ("⭐ Уровень питомца", str(user.get("level", 1))),
         ("⚔️ Бои", f"{user.get('wins', 0)} побед · {user.get('losses', 0)} поражений"),
     ]
-    alerts = [("🗺 Возвращение экспедиции", "включено ✅" if notify else "выключено ❌")]
+    alerts = [
+        ("🗺 Возвращение экспедиции", "включено ✅" if notify else "выключено ❌"),
+        ("🕶 Режим скрытости", "включён ✅" if is_hidden(user) else "выключен ❌"),
+    ]
     return (
         f"{_image(with_image)}"
         f"<p><b>{_em(SETTINGS_EMOJI)} НАСТРОЙКИ</b></p>"
@@ -413,7 +455,7 @@ def settings_html(user: dict, uid: int, with_image: bool = False, note: str = ""
         "и посмотреть данные своего профиля.</i></blockquote>"
         + _tree(profile, "Профиль")
         + _gap()
-        + _tree(alerts, "Уведомления")
+        + _tree(alerts, "Параметры")
         + (f"<p>{note}</p>" if note else "")
     )
 
@@ -422,6 +464,9 @@ def settings_kb() -> InlineKeyboardMarkup:
     return _kb(
         [_btn("✏️ Никнейм", "set:nick", ButtonStyle.SUCCESS),
          _btn("🔔 Уведомления", "set:notif", ButtonStyle.PRIMARY)],
+        [_btn("🕶 Приватность", "set:priv", ButtonStyle.PRIMARY),
+         _btn("❓ Помощь", "set:help", ButtonStyle.PRIMARY)],
+        [_btn("🛟 Поддержка", "set:sup", ButtonStyle.SUCCESS)],
         [_btn("Закрыть", "set:close", ButtonStyle.DANGER)],
     )
 
@@ -631,3 +676,382 @@ async def on_notif_toggle(callback: CallbackQuery):
     _led("settings_toggle", uid=str(callback.from_user.id), key="notify_exrn", value=st["notify_exrn"])
     await callback.answer("Уведомления включены" if st["notify_exrn"] else "Уведомления выключены")
     await _show(callback, "settings_notify", lambda wi: notif_html(user, wi), notif_kb(user))
+
+
+# ---------------------------------------------------------------------------
+# Приватность
+# ---------------------------------------------------------------------------
+
+def priv_html(user: dict, with_image: bool = False) -> str:
+    hidden = is_hidden(user)
+    return (
+        f"{_image(with_image)}"
+        "<p><b>🕶 ПРИВАТНОСТЬ</b></p>"
+        "<blockquote><i>Режим скрытости прячет твоё имя от других игроков. В рейтингах и топах "
+        "вместо ника будет написано «Скрытый игрок». Сам ты видишь своё имя как обычно.</i></blockquote>"
+        + _tree([("🕶 Режим скрытости", "включён ✅" if hidden else "выключен ❌")], "Сейчас")
+        + _gap()
+        + _tree([
+            ("Ты видишь себя", name_html(user)),
+            ("Другие видят тебя", public_name_html(user)),
+        ], "Как это выглядит")
+        + _p("<i>Скрытость не влияет на прогресс: награды и место в рейтинге сохраняются.</i>")
+    )
+
+
+def priv_kb(user: dict) -> InlineKeyboardMarkup:
+    hidden = is_hidden(user)
+    return _kb(
+        [_btn("Выключить скрытость" if hidden else "Включить скрытость", "set:priv_toggle",
+              ButtonStyle.DANGER if hidden else ButtonStyle.SUCCESS)],
+        [_back("set:main")],
+    )
+
+
+@router.callback_query(F.data == "set:priv")
+async def on_priv(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    user = await _need_user(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show(callback, "settings_privacy", lambda wi: priv_html(user, wi), priv_kb(user))
+
+
+@router.callback_query(F.data == "set:priv_toggle")
+async def on_priv_toggle(callback: CallbackQuery):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    st = user.get("settings")
+    if not isinstance(st, dict):
+        st = user["settings"] = {}
+    st["hidden"] = not is_hidden(user)
+    _save_users()
+    _led("settings_toggle", uid=str(callback.from_user.id), key="hidden", value=st["hidden"])
+    await callback.answer("Режим скрытости включён" if st["hidden"] else "Режим скрытости выключен")
+    await _show(callback, "settings_privacy", lambda wi: priv_html(user, wi), priv_kb(user))
+
+
+# ---------------------------------------------------------------------------
+# Помощь и FAQ
+# ---------------------------------------------------------------------------
+
+HELP_SECTIONS: list[tuple[str, str, str]] = [
+    ("play", "🎮", "Как играть"),
+    ("level", "⭐", "Что даёт уровень"),
+    ("art", "💎", "Как работают артефакты"),
+    ("coins", "💰", "Как получить монеты"),
+]
+
+
+def _g(name: str, default):
+    return _GAME.get(name, default)
+
+
+def _num(n) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]]]]:
+    """Содержимое разделов помощи: ключ -> (вступление, [(заголовок блока, строки)])."""
+    max_level = _g("MAX_LEVEL", 100)
+    evo_every = _g("EVO_EVERY", 10)
+    evo_mult = _g("EVO_COST_MULT", 7)
+    growth = round(_g("STAT_GROWTH", 0.04) * 100)
+    evo_growth = round(_g("EVO_GROWTH", 0.15) * 100)
+    cost = _g("upgrade_cost", lambda level: (level, level + 1))
+    m5, f5 = cost(5)
+    me, fe = cost(evo_every - 1)
+    slots = _g("SLOTS", 3)
+    dup = _g("DUPLICATE_COINS", {})
+    step = _g("FRAG_DAMAGE_STEP", 5000)
+    chance = round(_g("FRAG_CHANCE", 0.5) * 100)
+    dup_line = " · ".join(f"{k.lower()} {_num(v)}" for k, v in dup.items()) if dup else ""
+
+    return {
+        "play": (
+            "Коротко о главном: что делать в начале и как устроена игра.",
+            [
+                ("С чего начать", [
+                    ("1. Выбери питомца", "у каждого своя стихия, характеристики и способность"),
+                    ("2. Забирай запасы", "в «Запасах» видны монеты, мясо и фрукты"),
+                    ("3. Качай питомца", "в «Мой питомец» → «Прокачать», тратится мясо и фрукты"),
+                ]),
+                ("Разделы меню", [
+                    ("⛏ Шахты", "приносят доход в фоне, даже пока тебя нет"),
+                    ("🗺 Исследование", "отряды уходят в экспедиции и приносят монеты, еду и артефакты"),
+                    ("⚔️ Босс", "бей боссов и получай за урон фрагменты"),
+                    ("🧩 Сокровищница", "сундуки за фрагменты, из них падают артефакты"),
+                ]),
+                ("Игровой круг", [
+                    ("Добыча", "шахта и экспедиции дают монеты, мясо и фрукты"),
+                    ("Прокачка", "еда повышает уровень и силу питомца"),
+                    ("Бои", "сильный питомец наносит больше урона боссам"),
+                    ("Награды", "фрагменты → сундуки → артефакты → ещё сильнее"),
+                ]),
+            ],
+        ),
+        "level": (
+            f"Уровень делает питомца сильнее. Максимум: {max_level} уровень.",
+            [
+                ("Что даёт уровень", [
+                    ("Каждый уровень", f"характеристики питомца +{growth}%"),
+                    (f"Каждый {evo_every}-й уровень", f"эволюция: характеристики +{evo_growth}%"),
+                    ("Чем выше уровень", "тем больше урон и здоровье в боях с боссами"),
+                ]),
+                ("Сколько стоит", [
+                    ("Обычный уровень", "мяса столько же, какой у тебя уровень, фруктов на одно больше"),
+                    ("Например, с 5-го уровня", f"{m5} мяса и {f5} фруктов"),
+                    ("Эволюция", f"стоит в {evo_mult} раз больше еды"),
+                    (f"Например, с {evo_every - 1}-го уровня", f"{me} мяса и {fe} фруктов"),
+                ]),
+                ("Совет", [
+                    ("Копи еду заранее", "перед эволюцией нужно много мяса и фруктов"),
+                    ("Еду приносят", "экспедиции исследователей"),
+                ]),
+            ],
+        ),
+        "art": (
+            "Артефакты дают процентные бонусы. Их можно надеть и усилить себя.",
+            [
+                ("Виды артефактов", [
+                    ("🐾 Питомца", "усиливают характеристики и боевые умения, раздел «Снаряжение»"),
+                    ("⛏ Шахты", "усиливают шахту, раздел «Шахты»"),
+                    ("🗺 Исследователей", "богаче добыча, короче путь, выше шанс редкого"),
+                ]),
+                ("Как пользоваться", [
+                    ("Слоты", f"надеть можно до {slots} артефактов в каждом разделе"),
+                    ("Бонусы", "складываются: чем больше надето, тем сильнее эффект"),
+                    ("Как надеть", "открой раздел → «Артефакты» или «Снаряжение» → выбери → «Надеть»"),
+                ]),
+                ("Редкости", [
+                    ("Пять редкостей", "обычный, редкий, эпический, мифический, легендарный"),
+                    ("Чем реже", "тем сильнее бонус"),
+                ]),
+                ("Где взять", [
+                    ("Сундуки", f"за фрагменты: за каждые {_num(step)} урона по боссу есть попытка "
+                                f"получить фрагмент (шанс {chance}%)"),
+                    ("Экспедиции", "исследователи находят артефакты до мифических"),
+                    ("Дубликат", "если такой артефакт уже есть, ты получишь монеты"
+                                 + (f": {dup_line}" if dup_line else "")),
+                ]),
+            ],
+        ),
+        "coins": (
+            "Монеты нужны для найма отрядов, времени экспедиций и других улучшений.",
+            [
+                ("Основные источники", [
+                    ("⛏ Шахта", "доход каждый час: шахтёры и кирки повышают его"),
+                    ("🗺 Экспедиции", "чем сильнее отряд и дольше путь, тем больше монет"),
+                    ("♻️ Дубликаты", "повторный артефакт из сундука заменяется монетами"),
+                ]),
+                ("Как получать больше", [
+                    ("Серия дней", "заходи каждый день: бонус к добыче экспедиций до +30%"),
+                    ("Уровень отряда", "каждый поход прокачивает отряд, добыча растёт"),
+                    ("События в пути", "иногда экспедиции находят сундук или тайник"),
+                    ("Артефакты", "бонусы к монетам и ко всей добыче"),
+                ]),
+                ("Совет", [
+                    ("Не забывай забирать добычу", "новый поход можно начать только после того, как заберёшь прошлую добычу"),
+                    ("Включи уведомления", "бот напомнит, когда отряд вернётся"),
+                ]),
+            ],
+        ),
+    }
+
+
+def help_html(with_image: bool = False) -> str:
+    return (
+        f"{_image(with_image)}"
+        "<p><b>❓ ПОМОЩЬ</b></p>"
+        "<blockquote><i>Короткие ответы на главные вопросы. Выбери тему.</i></blockquote>"
+        + _tree([(f"{icon} {title}", "") for _, icon, title in HELP_SECTIONS], "Темы")
+        + _p("<i>Не нашёл ответ? Загляни в «Поддержка», мы поможем.</i>")
+    )
+
+
+def help_kb() -> InlineKeyboardMarkup:
+    rows = [[_btn(f"{icon} {title}", f"set:help:{key}", ButtonStyle.PRIMARY)]
+            for key, icon, title in HELP_SECTIONS]
+    rows.append([_btn("🛟 Поддержка", "set:sup", ButtonStyle.SUCCESS)])
+    rows.append([_back("set:main")])
+    return _kb(*rows)
+
+
+def help_section_html(key: str, with_image: bool = False) -> str:
+    icon, title = next(((i, t) for k, i, t in HELP_SECTIONS if k == key), ("❓", "Помощь"))
+    intro, blocks = _help_texts()[key]
+    body = _gap().join(_tree(rows, head) for head, rows in blocks)
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{icon} {title.upper()}</b></p>"
+        f"<blockquote><i>{intro}</i></blockquote>" + body
+    )
+
+
+def help_section_kb(key: str) -> InlineKeyboardMarkup:
+    keys = [k for k, _, _ in HELP_SECTIONS]
+    nxt = keys[(keys.index(key) + 1) % len(keys)]
+    nxt_title = next(t for k, _, t in HELP_SECTIONS if k == nxt)
+    return _kb(
+        [_btn(f"Дальше: {nxt_title}", f"set:help:{nxt}", ButtonStyle.SUCCESS)],
+        [_back("set:help", "К темам")],
+    )
+
+
+@router.callback_query(F.data == "set:help")
+async def on_help(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer()
+    await _show_rich_card(callback, "settings_help", lambda wi: help_html(wi), help_kb())
+
+
+@router.callback_query(F.data.regexp(r"^set:help:\w+$"))
+async def on_help_section(callback: CallbackQuery):
+    key = callback.data.split(":")[2]
+    if key not in {k for k, _, _ in HELP_SECTIONS}:
+        await callback.answer("Такой темы нет", show_alert=True)
+        return
+    await callback.answer()
+    await _show_rich_card(callback, "settings_help", lambda wi: help_section_html(key, wi),
+                          help_section_kb(key))
+
+
+# ---------------------------------------------------------------------------
+# Поддержка
+# ---------------------------------------------------------------------------
+
+class SupportStates(StatesGroup):
+    waiting = State()
+
+
+def support_html(user: dict, with_image: bool = False, note: str = "") -> str:
+    return (
+        f"{_image(with_image)}"
+        "<p><b>🛟 ПОДДЕРЖКА</b></p>"
+        "<blockquote><i>Что-то работает не так или есть вопрос? Напиши нам: мы читаем каждое "
+        "обращение.</i></blockquote>"
+        + _tree([
+            ("💬 Написать напрямую", f"@{SUPPORT_USERNAME}"),
+            ("📨 Сообщить о проблеме", "обращение уйдёт администраторам вместе с твоим ID"),
+        ], "Как связаться")
+        + _gap()
+        + _tree([
+            ("Что случилось", "опиши проблему своими словами"),
+            ("Где", "раздел и кнопка, на которой это произошло"),
+            ("Скриншот", "можно приложить фото к сообщению"),
+        ], "Что указать")
+        + (f"<p>{note}</p>" if note else "")
+    )
+
+
+def support_kb() -> InlineKeyboardMarkup:
+    return _kb(
+        [InlineKeyboardButton(text=f"Написать @{SUPPORT_USERNAME}", url=SUPPORT_URL,
+                              style=ButtonStyle.SUCCESS)],
+        [_btn("📨 Сообщить о проблеме", "set:sup_write", ButtonStyle.PRIMARY)],
+        [_back("set:main")],
+    )
+
+
+@router.callback_query(F.data == "set:sup")
+async def on_support(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    user = await _need_user(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show(callback, "settings_support", lambda wi: support_html(user, wi), support_kb())
+
+
+@router.callback_query(F.data == "set:sup_write")
+async def on_support_write(callback: CallbackQuery, state: FSMContext):
+    user = await _need_user(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await state.set_state(SupportStates.waiting)
+    await _show(
+        callback, "settings_support",
+        lambda wi: (
+            f"{_image(wi)}<p><b>📨 СООБЩИТЬ О ПРОБЛЕМЕ</b></p>"
+            "<blockquote><i>Опиши, что случилось, одним сообщением. Можно приложить скриншот: "
+            "отправь фото с подписью.</i></blockquote>"
+            + _p(f"<i>Максимум {SUPPORT_MAX_LEN} символов. Твой ID и ник мы добавим сами.</i>")
+        ),
+        _kb([_back("set:sup", "Отмена")]),
+    )
+
+
+def _support_header(user: dict, uid: int, tg) -> str:
+    handle = f"@{escape(tg.username)}" if tg.username else "без юзернейма"
+    return (
+        "<b>📨 Обращение в поддержку</b>\n"
+        f"Игрок: {name_html(user)} · {handle}\n"
+        f"ID: <code>{uid}</code> · уровень {user.get('level', 1)}"
+    )
+
+
+@router.message(SupportStates.waiting, F.text | F.photo)
+async def support_receive(message: Message, state: FSMContext):
+    text = message.text or ""
+    if text in RESERVED_BUTTONS or text.startswith("/"):
+        await state.clear()          # игрок выбрал другую кнопку или команду: отмена обращения
+        raise SkipHandler
+    user = _get_user(message.from_user.id)
+    if user is None:
+        await state.clear()
+        return
+    body = (message.text or message.caption or "").strip()
+    if not body:
+        await message.answer("<i>Добавь описание проблемы текстом (для фото напиши подпись).</i>")
+        return
+    if len(body) > SUPPORT_MAX_LEN:
+        await message.answer(f"<i>Слишком длинно: максимум {SUPPORT_MAX_LEN} символов, у тебя {len(body)}.</i>")
+        return
+
+    now = time.time()
+    left = int(user.get("support_at", 0) + SUPPORT_COOLDOWN - now)
+    if left > 0:
+        await message.answer(f"<i>Следующее обращение можно отправить через {left} с.</i>")
+        return
+    today = time.strftime("%Y-%m-%d")
+    day = user.get("support_day")
+    count = day[1] if isinstance(day, list) and len(day) == 2 and day[0] == today else 0
+    if count >= SUPPORT_PER_DAY:
+        await message.answer(f"<i>На сегодня лимит обращений исчерпан ({SUPPORT_PER_DAY}). "
+                             f"Если срочно, напиши напрямую: @{SUPPORT_USERNAME}.</i>")
+        return
+
+    uid = message.from_user.id
+    header = _support_header(user, uid, message.from_user)
+    report = f"{header}\n\n{escape(body)}"
+    link = (f"https://t.me/{message.from_user.username}" if message.from_user.username
+            else f"tg://user?id={uid}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Карточка игрока", callback_data=f"adm:u:{uid}", style=ButtonStyle.PRIMARY),
+        InlineKeyboardButton(text="Написать игроку", url=link, style=ButtonStyle.SUCCESS),
+    ]])
+    delivered = 0
+    for admin_id in _ADMIN_IDS:
+        try:
+            if message.photo:
+                await message.bot.send_photo(admin_id, message.photo[-1].file_id,
+                                             caption=report[:1024], reply_markup=kb)
+            else:
+                await message.bot.send_message(admin_id, report, reply_markup=kb)
+            delivered += 1
+        except TelegramAPIError as e:
+            log.warning("не удалось доставить обращение админу %s: %s", admin_id, e)
+
+    user["support_at"] = now
+    user["support_day"] = [today, count + 1]
+    _save_users()
+    _led("support_report", uid=str(uid), text=body[:300], photo=bool(message.photo), delivered=delivered)
+    await state.clear()
+    note = ("<b>✅ Обращение отправлено!</b><br><i>Мы ответим в Telegram, как только прочитаем.</i>"
+            if delivered else
+            f"<b>⚠️ Не удалось доставить обращение.</b><br><i>Напиши напрямую: @{SUPPORT_USERNAME}.</i>")
+    await _send_rich_card(message.bot, message.chat.id, "settings_support",
+                          lambda wi: support_html(user, wi, note), support_kb())
