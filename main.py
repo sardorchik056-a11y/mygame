@@ -942,6 +942,12 @@ settings.setup(
     BACK_EMOJI_ID=BACK_EMOJI_ID,
     alerts_path=Path(__file__).with_name("alerts.json"),   # ожидающие уведомления о возвращении отрядов
     admin_ids=ADMIN_IDS,                                    # кому приходят обращения в поддержку
+    emoji=dict(                                             # кастомные эмодзи других разделов
+        pet=PET_BTN_EMOJI, level=LEVEL_EMOJI, wins=WINS_EMOJI, losses=LOSSES_EMOJI,
+        mine=mine.MINE_EMOJI, boss=boss.BOSS_EMOJI, explore=exrn.EXPLORE_EMOJI,
+        treasury=TREASURY_EMOJI, coin=COIN_EMOJI, art=exrn.EM_ART,
+        expedition=exrn.EM_EXPED, ok=exrn.EM_OK,
+    ),
     game=dict(                                              # числа игры для раздела «Помощь»
         MAX_LEVEL=MAX_LEVEL, EVO_EVERY=EVO_EVERY, EVO_COST_MULT=EVO_COST_MULT,
         STAT_GROWTH=STAT_GROWTH, EVO_GROWTH=EVO_GROWTH, upgrade_cost=upgrade_cost,
