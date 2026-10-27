@@ -113,6 +113,8 @@ EM_HELP = ("5436113877181941026", "❓")        # помощь
 EM_SUPPORT = ("5393061004747750741", "🤩")     # поддержка
 EM_ID = ("5323442290708985472", "©")          # ID
 EM_DATE = ("5413879192267805083", "🗓")       # «в игре с»
+EM_OFF = ("5328093774650293878", "❌")        # «выключено»
+EM_USER = ("5275979556308674886", "👤")       # перед именем игрока (меню, профиль)
 
 # ---------------------------------------------------------------------------
 # Подключение к боту
@@ -207,8 +209,8 @@ def _valid_html(value) -> bool:
 
 
 def default_name(user: dict) -> str:
-    """Имя без никнейма: имя из Telegram, иначе юзернейм, иначе «Игрок»."""
-    return (user.get("tg_name") or user.get("username") or "Игрок")[:40]
+    """Имя без никнейма: имя из Telegram (юзернейм не показываем), иначе «Игрок»."""
+    return (user.get("tg_name") or "Игрок")[:40]
 
 
 def name_html(user: dict | None) -> str:
@@ -246,6 +248,46 @@ def public_name_html(user: dict | None) -> str:
 
 def public_name_plain(user: dict | None) -> str:
     return HIDDEN_NAME if is_hidden(user) else name_plain(user)
+
+
+_MISSING = object()
+
+
+class NameBook(dict):
+    """Словарь имён игроков для рейтингов (например, топ бойцов босса).
+
+    Вместо сохранённого имени отдаёт актуальное: никнейм из настроек, а если он не задан,
+    имя из Telegram (не юзернейм). Для игрока с режимом скрытости отдаёт «Скрытый игрок».
+    Записи, сделанные модулем босса, по-прежнему принимаются как запасной вариант."""
+
+    @staticmethod
+    def _fresh(key) -> str | None:
+        if _get_user is None:
+            return None
+        try:
+            user = _get_user(int(key))
+        except (TypeError, ValueError):
+            return None
+        return public_name_plain(user) if user else None
+
+    def get(self, key, default=None):
+        fresh = self._fresh(key)
+        if fresh:
+            return fresh
+        raw = dict.get(self, key, default)
+        # Старые записи могли быть юзернеймами: их не показываем
+        return default if isinstance(raw, str) and raw.startswith("@") else raw
+
+    def __getitem__(self, key):
+        value = self.get(key, _MISSING)
+        if value is _MISSING:
+            raise KeyError(key)
+        return value
+
+
+def install_name_book(stats: dict) -> None:
+    """Подключает NameBook к статистике босса: stats["names"] начнёт отдавать никнеймы."""
+    stats["names"] = NameBook(stats.get("names") or {})
 
 
 def reset_nick(user: dict) -> str | None:
@@ -468,7 +510,7 @@ def _date(ts) -> str:
 
 
 def _onoff(value: bool, on: str = "включено", off: str = "выключено") -> str:
-    return f"{on} {_ic('ok')}" if value else f"{off} ❌"
+    return f"{on} {_ic('ok')}" if value else f"{off} {_em(EM_OFF)}"
 
 
 def settings_html(user: dict, uid: int, with_image: bool = False, note: str = "") -> str:
@@ -498,7 +540,7 @@ def settings_html(user: dict, uid: int, with_image: bool = False, note: str = ""
 
 def settings_kb() -> InlineKeyboardMarkup:
     return _kb(
-        [_ibtn("Никнейм", "set:nick", EM_NICK, ButtonStyle.SUCCESS),
+        [_ibtn("Никнейм", "set:nick", EM_NICK, ButtonStyle.PRIMARY),
          _ibtn("Уведомления", "set:notif", EM_NOTIF, ButtonStyle.PRIMARY)],
         [_ibtn("Приватность", "set:priv", EM_PRIV, ButtonStyle.PRIMARY),
          _ibtn("Помощь", "set:help", EM_HELP, ButtonStyle.PRIMARY)],
