@@ -2475,7 +2475,7 @@ EVENT_TITLES = {
     "admin_boss_reset": "Сброс босса", "admin_boss_reset_type": "Сброс боссов вида",
     "admin_boss_stats_reset": "Сброс статистики боссов", "broadcast": "Рассылка",
     "nick_change": "Смена никнейма", "nick_reset": "Сброс никнейма (игрок)",
-    "admin_nick_reset": "Сброс никнейма (админ)", "settings_toggle": "Переключатель в настройках",
+    "admin_nick_reset": "Сброс никнейма (админ)", "support_report": "Обращение в поддержку", "settings_toggle": "Переключатель в настройках",
     "admin_exrn_reset": "Сброс исследователей", "admin_exrn_finish": "Завершение экспедиции",
     "exrn_hire": "Найм отряда", "exrn_time": "Открытие времени", "exrn_go": "Отправка экспедиции",
     "exrn_claim": "Добыча экспедиции", "exrn_integrity_fix": "Исправление данных исследователей",
