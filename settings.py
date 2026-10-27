@@ -71,7 +71,7 @@ IMG_TARGETS: dict[str, str] = {
     "settings_nick": "Настройки: никнейм",
     "settings_notify": "Настройки: уведомления",
     "settings_privacy": "Настройки: приватность",
-    "settings_help": "Настройки: помощь",
+    "settings_help": "Настройки: помощь (темы)",
     "settings_support": "Настройки: поддержка",
 }
 
@@ -861,42 +861,34 @@ def _help_texts() -> dict[str, tuple[str, list[tuple[str, list[tuple[str, str]]]
     }
 
 
-def help_html(with_image: bool = False) -> str:
-    return (
-        f"{_image(with_image)}"
-        "<p><b>❓ ПОМОЩЬ</b></p>"
-        "<blockquote><i>Короткие ответы на главные вопросы. Выбери тему.</i></blockquote>"
-        + _tree([(f"{icon} {title}", "") for _, icon, title in HELP_SECTIONS], "Темы")
-        + _p("<i>Не нашёл ответ? Загляни в «Поддержка», мы поможем.</i>")
-    )
-
-
-def help_kb() -> InlineKeyboardMarkup:
-    rows = [[_btn(f"{icon} {title}", f"set:help:{key}", ButtonStyle.PRIMARY)]
-            for key, icon, title in HELP_SECTIONS]
-    rows.append([_btn("🛟 Поддержка", "set:sup", ButtonStyle.SUCCESS)])
-    rows.append([_back("set:main")])
-    return _kb(*rows)
-
-
 def help_section_html(key: str, with_image: bool = False) -> str:
     icon, title = next(((i, t) for k, i, t in HELP_SECTIONS if k == key), ("❓", "Помощь"))
     intro, blocks = _help_texts()[key]
     body = _gap().join(_tree(rows, head) for head, rows in blocks)
+    keys = [k for k, _, _ in HELP_SECTIONS]
     return (
         f"{_image(with_image)}"
-        f"<p><b>{icon} {title.upper()}</b></p>"
+        f"<p><b>{icon} {title.upper()}</b> · тема {keys.index(key) + 1} из {len(keys)}</p>"
         f"<blockquote><i>{intro}</i></blockquote>" + body
     )
 
 
+ARROW_PREV_ID = "5255703720078879038"    # стрелка «назад»
+ARROW_NEXT_ID = "5253767677670862169"    # стрелка «вперёд»
+
+
 def help_section_kb(key: str) -> InlineKeyboardMarkup:
+    """Две кнопки со стрелками: к предыдущей и к следующей теме (по кругу)."""
     keys = [k for k, _, _ in HELP_SECTIONS]
-    nxt = keys[(keys.index(key) + 1) % len(keys)]
-    nxt_title = next(t for k, _, t in HELP_SECTIONS if k == nxt)
+    i = keys.index(key)
+    prev_key, next_key = keys[i - 1], keys[(i + 1) % len(keys)]
     return _kb(
-        [_btn(f"Дальше: {nxt_title}", f"set:help:{nxt}", ButtonStyle.SUCCESS)],
-        [_back("set:help", "К темам")],
+        [InlineKeyboardButton(text="Назад", callback_data=f"set:help:{prev_key}",
+                              style=ButtonStyle.PRIMARY, icon_custom_emoji_id=ARROW_PREV_ID),
+         InlineKeyboardButton(text="Далее", callback_data=f"set:help:{next_key}",
+                              style=ButtonStyle.SUCCESS, icon_custom_emoji_id=ARROW_NEXT_ID)],
+        [_btn("🛟 Поддержка", "set:sup", ButtonStyle.PRIMARY)],
+        [_back("set:main", "К настройкам")],
     )
 
 
@@ -904,7 +896,9 @@ def help_section_kb(key: str) -> InlineKeyboardMarkup:
 async def on_help(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await _show_rich_card(callback, "settings_help", lambda wi: help_html(wi), help_kb())
+    first = HELP_SECTIONS[0][0]           # «Помощь» сразу открывает первую тему: «Как играть»
+    await _show_rich_card(callback, "settings_help", lambda wi: help_section_html(first, wi),
+                          help_section_kb(first))
 
 
 @router.callback_query(F.data.regexp(r"^set:help:\w+$"))
