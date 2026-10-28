@@ -250,6 +250,24 @@ def public_name_plain(user: dict | None) -> str:
     return HIDDEN_NAME if is_hidden(user) else name_plain(user)
 
 
+def public_name_html_by_id(uid) -> str | None:
+    """Имя для других игроков по ID (HTML). None, если игрока нет в базе.
+    Используется модулем босса для топа и ленты боя."""
+    try:
+        user = _get_user(int(uid)) if _get_user else None
+    except (TypeError, ValueError):
+        return None
+    return public_name_html(user) if user else None
+
+
+def public_name_plain_by_id(uid) -> str | None:
+    try:
+        user = _get_user(int(uid)) if _get_user else None
+    except (TypeError, ValueError):
+        return None
+    return public_name_plain(user) if user else None
+
+
 _MISSING = object()
 
 
