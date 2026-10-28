@@ -56,9 +56,39 @@ def setup(**deps) -> None:
     Необязательно: award_fragments(user, урон) -> сколько фрагментов выпало (раздел «Кейсы»),
     user_stats(user) -> характеристики с учётом артефактов и bonus(user, вид) -> бонус в процентах
     (раздел «Снаряжение»).
+    name_html_of(uid) -> имя бойца в HTML (никнейм с форматированием и кастомными эмодзи,
+    а если ника нет, имя из Telegram; для скрытых игроков «Скрытый игрок») и
+    name_plain_of(uid) -> то же обычным текстом (раздел «Настройки»).
     """
     for name, value in deps.items():
         setattr(D, name, value)
+
+
+def who_html(uid, fallback: str = "Игрок") -> str:
+    """Имя бойца для вставки в HTML: никнейм с форматированием и кастомными эмодзи.
+    Если имя игрока неизвестно, берётся запасное (оно экранируется)."""
+    fn = getattr(D, "name_html_of", None)
+    if fn:
+        try:
+            html = fn(uid)
+        except Exception:
+            html = None
+        if html:
+            return html
+    return escape(str(fallback or "Игрок"))
+
+
+def who_plain(uid, fallback: str = "Игрок") -> str:
+    """Имя бойца обычным текстом (для хранения): никнейм или имя из Telegram."""
+    fn = getattr(D, "name_plain_of", None)
+    if fn:
+        try:
+            text = fn(uid)
+        except Exception:
+            text = None
+        if text:
+            return text
+    return str(fallback or "Игрок")
 
 
 # ---------- Баланс ----------
@@ -752,8 +782,8 @@ def _feed(bid: str) -> deque:
 
 
 def nick_of(u) -> str:
-    """Ник в телеграме (@name), а если его нет, то имя."""
-    return f"@{u.username}" if u.username else (u.first_name or "Игрок")
+    """Имя в телеграме (юзернейм не показываем). Настоящее имя в бою берётся из настроек игрока."""
+    return (getattr(u, "full_name", None) or u.first_name or "Игрок")
 
 
 def feed_push(bid: str, kind: str, uid: str, name: str, **extra) -> None:
@@ -925,7 +955,7 @@ def skills_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
         blood = D.custom_emoji(BLOOD_EMOJI)
         lines = []
         for e in feed_items:
-            who = escape(e["name"])
+            who = who_html(e["uid"], e["name"])
             if e["kind"] == "kill":
                 lines.append(f"<i>☠️ {who} добил босса</i>")
             elif e["kind"] == "hit":
@@ -994,7 +1024,7 @@ def top_html(user_id: int, with_image: bool = False, ref: str = "") -> str:
 
     rows = [
         (
-            f"{D.custom_emoji(RANK_EMOJI[n - 1])} {escape(str(STATS['names'].get(u, 'Игрок')))}",
+            f"{D.custom_emoji(RANK_EMOJI[n - 1])} {who_html(u, STATS['names'].get(u, 'Игрок'))}",
             show(v),
         )
         for n, (u, v) in enumerate(full[:TOP_SIZE], start=1)
@@ -1479,10 +1509,11 @@ async def on_pet_skills(callback: CallbackQuery):
 
 
 async def _notify_rewards(bot, bid: str, rewards: dict[str, dict[str, int]], killer: str) -> None:
+    """killer: имя того, кто добил, уже в виде HTML (см. who_html)."""
     for uid, r in rewards.items():
         text = (
             f"<b>{_boss_icon()} {escape(name_of(bid))} повержен!</b>\n\n"
-            f"<i>Последний удар нанёс {escape(killer)}.</i>\n"
+            f"<i>Последний удар нанёс {killer}.</i>\n"
             f"<b>Твоя награда:</b> {_coin()} {fmt(r['coins'])}  "
             f"🥩 {r['meat']}  🥭 {r['fruit']}"
         )
@@ -1543,7 +1574,7 @@ async def on_hit(callback: CallbackQuery):
 
     b["hp"] -= dealt
     b["dmg"][uid] = int(b["dmg"].get(uid, 0)) + dealt
-    b["names"][uid] = nick_of(callback.from_user)
+    b["names"][uid] = who_plain(uid, nick_of(callback.from_user))
     b["last_uid"] = uid
     b["last_hit"][uid] = time.time()
     stat_add(uid, b["names"][uid], dmg=dealt)
@@ -1567,7 +1598,7 @@ async def on_hit(callback: CallbackQuery):
         feed_push(bid, "kill", uid, name)
         rewards = finish_boss(bid, name)
         await callback.answer(text + ". Босс повержен!", show_alert=True)
-        asyncio.create_task(_notify_rewards(callback.bot, bid, rewards, name))
+        asyncio.create_task(_notify_rewards(callback.bot, bid, rewards, who_html(uid, name)))
     else:
         D.save_users()
         save_boss()
