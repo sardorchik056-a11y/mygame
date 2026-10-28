@@ -914,6 +914,8 @@ boss.setup(
     pet_stats=pet_stats,
     pet_images=pet_images,
     STAT_EMOJI=STAT_EMOJI,
+    name_html_of=lambda uid: settings.public_name_html_by_id(uid),    # имена бойцов: никнейм или имя Telegram
+    name_plain_of=lambda uid: settings.public_name_plain_by_id(uid),
 )
 dp.include_router(boss.router)
 
