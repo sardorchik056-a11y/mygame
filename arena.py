@@ -114,6 +114,8 @@ LOSS_COINS = 30              # утешительная награда
 LEAGUE_COIN_BONUS = 0.5      # +50% к награде за каждую лигу выше бронзы
 STREAK_BONUS = 0.10          # +10% за каждую победу в серии
 STREAK_MAX = 5
+GHOST_WIN = (0.60, 0.75)       # к какому шансу победы игрока подгоняется сила робота
+GHOST_TUNE_RUNS = 30         # пробных боёв на каждый шаг подгонки
 BOT_REWARD_MULT = 0.6        # против тренировочного робота награда меньше
 FIRST_WIN_BONUS = 300        # бонус за первую победу за день
 
@@ -265,22 +267,41 @@ def make_fighter(user: dict, uid: str | None, name_html: str, name_plain: str, b
 
 
 def make_ghost(me: dict, rating: int, rng=random) -> dict:
-    """Тренировочный робот: питомец чужой породы, сила близка к силе игрока."""
-    pets = [k for k in _PETS]
+    """Тренировочный робот: питомец чужой породы. Стихию с преимуществом над питомцем игрока не берём
+    (если есть выбор), а силу робота подгоняем пробными боями так, чтобы шанс победы игрока
+    был около GHOST_WIN (разные породы имеют разный множитель урона, простой расчёт по силе
+    даёт перекосы)."""
     mine = me["pet"]
-    key = rng.choice([k for k in pets if k != mine] or pets)
+    others = [k for k in _PETS if k != mine] or list(_PETS)
+    fair = [k for k in others if (_PETS[k]["element"], me["element"]) not in ADVANTAGE]
+    key = rng.choice(fair or others)
     base = _PETS[key]["stats"]
     my_power = power_of(me["stats"])
-    scale = my_power / max(1, power_of(base)) * rng.uniform(0.9, 1.08)
-    stats = {k: max(1, round(base[k] * scale)) for k in ("hp", "atk", "def", "spd", "luck")}
+    unit = my_power / max(1, power_of(base))
     name = rng.choice(BOT_NAMES)
-    return {
-        "uid": None, "bot": True, "name_html": escape(name), "name_plain": name,
-        "pet": key, "pet_name": _PETS[key]["name"], "element": _PETS[key]["element"],
-        "level": max(1, round(me["level"] * rng.uniform(0.9, 1.05))), "stats": stats,
-        "cd_cut": 0, "rating": max(0, rating + rng.randint(-60, 60)),
-        "scale": _scale(key, stats["hp"]),
-    }
+
+    def build(k: float) -> dict:
+        stats = {x: max(1, round(base[x] * unit * k)) for x in ("hp", "atk", "def", "spd", "luck")}
+        return {
+            "uid": None, "bot": True, "name_html": escape(name), "name_plain": name,
+            "pet": key, "pet_name": _PETS[key]["name"], "element": _PETS[key]["element"],
+            "level": max(1, round(me["level"] * rng.uniform(0.85, 1.0))), "stats": stats,
+            "cd_cut": 0, "rating": max(0, rating + rng.randint(-60, 30)),
+            "scale": _scale(key, stats["hp"]),
+        }
+
+    want = rng.uniform(*GHOST_WIN)
+    lo, hi = 0.2, 2.0                                    # во сколько раз робот слабее/сильнее «равного»
+    ghost = build(1.0)
+    for _ in range(7):                                   # бисекция: чем сильнее робот, тем ниже шанс игрока
+        mid = (lo + hi) / 2
+        ghost = build(mid)
+        chance = win_chance(me, ghost, GHOST_TUNE_RUNS)
+        if chance > want:
+            lo = mid
+        else:
+            hi = mid
+    return ghost
 
 
 class _Side:
@@ -867,9 +888,23 @@ def _rows(rows: list) -> str:
     return "<br>".join(f"{row[0]}: <b>{row[1]}</b>" if row[1] != "" else str(row[0]) for row in rows)
 
 
+def _tree(rows: list, title: str = "") -> str:
+    lines = []
+    for n, row in enumerate(rows):
+        label, value = row[0], row[1]
+        mark = "└" if n == len(rows) - 1 else "├"
+        lines.append(f"{mark} {label}" + (f": <b>{value}</b>" if value != "" else ""))
+    head = f"<b>{title}</b><br>" if title else ""
+    return f"<p>{head}{'<br>'.join(lines)}</p>"
+
+
+def _gap() -> str:
+    return "<p>&nbsp;</p>"
+
+
 def _sec(title: str, rows: list) -> str:
-    """Абзац с жирным заголовком и строками «название: значение» (без таблиц и рамок)."""
-    return f"<p><b>{title}</b><br>{_rows(rows)}</p>"
+    """Блок с заголовком и рамочками ├ └, после него пустой промежуток."""
+    return _tree(rows, title) + _gap()
 
 
 def _p(*lines: str) -> str:
@@ -970,8 +1005,8 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
             ("Процент побед", rate),
             ("🛡 Защиты", f"{st['def_w']} отбито, {st['def_l']} проиграно"),
         ])
-        + f"<p><b>⚡ Энергия: {st['energy']}/{ENERGY_MAX}</b><br>{energy_tail}<br>"
-          f"⏳ До конца сезона: <b>{_dur(_season_left())}</b></p>"
+        + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Восстановление", energy_tail),
+                 ("⏳ До конца сезона", _dur(_season_left()))], "🔋 Состояние")
         + (_p(*extra) if extra else "")
     )
 
@@ -999,11 +1034,17 @@ def choose_html(user: dict, with_image: bool = False) -> str:
     return (
         f"{_image(with_image)}<p><b>🎯 ВЫБОР СОПЕРНИКА</b></p>"
         "<blockquote><i>Кого вызовешь на песок: живого бойца или железного спарринг-партнёра?</i></blockquote>"
-        "<p><b>👤 Настоящий игрок</b><br>Питомец реального игрока, подобранный по кубкам и силе. "
-        "Он может быть не в сети, бой всё равно состоится. Полная награда, а кубки меняются у вас обоих.</p>"
-        "<p><b>🤖 Тренировочный робот</b><br>Безопасный спарринг с силой, близкой к твоей. "
-        f"Монет за победу меньше (около {round(BOT_REWARD_MULT * 100)}% от обычного), кубки меняются только у тебя.</p>"
-        f"<p><b>⚡ Энергия: {st['energy']}/{ENERGY_MAX}</b><br>Любой бой стоит 1 энергии.</p>"
+        + _sec("👤 Настоящий игрок", [
+            ("Кто это", "питомец реального игрока, подобранный по кубкам и силе"),
+            ("В сети", "не обязательно, бой всё равно состоится"),
+            ("Награда", "полная, кубки меняются у вас обоих"),
+        ])
+        + _sec("🤖 Тренировочный робот", [
+            ("Кто это", "безопасный спарринг, сила близка к твоей, но он чуть слабее"),
+            ("Награда", f"монет около {round(BOT_REWARD_MULT * 100)}% от обычного"),
+            ("Кубки", "меняются только у тебя"),
+        ])
+        + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Стоимость боя", "1 энергия")], "Состояние")
     )
 
 
@@ -1043,8 +1084,7 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
     else:
         head, quote = "🎯 СОПЕРНИК НАЙДЕН", "Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай."
         status = f"{league_name(target['rating'])}, {_num(target['rating'])} кубков"
-    compare = "<br>".join(f"{_stat_label(k)}: <b>{_cmp(me['stats'][k], opp['stats'][k])}</b>"
-                          for k in ("hp", "atk", "def", "spd", "luck"))
+    compare = [(_stat_label(k), _cmp(me["stats"][k], opp["stats"][k])) for k in ("hp", "atk", "def", "spd", "luck")]
     foe = [
         ("Имя", opp["name_html"]),
         ("Питомец", _pet_line(opp)),
@@ -1056,8 +1096,8 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
         f"{_image(with_image)}<p><b>{head}</b></p>"
         f"<blockquote><i>{quote}</i></blockquote>"
         + _sec("🆚 Противник", foe)
-        + f"<p><b>📊 Сравнение: ты против него</b><br>{compare}</p>"
-        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), f"<i>{elem}</i>")
+        + _sec("📊 Сравнение (ты против него)", compare)
+        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), f"<i>{elem}</i>") + _gap()
         + _sec("💰 Ставки", [
             ("Победа", f"+{win_d} кубков и около {_num(reward)} {_coin()}"),
             ("Поражение", f"{loss_d} кубков"),
@@ -1175,37 +1215,35 @@ def result_kb(info: dict) -> InlineKeyboardMarkup:
 
 def top_html(uid, with_image: bool = False) -> str:
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    lines = []
+    rows = []
     for n, (oid, info) in enumerate(top_list(), start=1):
         name = settings.public_name_html_by_id(oid) or "Игрок"
         you = " ◀ ты" if oid == str(uid) else ""
         pet = _PETS.get(info.get("pet"), {}).get("name", "")
-        lines.append(f"{medals.get(n, f'{n}.')} <b>{name}</b>{you}<br>"
-                     f"{league_name(info.get('r', 0)).split()[0]} {_num(info.get('r', 0))} кубков · {escape(pet)}")
+        rows.append((f"{medals.get(n, f'{n}.')} {name}{you}",
+                     f"{league_name(info.get('r', 0)).split()[0]} {_num(info.get('r', 0))} · {escape(pet)}"))
     rank, total = rank_of(uid)
-    body = (f"<p><b>Лучшие бойцы сезона</b><br>{'<br>'.join(lines)}</p>" if lines
-            else _p("<i>Пока никого нет. Стань первым!</i>"))
+    body = _sec("Лучшие бойцы сезона", rows) if rows else _p("<i>Пока никого нет. Стань первым!</i>")
     return (
         f"{_image(with_image)}<p><b>🏆 РЕЙТИНГ АРЕНЫ</b></p>"
         "<blockquote><i>Лучшие питомцы по кубкам. Скрытые игроки показаны без имени.</i></blockquote>"
         + body
-        + _sec("📍 Твоя позиция", [("Место", f"{rank} из {total}"), ("⏳ До конца сезона", _dur(_season_left()))])
+        + _tree([("📍 Твоё место", f"{rank} из {total}"), ("⏳ Сезон закончится через", _dur(_season_left()))], "Ты")
     )
 
 
 def hist_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
-    lines = []
+    rows = []
     for e in reversed(st["log"]):
         icon = "🛡" if e.get("def") else "⚔️"
         res = "✅" if e["win"] else "❌"
         sign = "+" if e["delta"] >= 0 else ""
-        coins = f" · +{_num(e['coins'])} {_coin()}" if e.get("coins") else ""
+        coins = f" · +{_num(e['coins'])}" if e.get("coins") else ""
         tag = " 🤖" if e.get("bot") else ""
-        lines.append(f"{res} {icon} <b>{escape(str(e.get('opp', '?')))}</b>{tag}<br>"
-                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']} кубков{coins}")
-    body = (f"<p><b>Последние бои</b><br>{'<br>'.join(lines)}</p>" if lines
-            else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>"))
+        rows.append((f"{res} {icon} {escape(str(e.get('opp', '?')))}{tag}",
+                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']}{coins}"))
+    body = _tree(rows, "Последние бои") if rows else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
     return (
         f"{_image(with_image)}<p><b>📜 ИСТОРИЯ БОЁВ</b></p>"
         "<blockquote><i>⚔️ твои атаки, 🛡 нападения на тебя, 🤖 тренировочные роботы.</i></blockquote>" + body
@@ -1223,7 +1261,7 @@ def tasks_html(user: dict, with_image: bool = False) -> str:
     return (
         f"{_image(with_image)}<p><b>🎯 ЗАДАНИЯ ДНЯ</b></p>"
         "<blockquote><i>Новые задания каждый день. Награды выдаются за бои на арене.</i></blockquote>"
-        + _sec("Сегодня", rows)
+        + _tree(rows, "Сегодня")
         + _p("<i>Задания обновляются в полночь.</i>")
     )
 
@@ -1243,20 +1281,18 @@ def rules_html(with_image: bool = False) -> str:
     return (
         f"{_image(with_image)}<p><b>ℹ️ ПРАВИЛА АРЕНЫ</b></p>"
         "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
-        "<p><b>⚔️ Как проходит бой</b><br>"
-        "Перед боем ты выбираешь: настоящий игрок или тренировочный робот. "
-        "Игрока система подбирает по кубкам и силе питомца. "
-        "Питомцы ходят по очереди, быстрый ходит первым, а навыки, критические удары и увороты решают исход.</p>"
-        "<p><b>🔥 Стихии</b><br>Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды.</p>"
-        "<p><b>🏆 Кубки</b><br>За победу растут, за поражение падают. "
-        "Чем сильнее соперник, тем больше награда. Против робота монет меньше, а кубки меняются только у тебя.</p>"
-        f"<p><b>⚡ Энергия</b><br>Бой стоит 1 энергии. Максимум {ENERGY_MAX}, "
-        f"каждые {ENERGY_REGEN_SEC // 60} минут возвращается +1.</p>"
-        f"<p><b>🏅 Лиги</b><br>{leagues}</p>"
-        f"<p><b>📅 Сезон</b><br>Длится {SEASON_LENGTH // 86400} дней. В конце награда за лучшую лигу, а кубки сбрасываются наполовину.</p>"
-        f"<p><b>🔥 Серия</b><br>Каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, "
-        f"максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%.</p>"
-        f"<p><b>🛡 Защита рейтинга</b><br>С одним и тем же игроком можно драться {PAIR_LIMIT_DAY} раза в сутки.</p>"
+        + _sec("Как проходит бой", [
+            ("Соперник", "ты выбираешь: настоящий игрок (подбирается по кубкам и силе) или тренировочный робот"),
+            ("Бой", "по очереди: быстрый питомец ходит первым, навыки, криты и увороты решают исход"),
+            ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды"),
+            ("Кубки", "за победу растут, за поражение падают, и чем сильнее соперник, тем больше награда"),
+            ("Энергия", f"бой стоит 1 энергии, максимум {ENERGY_MAX}, +1 каждые {ENERGY_REGEN_SEC // 60} мин"),
+        ])
+        + _tree([("Лиги", leagues),
+                 ("Сезон", f"длится {SEASON_LENGTH // 86400} дней, в конце награда за лучшую лигу и сброс кубков наполовину"),
+                 ("Серия", f"каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%"),
+                 ("Робот", f"даёт около {round(BOT_REWARD_MULT * 100)}% монет, кубки меняются только у тебя"),
+                 ("Защита", f"против одного игрока можно драться {PAIR_LIMIT_DAY} раза в сутки")], "Прогресс")
         + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
     )
 
