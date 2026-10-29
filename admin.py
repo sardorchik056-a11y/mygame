@@ -15,6 +15,8 @@
   * Боссы: состояние всех боссов, сброс отдельного босса или всех сразу, топ урона.
   * Журнал: последние записи audit.log, фильтр по игроку, выгрузка файла.
   * Управление: технические работы, бэкап базы, скачать базу и журнал.
+  * Арена: карточка игрока (кубки, бои), сброс арены, пополнение энергии, журнал боёв и
+    подозрительных случаев, статистика участников.
   * Исследователи: карточка игрока (отряды, экспедиции), завершение экспедиции, сброс раздела,
     журнал событий и подозрительных случаев по разделу.
   * Реклама: рекламные ссылки (t.me/бот?start=ad_код), клики, уникальные, регистрации,
@@ -72,6 +74,7 @@ from aiogram.types import (
 
 import boss
 import cases
+import arena
 import equipment
 import exrn
 import mine
@@ -707,6 +710,10 @@ def stats_game(S: dict, rows: list[dict]) -> str:
         "", "<b>Исследователи</b>",
         f"Игроков в разделе: <b>{fmt(S['exrn_players'])}</b> · экспедиций завершено: <b>{fmt(S['exrn_trips'])}</b>",
         f"Сейчас в пути или ждут добычу: <b>{fmt(S['exrn_going'])}</b>",
+        "", "<b>Арена</b>",
+        f"Участников: <b>{fmt(arena.admin_stats()['players'])}</b> · боёв проведено: <b>{fmt(arena.admin_stats()['fights'])}</b>"
+        + (f" · лидер: <code>{arena.admin_stats()['top'][0]}</code> ({arena.admin_stats()['top'][1]} кубков)"
+           if arena.admin_stats()["top"] else ""),
         "", "<b>Боссы</b>",
     ]
     for btype in boss.TYPE_ORDER:
@@ -1015,6 +1022,7 @@ def card_text(uid: str, user: dict) -> str:
     lines += ["", f"Никнейм: <b>{settings.name_html(user)}</b>" if settings.has_nick(user)
               else "Никнейм: <i>не задан (показывается имя из Telegram)</i>"]
     lines += [""] + exrn.admin_lines(user)
+    lines += [""] + arena.admin_lines(user)
 
     pet_keys = set(user.get("artifacts", [])) | set(user.get("equipment", []))
     mine_keys = set((m or {}).get("arts", [])) | set((m or {}).get("worn", [])) if isinstance(m, dict) else set()
@@ -1055,6 +1063,7 @@ def card_kb(uid: str) -> InlineKeyboardMarkup:
          _b("Сбросить шахту", f"adm:um:{uid}", R)],
         [_b("Завершить экспедицию", f"adm:ux:{uid}", S),
          _b("Сбросить исследователей", f"adm:ue:{uid}", R)],
+        [_b("Энергия арены", f"adm:af:{uid}", S), _b("Сбросить арену", f"adm:ao:{uid}", R)],
         *([[_b("Сбросить никнейм", f"adm:un:{uid}", R)]] if settings.has_nick(D.users.get(uid) or {}) else []),
         [_b("Удалить игрока", f"adm:ud:{uid}", R)],
         [_b("Обновить", f"adm:u:{uid}", G)],
@@ -1732,6 +1741,49 @@ async def adm_mine_reset(cb: CallbackQuery):
     user.pop("mine", None)
     D.store.flush()
     await cb.answer("Шахта сброшена")
+    await _show(cb, card_text(uid, user), card_kb(uid))
+
+
+@router.callback_query(F.data.regexp(r"^adm:af:\d+$"))
+async def adm_arena_refill(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    if user.get("pet") not in D.PETS:
+        await cb.answer("У игрока нет питомца", show_alert=True)
+        return
+    arena.admin_refill(user)
+    ledger("admin_arena_refill", admin=cb.from_user.id, uid=uid)
+    D.store.flush()
+    await cb.answer("Энергия арены восстановлена")
+    await _show(cb, card_text(uid, user), card_kb(uid))
+
+
+@router.callback_query(F.data.regexp(r"^adm:ao:\d+$"))
+async def adm_arena_reset_ask(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    await _show(cb, f"<b>Сбросить арену?</b>\n\nИгрок: {player_label(uid, user)}\n"
+                    "<i>Кубки, серия, история боёв, задания и энергия будут стёрты, игрок исчезнет "
+                    "из рейтинга. Прежние данные останутся в audit.log.</i>",
+                _confirm_kb(f"adm:aoc:{uid}", f"adm:u:{uid}"))
+    await cb.answer()
+
+
+@router.callback_query(F.data.regexp(r"^adm:aoc:\d+$"))
+async def adm_arena_reset(cb: CallbackQuery):
+    uid = cb.data.split(":")[2]
+    user = await _need_user(cb, uid)
+    if user is None:
+        return
+    old = arena.admin_reset(user, uid)
+    ledger("admin_arena_reset", admin=cb.from_user.id, uid=uid,
+           snapshot=json.dumps(old, ensure_ascii=False, default=str)[:3000])
+    D.store.flush()
+    await cb.answer("Арена игрока сброшена")
     await _show(cb, card_text(uid, user), card_kb(uid))
 
 
@@ -2480,6 +2532,10 @@ EVENT_TITLES = {
     "admin_delete": "Удаление игрока", "admin_dm": "Сообщение игроку",
     "admin_boss_reset": "Сброс босса", "admin_boss_reset_type": "Сброс боссов вида",
     "admin_boss_stats_reset": "Сброс статистики боссов", "broadcast": "Рассылка",
+    "arena_fight": "Бой на арене", "arena_season": "Награда сезона арены", "arena_quest": "Задание арены",
+    "arena_refill": "Энергия арены за монеты", "arena_reroll": "Повторный поиск соперника",
+    "arena_integrity_fix": "Исправление данных арены", "arena_suspicious": "⚠ Подозрительно (арена)",
+    "admin_arena_reset": "Сброс арены", "admin_arena_refill": "Энергия арены (админ)",
     "nick_change": "Смена никнейма", "nick_reset": "Сброс никнейма (игрок)",
     "admin_nick_reset": "Сброс никнейма (админ)", "support_report": "Обращение в поддержку", "settings_toggle": "Переключатель в настройках",
     "admin_exrn_reset": "Сброс исследователей", "admin_exrn_finish": "Завершение экспедиции",
@@ -2543,7 +2599,8 @@ async def adm_log(cb: CallbackQuery, state: FSMContext):
     rows.append([_b("Фильтр по игроку", "adm:lgf", ButtonStyle.SUCCESS)]
                 + ([_b("Сбросить фильтр", "adm:lg:0:0", ButtonStyle.DANGER)] if uid != "0" else []))
     rows.append([_b("Исследователи", "adm:lgx:0", ButtonStyle.PRIMARY),
-                 _b("Скачать audit.log", "adm:lgd", ButtonStyle.PRIMARY)])
+                 _b("Арена", "adm:lga:0", ButtonStyle.PRIMARY)])
+    rows.append([_b("Скачать audit.log", "adm:lgd", ButtonStyle.PRIMARY)])
     rows.append(_back())
     await _show(cb, text, _kb(*rows))
     await cb.answer()
@@ -2570,6 +2627,31 @@ async def adm_log_exrn(cb: CallbackQuery):
     await _show(cb, text, _kb(
         [_b("Все события", "adm:lgx:0", ButtonStyle.SUCCESS if only_alerts else ButtonStyle.PRIMARY),
          _b("⚠ Подозрительные", "adm:lgx:1", ButtonStyle.DANGER if not only_alerts else ButtonStyle.PRIMARY)],
+        _back("adm:lg:0:0"),
+    ))
+    await cb.answer()
+
+
+ARENA_EVENT_PREFIXES = ("arena_", "admin_arena")
+ARENA_ALERT_EVENTS = ("arena_suspicious", "arena_integrity_fix")
+
+
+@router.callback_query(F.data.regexp(r"^adm:lga:[01]$"))
+async def adm_log_arena(cb: CallbackQuery):
+    """События арены: все или только подозрительные и исправления данных."""
+    only_alerts = cb.data.endswith(":1")
+    recs = await asyncio.to_thread(_read_log, "0", 4000)
+    recs = [r for r in recs if str(r.get("event", "")).startswith(ARENA_EVENT_PREFIXES)]
+    alerts = sum(1 for r in recs if r.get("event") in ARENA_ALERT_EVENTS)
+    if only_alerts:
+        recs = [r for r in recs if r.get("event") in ARENA_ALERT_EVENTS]
+    chunk = recs[:LOG_PAGE]
+    head = "<b>Журнал · арена · подозрительные</b>" if only_alerts else "<b>Журнал · арена</b>"
+    text = (head + f"\n<i>Подозрительных случаев и исправлений данных в журнале: {alerts}</i>\n\n"
+            + ("\n".join(_log_line(r) for r in chunk) if chunk else "<i>Записей нет.</i>"))
+    await _show(cb, text, _kb(
+        [_b("Все события", "adm:lga:0", ButtonStyle.SUCCESS if only_alerts else ButtonStyle.PRIMARY),
+         _b("⚠ Подозрительные", "adm:lga:1", ButtonStyle.DANGER if not only_alerts else ButtonStyle.PRIMARY)],
         _back("adm:lg:0:0"),
     ))
     await cb.answer()
@@ -2739,6 +2821,7 @@ def _img_groups() -> list[tuple[str, str, list[str]]]:
         ("c", "Сокровищница", [k for k in cases.IMG_TARGETS if k in D.IMG_TARGETS]),
         ("x", "Исследователи", [k for k in exrn.IMG_TARGETS if k in D.IMG_TARGETS]),
         ("s", "Настройки", [k for k in settings.IMG_TARGETS if k in D.IMG_TARGETS]),
+        ("a", "Арена", [k for k in arena.IMG_TARGETS if k in D.IMG_TARGETS]),
     ]
     placed = {k for _, _, keys in parts for k in keys}
     rest = [k for k in all_keys if k not in placed]       # всё новое попадёт в «Общие»
@@ -2881,6 +2964,8 @@ async def img_receive(message: Message, state: FSMContext):
         await equipment.send_preview(bot, chat_id, uid, pet_key)
     elif pet_key in exrn.IMG_TARGETS:
         await exrn.send_preview(bot, chat_id, uid, pet_key)
+    elif pet_key in arena.IMG_TARGETS:
+        await arena.send_preview(bot, chat_id, uid, pet_key)
     elif pet_key == "stock":
         await D.send_rich_card(bot, chat_id, "stock", lambda with_image: D.stock_html(uid, with_image))
     else:
