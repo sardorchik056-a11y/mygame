@@ -134,6 +134,7 @@ QUESTS = [
 
 # --- Показ боя ---
 FRAME_DELAY = 1.7            # пауза между кадрами боя, секунд
+LIVE_LINES = 3               # сколько последних ударов показывать в бою
 MAX_FRAMES = 12              # больше кадров не показываем (лимиты Telegram на правки сообщения)
 
 # --- Подбор соперников ---
@@ -1185,11 +1186,11 @@ def battle_frames(info: dict) -> list:
     hp = full
     for start in range(1, total_rounds + 1, step):
         end = min(total_rounds, start + step - 1)
-        shown = [e for e in events if start <= e["r"] <= end]
-        if not shown:
+        shown = [e for e in events if e["r"] <= end]           # все события до этого кадра
+        if not shown or shown[-1]["r"] < start:
             continue
         hp = shown[-1]["hp"]
-        last = shown[-4:]
+        last = shown[-LIVE_LINES:]                             # последние ходы бойцов (сквозь раунды)
         title = f"раунд {end} из {total_rounds}"
         frames.append(lambda wi, title=title, hp=hp, last=last: (
             f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ · {title}</b></p>"
