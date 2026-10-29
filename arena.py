@@ -6,10 +6,11 @@
     и в боях с боссами), удары могут быть критическими, а противник может увернуться.
   * Стихии: Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды. Врождённые способности
     питомцев (Огненная ярость, Приливная волна, Каменная кожа) работают и на арене.
-  * Соперника подбирает система: по рейтингу (кубкам) и силе питомца. Бой идёт против питомца
-    реального игрока (даже если он не в сети), а если подходящих нет, против тренировочного
-    «призрака». Перед боем показывается оценка шанса победы.
-  * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои, серия побед,
+  * Перед боем игрок сам выбирает соперника: настоящий игрок (питомец реального игрока подбирается
+    по рейтингу и силе, даже если он не в сети) или тренировочный робот (безопасный спарринг
+    с уменьшенной наградой). Перед боем показывается оценка шанса победы.
+  * Бой показывается по раундам, поэтому длится заметно дольше нескольких секунд.
+  * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои (10 штук, +1 за 10 минут), серия побед,
     ежедневные задания, недельные сезоны с наградой за лигу, топ-10 и история боёв.
 
 Защита: данные игрока проверяются при каждом входе (_sanitize), энергия и награды считаются
@@ -50,7 +51,7 @@ router = Router()
 # Куда админ может добавить фото через /img
 IMG_TARGETS: dict[str, str] = {
     "arena": "Арена: главный экран",
-    "arena_find": "Арена: подбор соперника",
+    "arena_find": "Арена: выбор и подбор соперника",
     "arena_battle": "Арена: бой",
     "arena_top": "Арена: рейтинг",
     "arena_tasks": "Арена: задания",
@@ -62,7 +63,7 @@ IMG_TARGETS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 # --- Бой ---
-HP_MULT = 10                 # здоровье в бою = характеристика hp x HP_MULT (чтобы бой шёл несколько раундов)
+HP_MULT = 10                 # здоровье в бою = характеристика hp x HP_MULT
 MAX_ROUNDS = 30              # если никто не победил, выигрывает тот, у кого осталось больше здоровья
 CRIT_MULT = 1.75             # во сколько раз крит сильнее
 CRIT_MAX = 0.5               # шанс крита не выше
@@ -103,8 +104,8 @@ SEASON_LENGTH = 7 * 86400
 SEASON_REWARD = [300, 1_500, 5_000, 15_000, 40_000, 100_000]   # монеты за лучшую лигу сезона
 
 # --- Энергия ---
-ENERGY_MAX = 5
-ENERGY_REGEN_SEC = 20 * 60   # +1 энергия за 20 минут
+ENERGY_MAX = 10
+ENERGY_REGEN_SEC = 10 * 60   # +1 энергия за 10 минут
 ENERGY_REFILL_COST = 1_000   # монет за полное восстановление
 
 # --- Награды ---
@@ -113,7 +114,7 @@ LOSS_COINS = 30              # утешительная награда
 LEAGUE_COIN_BONUS = 0.5      # +50% к награде за каждую лигу выше бронзы
 STREAK_BONUS = 0.10          # +10% за каждую победу в серии
 STREAK_MAX = 5
-BOT_REWARD_MULT = 0.6        # против тренировочного призрака награда меньше
+BOT_REWARD_MULT = 0.6        # против тренировочного робота награда меньше
 FIRST_WIN_BONUS = 300        # бонус за первую победу за день
 
 # Ежедневные задания: (ключ, описание, что считаем, цель, награда монетами)
@@ -122,6 +123,10 @@ QUESTS = [
     ("q_wins2", "Выиграй 2 боя", "wins", 2, 600),
     ("q_wins5", "Выиграй 5 боёв", "wins", 5, 1_500),
 ]
+
+# --- Показ боя ---
+FRAME_DELAY = 1.7            # пауза между кадрами боя, секунд
+MAX_FRAMES = 12              # больше кадров не показываем (лимиты Telegram на правки сообщения)
 
 # --- Подбор соперников ---
 RATING_RANGE = 150           # изначальный разброс рейтинга
@@ -136,9 +141,9 @@ SIM_PREVIEW = 80             # сколько пробных боёв для о�
 HISTORY_KEEP = 10
 TOP_SIZE = 10
 
-# Тренировочные призраки
-BOT_NAMES = ["Тень Гладиатора", "Эхо Арены", "Призрачный Боец", "Страж Колизея", "Безымянный Воин",
-             "Дух Чемпиона", "Мираж", "Тренер Гром", "Отражение", "Железный Гость"]
+# Тренировочные роботы
+BOT_NAMES = ["Робот-Тренер", "Железный Гладиатор", "Сталь-7", "Страж Колизея", "Механический Воин",
+             "Бронзовый Голем", "Тренажёр Гром", "Андроид Арены", "Титан-Спарринг", "Боевой Манекен"]
 
 # ---------------------------------------------------------------------------
 # Подключение к боту
@@ -260,7 +265,7 @@ def make_fighter(user: dict, uid: str | None, name_html: str, name_plain: str, b
 
 
 def make_ghost(me: dict, rating: int, rng=random) -> dict:
-    """Тренировочный соперник: питомец чужой породы, сила близка к силе игрока."""
+    """Тренировочный робот: питомец чужой породы, сила близка к силе игрока."""
     pets = [k for k in _PETS]
     mine = me["pet"]
     key = rng.choice([k for k in pets if k != mine] or pets)
@@ -609,14 +614,26 @@ def _fighter_of(uid: str) -> dict | None:
     return make_fighter(user, str(uid), html, plain)
 
 
-def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random) -> dict:
-    """Подбирает соперника. Возвращает цель (см. структуру ниже); реального игрока или призрака."""
+def _target_mode(target: dict) -> str:
+    """\"pvp\" (настоящий игрок) или \"bot\" (тренировочный робот). Старые цели без поля mode тоже понимаем."""
+    return target.get("mode") or ("bot" if target.get("bot") else "pvp")
+
+
+def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random, mode: str = "pvp") -> dict | None:
+    """Подбирает соперника выбранного вида. mode=\"bot\" всегда даёт робота; mode=\"pvp\" даёт
+    реального игрока или None, если подходящих сейчас нет."""
     me = make_fighter(user, str(uid), "", "")
     my_power = power_of(me["stats"])
     my_rating = st["rating"]
+    if mode == "bot":
+        ghost = make_ghost(me, my_rating, rng)
+        return {"uid": None, "bot": True, "mode": "bot", "ghost": ghost, "rating": ghost["rating"],
+                "ts": time.time(), "rerolls": attempt}
     pairs = st["pairs"]["n"]
-    for widen in range(3):                                     # если никого нет, постепенно расширяем поиск
-        span = min(RATING_RANGE_MAX, RATING_RANGE + RATING_RANGE_STEP * (attempt + widen * 2))
+    passes = [(min(RATING_RANGE_MAX, RATING_RANGE + RATING_RANGE_STEP * (attempt + w * 2)), POWER_RATIO)
+              for w in range(3)]
+    passes.append((10**6, (0.5, 2.5)))                         # в последней попытке рейтинг не ограничиваем
+    for span, (lo, hi) in passes:
         pool = []
         for oid, info in _REG["players"].items():
             if oid == str(uid) or oid in st["recent"] or pairs.get(oid, 0) >= PAIR_LIMIT_DAY:
@@ -624,7 +641,7 @@ def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random) ->
             if abs(info.get("r", 0) - my_rating) > span:
                 continue
             ratio = info.get("p", 0) / max(1, my_power)
-            if not (POWER_RATIO[0] <= ratio <= POWER_RATIO[1]):
+            if not (lo <= ratio <= hi):
                 continue
             pool.append((abs(info["r"] - my_rating) + rng.uniform(0, 40), oid, info))
         pool.sort(key=lambda x: x[0])
@@ -632,11 +649,9 @@ def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random) ->
         rng.shuffle(top)
         for _, oid, info in top:
             if _fighter_of(oid) is not None:
-                return {"uid": oid, "bot": False, "rating": info["r"], "ts": time.time(),
+                return {"uid": oid, "bot": False, "mode": "pvp", "rating": info["r"], "ts": time.time(),
                         "rerolls": attempt}
-    ghost = make_ghost(me, my_rating, rng)
-    return {"uid": None, "bot": True, "ghost": ghost, "rating": ghost["rating"], "ts": time.time(),
-            "rerolls": attempt}
+    return None
 
 
 def target_fighter(target: dict) -> dict | None:
@@ -848,18 +863,13 @@ def _bar(share: float, width: int = 10) -> str:
     return "▰" * full + "▱" * (width - full)
 
 
-def _tree(rows: list, title: str = "") -> str:
-    lines = []
-    for n, row in enumerate(rows):
-        label, value = row[0], row[1]
-        mark = "└" if n == len(rows) - 1 else "├"
-        lines.append(f"{mark} {label}" + (f": <b>{value}</b>" if value != "" else ""))
-    head = f"<b>{title}</b><br>" if title else ""
-    return f"<p>{head}{'<br>'.join(lines)}</p>"
+def _rows(rows: list) -> str:
+    return "<br>".join(f"{row[0]}: <b>{row[1]}</b>" if row[1] != "" else str(row[0]) for row in rows)
 
 
-def _gap() -> str:
-    return "<p>&nbsp;</p>"
+def _sec(title: str, rows: list) -> str:
+    """Абзац с жирным заголовком и строками «название: значение» (без таблиц и рамок)."""
+    return f"<p><b>{title}</b><br>{_rows(rows)}</p>"
 
 
 def _p(*lines: str) -> str:
@@ -930,26 +940,10 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
     pet = _PETS[user["pet"]]
     rank, total = rank_of(uid)
     games = st["wins"] + st["losses"]
-    rate = f"{round(st['wins'] * 100 / games)}%" if games else "нет боёв"
+    rate = f"{round(st['wins'] * 100 / games)}%" if games else "пока нет боёв"
     wait = _energy_wait(st)
-    energy = f"{st['energy']}/{ENERGY_MAX}" + (f" · следующая через {_dur(wait)}" if st["energy"] < ENERGY_MAX else "")
-    fighter = [
-        ("Питомец", f"{escape(pet['name'])} {_elem(pet['element'])}".strip()),
-        (f"{_em(_LEVEL)} Уровень", str(user["level"])),
-        ("💪 Сила", _num(power_of(stats))),
-    ]
-    rating = [
-        ("Лига", league_name(st["rating"])),
-        ("🏆 Кубки", f"{_num(st['rating'])} (рекорд сезона {_num(st['best'])})"),
-        ("📍 Место", f"{rank} из {total}"),
-        ("🔥 Серия побед", f"{st['streak']} (рекорд {st['best_streak']})"),
-    ]
-    fights = [
-        (f"{_em(_WINS)} Победы", _num(st["wins"])),
-        (f"{_em(_LOSSES)} Поражения", _num(st["losses"])),
-        ("Процент побед", rate),
-        ("🛡 Защиты", f"{st['def_w']} отбито · {st['def_l']} проиграно"),
-    ]
+    energy_tail = (f"Следующая единица через {_dur(wait)}" if st["energy"] < ENERGY_MAX
+                   else "Энергия полная, можно смело в бой")
     extra = []
     if st["unseen"]:
         extra.append(f"<b>🛡 На тебя нападали: {st['unseen']} раз. Подробности в «История».</b>")
@@ -959,17 +953,32 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
         f"{_image(with_image)}"
         f"<p><b>{_em(ARENA_EMOJI)} АРЕНА</b></p>"
         f"<blockquote><i>{random.choice(ARENA_LINES)}</i></blockquote>"
-        + _tree(fighter, "Твой боец")
-        + _gap() + _tree(rating, "Рейтинг")
-        + _gap() + _tree(fights, "Бои")
-        + _gap() + _tree([("⚡ Энергия", energy), ("⏳ Сезон закончится через", _dur(_season_left()))], "Состояние")
+        + _sec("🐾 Твой боец", [
+            ("Питомец", f"{escape(pet['name'])} {_elem(pet['element'])}".strip()),
+            (f"{_em(_LEVEL)} Уровень", str(user["level"])),
+            ("💪 Сила", _num(power_of(stats))),
+        ])
+        + _sec("🏆 Рейтинг", [
+            ("Лига", league_name(st["rating"])),
+            ("Кубки", f"{_num(st['rating'])} (рекорд сезона {_num(st['best'])})"),
+            ("Место", f"{rank} из {total}"),
+            ("🔥 Серия побед", f"{st['streak']} (рекорд {st['best_streak']})"),
+        ])
+        + _sec("⚔️ Бои", [
+            (f"{_em(_WINS)} Победы", _num(st["wins"])),
+            (f"{_em(_LOSSES)} Поражения", _num(st["losses"])),
+            ("Процент побед", rate),
+            ("🛡 Защиты", f"{st['def_w']} отбито, {st['def_l']} проиграно"),
+        ])
+        + f"<p><b>⚡ Энергия: {st['energy']}/{ENERGY_MAX}</b><br>{energy_tail}<br>"
+          f"⏳ До конца сезона: <b>{_dur(_season_left())}</b></p>"
         + (_p(*extra) if extra else "")
     )
 
 
 def main_kb(user: dict) -> InlineKeyboardMarkup:
     st = _state(user)
-    rows = [[_btn("⚔️ В бой: найти соперника", "arena:find", ButtonStyle.SUCCESS)]]
+    rows = [[_btn("⚔️ В бой: выбрать соперника", "arena:find", ButtonStyle.SUCCESS)]]
     if st["energy"] < 1:
         rows.insert(0, [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)])
     rows += [
@@ -981,7 +990,34 @@ def main_kb(user: dict) -> InlineKeyboardMarkup:
 
 
 def _cmp(mine: int, theirs: int) -> str:
-    return f"{_num(mine)} · {_num(theirs)} " + ("▲" if mine > theirs else "▼" if mine < theirs else "=")
+    arrow = "▲" if mine > theirs else "▼" if mine < theirs else "="
+    return f"{_num(mine)} против {_num(theirs)} {arrow}"
+
+
+def choose_html(user: dict, with_image: bool = False) -> str:
+    st = _state(user)
+    return (
+        f"{_image(with_image)}<p><b>🎯 ВЫБОР СОПЕРНИКА</b></p>"
+        "<blockquote><i>Кого вызовешь на песок: живого бойца или железного спарринг-партнёра?</i></blockquote>"
+        "<p><b>👤 Настоящий игрок</b><br>Питомец реального игрока, подобранный по кубкам и силе. "
+        "Он может быть не в сети, бой всё равно состоится. Полная награда, а кубки меняются у вас обоих.</p>"
+        "<p><b>🤖 Тренировочный робот</b><br>Безопасный спарринг с силой, близкой к твоей. "
+        f"Монет за победу меньше (около {round(BOT_REWARD_MULT * 100)}% от обычного), кубки меняются только у тебя.</p>"
+        f"<p><b>⚡ Энергия: {st['energy']}/{ENERGY_MAX}</b><br>Любой бой стоит 1 энергии.</p>"
+    )
+
+
+def choose_kb(user: dict) -> InlineKeyboardMarkup:
+    st = _state(user)
+    rows = []
+    if st["energy"] < 1:
+        rows.append([_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)])
+    rows += [
+        [_btn("👤 Против игрока", "arena:find:pvp", ButtonStyle.SUCCESS)],
+        [_btn("🤖 Против робота", "arena:find:bot", ButtonStyle.PRIMARY)],
+        [_back("arena:main")],
+    ]
+    return _kb(*rows)
 
 
 def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
@@ -992,49 +1028,55 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
         return f"{_image(with_image)}<p><b>Соперник не найден.</b></p>"
     win_d, loss_d = rating_deltas(st["rating"], target["rating"])
     league_mult = 1 + LEAGUE_COIN_BONUS * league_index(st["rating"])
-    mult = 1.0 if not target.get("bot") else BOT_REWARD_MULT
-    reward = round(WIN_COINS * league_mult * mult)
+    bot = bool(target.get("bot"))
+    reward = round(WIN_COINS * league_mult * (BOT_REWARD_MULT if bot else 1.0))
     chance = float(target.get("chance", 0.5))
     if (me["element"], opp["element"]) in ADVANTAGE:
-        elem = f"✅ у тебя преимущество: урон ×{ELEMENT_ADV}"
+        elem = f"✅ У тебя преимущество стихии: урон ×{ELEMENT_ADV}"
     elif (opp["element"], me["element"]) in ADVANTAGE:
-        elem = f"⚠️ у соперника преимущество: твой урон ×{ELEMENT_DIS}"
+        elem = f"⚠️ У соперника преимущество стихии: твой урон ×{ELEMENT_DIS}"
     else:
-        elem = "стихии равны"
-    label = "🤖 Тренировочный призрак" if target.get("bot") else f"{league_name(target['rating'])} · {_num(target['rating'])} кубков"
+        elem = "Стихии равны, всё решат навыки и удача"
+    if bot:
+        head, quote = "🤖 РОБОТ ГОТОВ К СПАРРИНГУ", "Тренировочный боец вышел на песок. Проверь свои силы без лишнего риска."
+        status = "🤖 Тренировочный робот"
+    else:
+        head, quote = "🎯 СОПЕРНИК НАЙДЕН", "Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай."
+        status = f"{league_name(target['rating'])}, {_num(target['rating'])} кубков"
+    compare = "<br>".join(f"{_stat_label(k)}: <b>{_cmp(me['stats'][k], opp['stats'][k])}</b>"
+                          for k in ("hp", "atk", "def", "spd", "luck"))
     foe = [
         ("Имя", opp["name_html"]),
         ("Питомец", _pet_line(opp)),
         (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
         ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
-        ("Статус", label),
-    ]
-    compare = [(_stat_label(k), _cmp(me["stats"][k], opp["stats"][k])) for k in ("hp", "atk", "def", "spd", "luck")]
-    stake = [
-        ("Победа", f"+{win_d} кубков · около {_num(reward)} {_coin()}"),
-        ("Поражение", f"{loss_d} кубков"),
-        ("Энергия", f"−1 (сейчас {st['energy']}/{ENERGY_MAX})"),
+        ("Статус", status),
     ]
     return (
-        f"{_image(with_image)}"
-        "<p><b>🎯 СОПЕРНИК НАЙДЕН</b></p>"
-        "<blockquote><i>Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай.</i></blockquote>"
-        + _tree(foe, "Противник")
-        + _gap() + _tree(compare, "Сравнение (ты · он)")
-        + _gap() + _p(f"<b>Шанс победы: ~{round(chance * 100)}%</b>", f"{_bar(chance)}", f"<i>{elem}</i>")
-        + _gap() + _tree(stake, "Ставки")
+        f"{_image(with_image)}<p><b>{head}</b></p>"
+        f"<blockquote><i>{quote}</i></blockquote>"
+        + _sec("🆚 Противник", foe)
+        + f"<p><b>📊 Сравнение: ты против него</b><br>{compare}</p>"
+        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), f"<i>{elem}</i>")
+        + _sec("💰 Ставки", [
+            ("Победа", f"+{win_d} кубков и около {_num(reward)} {_coin()}"),
+            ("Поражение", f"{loss_d} кубков"),
+            ("Энергия", f"−1 (сейчас {st['energy']}/{ENERGY_MAX})"),
+        ])
     )
 
 
 def find_kb(user: dict, target: dict) -> InlineKeyboardMarkup:
     st = _state(user)
     free = target.get("rerolls", 0) == 0
-    reroll = "🔄 Другой соперник" + ("" if free else f" · {_num(REROLL_COST)}")
+    bot = _target_mode(target) == "bot"
+    reroll = ("🔄 Другой робот" if bot else "🔄 Другой соперник") + ("" if free else f" · {_num(REROLL_COST)}")
     if st["energy"] < 1:
         first = [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)]
     else:
         first = [_btn("⚔️ В бой!", "arena:fight", ButtonStyle.SUCCESS)]
-    return _kb(first, [_btn(reroll, "arena:reroll", ButtonStyle.PRIMARY)], [_back("arena:main")])
+    return _kb(first, [_btn(reroll, "arena:reroll", ButtonStyle.PRIMARY)],
+               [_btn("↩️ Сменить вид соперника", "arena:find", ButtonStyle.PRIMARY)], [_back("arena:main")])
 
 
 def _event_line(info: dict, e: dict) -> str:
@@ -1048,7 +1090,8 @@ def _event_line(info: dict, e: dict) -> str:
             tail += " ⚡КРИТ"
         if len(hits) > 1:
             tail += f" (×{len(hits)})"
-    return f"{e['icon']} <b>{who}</b>: {e['skill']} · {tail}"
+    ult = "💥 " if e.get("ult") else ""
+    return f"{ult}{e['icon']} <b>{who}</b>: {e['skill']} · {tail}"
 
 
 def _vs_block(info: dict, hp: tuple[float, float]) -> str:
@@ -1061,23 +1104,27 @@ def _vs_block(info: dict, hp: tuple[float, float]) -> str:
 
 
 def battle_frames(info: dict) -> list:
-    """Кадры анимации боя: функции, возвращающие HTML. Первый кадр это начало, последний итог раунда."""
+    """Кадры анимации боя: по кадру на раунд (если раундов много, несколько раундов в кадре).
+    Каждый кадр это функция, возвращающая HTML."""
     events = info["battle"]["events"]
     total_rounds = info["battle"]["rounds"]
-    marks = sorted({max(1, round(total_rounds * p)) for p in (0.3, 0.6, 1.0)})
+    step = max(1, math.ceil(total_rounds / MAX_FRAMES))
     frames = []
     full = (1.0, 1.0)
     frames.append(lambda wi: (
         f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ НАЧИНАЕТСЯ</b></p>" + _vs_block(info, full)
-        + _p("<i>Бойцы выходят на арену…</i>")))
-    for m in marks:
-        shown = [e for e in events if e["r"] <= m]
+        + _p("<i>Трибуны затихли. Бойцы выходят на арену…</i>")))
+    hp = full
+    for start in range(1, total_rounds + 1, step):
+        end = min(total_rounds, start + step - 1)
+        shown = [e for e in events if start <= e["r"] <= end]
         if not shown:
             continue
         hp = shown[-1]["hp"]
-        last = shown[-3:]
-        frames.append(lambda wi, m=m, hp=hp, last=last: (
-            f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ · раунд {min(m, total_rounds)} из {total_rounds}</b></p>"
+        last = shown[-4:]
+        title = f"раунд {end} из {total_rounds}"
+        frames.append(lambda wi, title=title, hp=hp, last=last: (
+            f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ · {title}</b></p>"
             + _vs_block(info, hp) + _p(*[_event_line(info, e) for e in last])))
     return frames
 
@@ -1097,7 +1144,7 @@ def result_html(info: dict, with_image: bool = False) -> str:
     ]
     sign = "+" if info["delta"] >= 0 else ""
     rewards = [
-        ("🏆 Кубки", f"{sign}{info['delta']} → {_num(info['new_rating'])}"),
+        ("🏆 Кубки", f"{sign}{info['delta']} (теперь {_num(info['new_rating'])})"),
         (f"{_coin()} Монеты", f"+{_num(info['coins'])}"),
     ] + [(label, value) for label, value in info["bonus"]]
     rewards.append(("⚡ Энергия", f"{info['energy']}/{ENERGY_MAX}"))
@@ -1112,8 +1159,8 @@ def result_html(info: dict, with_image: bool = False) -> str:
         f"{_image(with_image)}<p><b>{head}</b></p>"
         f"<blockquote><i>{random.choice(WIN_LINES if win else LOSS_LINES)}</i></blockquote>"
         + _vs_block(info, hp)
-        + _gap() + _tree(summary, "Итоги боя")
-        + _gap() + _tree(rewards, "Награды")
+        + _sec("📋 Итоги боя", summary)
+        + _sec("🎁 Награды", rewards)
         + (_p(*extra) if extra else "")
     )
 
@@ -1128,38 +1175,40 @@ def result_kb(info: dict) -> InlineKeyboardMarkup:
 
 def top_html(uid, with_image: bool = False) -> str:
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    rows = []
+    lines = []
     for n, (oid, info) in enumerate(top_list(), start=1):
         name = settings.public_name_html_by_id(oid) or "Игрок"
         you = " ◀ ты" if oid == str(uid) else ""
         pet = _PETS.get(info.get("pet"), {}).get("name", "")
-        rows.append((f"{medals.get(n, f'{n}.')} {name}{you}",
-                     f"{league_name(info.get('r', 0)).split()[0]} {_num(info.get('r', 0))} · {escape(pet)}"))
+        lines.append(f"{medals.get(n, f'{n}.')} <b>{name}</b>{you}<br>"
+                     f"{league_name(info.get('r', 0)).split()[0]} {_num(info.get('r', 0))} кубков · {escape(pet)}")
     rank, total = rank_of(uid)
-    body = _tree(rows, f"Лучшие бойцы сезона") if rows else _p("<i>Пока никого нет. Стань первым!</i>")
+    body = (f"<p><b>Лучшие бойцы сезона</b><br>{'<br>'.join(lines)}</p>" if lines
+            else _p("<i>Пока никого нет. Стань первым!</i>"))
     return (
         f"{_image(with_image)}<p><b>🏆 РЕЙТИНГ АРЕНЫ</b></p>"
         "<blockquote><i>Лучшие питомцы по кубкам. Скрытые игроки показаны без имени.</i></blockquote>"
-        + body + _gap()
-        + _tree([("📍 Твоё место", f"{rank} из {total}"), ("⏳ Сезон закончится через", _dur(_season_left()))], "Ты")
+        + body
+        + _sec("📍 Твоя позиция", [("Место", f"{rank} из {total}"), ("⏳ До конца сезона", _dur(_season_left()))])
     )
 
 
 def hist_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
-    rows = []
+    lines = []
     for e in reversed(st["log"]):
         icon = "🛡" if e.get("def") else "⚔️"
         res = "✅" if e["win"] else "❌"
         sign = "+" if e["delta"] >= 0 else ""
-        coins = f" · +{_num(e['coins'])}" if e.get("coins") else ""
+        coins = f" · +{_num(e['coins'])} {_coin()}" if e.get("coins") else ""
         tag = " 🤖" if e.get("bot") else ""
-        rows.append((f"{res} {icon} {escape(str(e.get('opp', '?')))}{tag}",
-                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']}{coins}"))
-    body = _tree(rows, "Последние бои") if rows else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
+        lines.append(f"{res} {icon} <b>{escape(str(e.get('opp', '?')))}</b>{tag}<br>"
+                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']} кубков{coins}")
+    body = (f"<p><b>Последние бои</b><br>{'<br>'.join(lines)}</p>" if lines
+            else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>"))
     return (
         f"{_image(with_image)}<p><b>📜 ИСТОРИЯ БОЁВ</b></p>"
-        "<blockquote><i>⚔️ твои атаки, 🛡 нападения на тебя, 🤖 тренировочные призраки.</i></blockquote>" + body
+        "<blockquote><i>⚔️ твои атаки, 🛡 нападения на тебя, 🤖 тренировочные роботы.</i></blockquote>" + body
     )
 
 
@@ -1170,11 +1219,11 @@ def tasks_html(user: dict, with_image: bool = False) -> str:
     for key, text, kind, goal, reward in QUESTS:
         val = min(goal, quest_value(st, kind))
         state = "✅ получено" if key in st["daily"]["claimed"] else ("🎁 можно забрать" if val >= goal else f"{val}/{goal}")
-        rows.append((f"{text} · +{_num(reward)} {_coin()}", state))
+        rows.append((f"{text} (+{_num(reward)} {_coin()})", state))
     return (
         f"{_image(with_image)}<p><b>🎯 ЗАДАНИЯ ДНЯ</b></p>"
         "<blockquote><i>Новые задания каждый день. Награды выдаются за бои на арене.</i></blockquote>"
-        + _tree(rows, "Сегодня")
+        + _sec("Сегодня", rows)
         + _p("<i>Задания обновляются в полночь.</i>")
     )
 
@@ -1194,17 +1243,20 @@ def rules_html(with_image: bool = False) -> str:
     return (
         f"{_image(with_image)}<p><b>ℹ️ ПРАВИЛА АРЕНЫ</b></p>"
         "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
-        + _tree([
-            ("Соперник", "подбирается по кубкам и силе питомца, а если игроков мало, выходит тренировочный призрак"),
-            ("Бой", "по очереди: быстрый питомец ходит первым, навыки и критические удары решают исход"),
-            ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды"),
-            ("Кубки", "за победу растут, за поражение падают, и чем сильнее соперник, тем больше награда"),
-            ("Энергия", f"бой стоит 1 энергии, максимум {ENERGY_MAX}, +1 каждые {ENERGY_REGEN_SEC // 60} мин"),
-        ], "Как проходит бой")
-        + _gap() + _tree([("Лиги", leagues),
-                          ("Сезон", f"длится {SEASON_LENGTH // 86400} дней, в конце награда за лучшую лигу и сброс кубков наполовину"),
-                          ("Серия", f"каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%"),
-                          ("Защита", f"против одного игрока можно драться {PAIR_LIMIT_DAY} раза в сутки")], "Прогресс")
+        "<p><b>⚔️ Как проходит бой</b><br>"
+        "Перед боем ты выбираешь: настоящий игрок или тренировочный робот. "
+        "Игрока система подбирает по кубкам и силе питомца. "
+        "Питомцы ходят по очереди, быстрый ходит первым, а навыки, критические удары и увороты решают исход.</p>"
+        "<p><b>🔥 Стихии</b><br>Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды.</p>"
+        "<p><b>🏆 Кубки</b><br>За победу растут, за поражение падают. "
+        "Чем сильнее соперник, тем больше награда. Против робота монет меньше, а кубки меняются только у тебя.</p>"
+        f"<p><b>⚡ Энергия</b><br>Бой стоит 1 энергии. Максимум {ENERGY_MAX}, "
+        f"каждые {ENERGY_REGEN_SEC // 60} минут возвращается +1.</p>"
+        f"<p><b>🏅 Лиги</b><br>{leagues}</p>"
+        f"<p><b>📅 Сезон</b><br>Длится {SEASON_LENGTH // 86400} дней. В конце награда за лучшую лигу, а кубки сбрасываются наполовину.</p>"
+        f"<p><b>🔥 Серия</b><br>Каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, "
+        f"максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%.</p>"
+        f"<p><b>🛡 Защита рейтинга</b><br>С одним и тем же игроком можно драться {PAIR_LIMIT_DAY} раза в сутки.</p>"
         + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
     )
 
@@ -1274,8 +1326,11 @@ async def on_close(callback: CallbackQuery):
         pass
 
 
-def _new_target(user: dict, uid, st: dict, attempt: int = 0) -> dict:
-    target = find_target(str(uid), user, st, attempt)
+def _new_target(user: dict, uid, st: dict, attempt: int = 0, mode: str = "pvp") -> dict | None:
+    """Подбирает цель выбранного вида и оценивает шанс победы. None, если подходящего игрока нет."""
+    target = find_target(str(uid), user, st, attempt, mode=mode)
+    if target is None:
+        return None
     me = make_fighter(user, str(uid), "", "")
     opp = target_fighter(target)
     target["chance"] = win_chance(me, opp) if opp else 0.5
@@ -1283,18 +1338,44 @@ def _new_target(user: dict, uid, st: dict, attempt: int = 0) -> dict:
     return target
 
 
+NO_PLAYERS = "Сейчас нет подходящих игроков. Попробуй чуть позже или сразись с роботом"
+
+
+async def _show_choice(callback, user: dict):
+    await _show(callback, "arena_find", lambda wi: choose_html(user, wi), choose_kb(user))
+
+
+async def _show_target(callback, user: dict, uid, target: dict):
+    await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+
+
 @router.callback_query(F.data == "arena:find")
 async def on_find(callback: CallbackQuery):
+    """Первый шаг: выбор, с кем драться (настоящий игрок или тренировочный робот)."""
+    user, st = await _need(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show_choice(callback, user)
+
+
+@router.callback_query(F.data.regexp(r"^arena:find:(pvp|bot)$"))
+async def on_find_mode(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     uid = callback.from_user.id
+    mode = callback.data.split(":")[2]
     target = st.get("target")
-    if not target or target_fighter(target) is None:
-        target = _new_target(user, uid, st)
+    if not target or _target_mode(target) != mode or target_fighter(target) is None:
+        target = _new_target(user, uid, st, mode=mode)
         _save_users()
+    if target is None:
+        await callback.answer(NO_PLAYERS, show_alert=True)
+        await _show_choice(callback, user)
+        return
     await callback.answer()
-    await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+    await _show_target(callback, user, uid, target)
 
 
 @router.callback_query(F.data == "arena:reroll")
@@ -1304,20 +1385,33 @@ async def on_reroll(callback: CallbackQuery):
         return
     uid = callback.from_user.id
     old = st.get("target")
-    rerolls = (old or {}).get("rerolls", 0)
-    if rerolls >= 1:                                      # первый повторный поиск бесплатный
-        if user.get("coins", 0) < REROLL_COST:
-            await callback.answer(f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
-            return
+    if not old:
+        await callback.answer()
+        await _show_choice(callback, user)
+        return
+    mode = _target_mode(old)
+    rerolls = old.get("rerolls", 0)
+    paid = rerolls >= 1                                   # первый повторный поиск бесплатный
+    if paid and user.get("coins", 0) < REROLL_COST:
+        await callback.answer(f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
+        return
+    added = False
+    if old.get("uid"):
+        st["recent"].append(str(old["uid"]))              # того же соперника второй раз не предлагаем
+        added = True
+    target = _new_target(user, uid, st, attempt=rerolls + 1, mode=mode)
+    if target is None:                                    # других игроков нет: оставляем прежнего, монеты не списываем
+        if added and str(old["uid"]) in st["recent"]:
+            st["recent"].remove(str(old["uid"]))
+        await callback.answer("Других игроков сейчас нет. Попробуй позже или выбери робота", show_alert=True)
+        return
+    del st["recent"][:-RECENT_KEEP]
+    if paid:
         user["coins"] -= REROLL_COST
         _led("arena_reroll", uid=str(uid), cost=REROLL_COST, coins_left=user["coins"])
-    if old and old.get("uid"):
-        st["recent"].append(str(old["uid"]))              # того же соперника второй раз не предлагаем
-        del st["recent"][:-RECENT_KEEP]
-    target = _new_target(user, uid, st, attempt=rerolls + 1)
     _save_users()
     await callback.answer("Ищем другого соперника…")
-    await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+    await _show_target(callback, user, uid, target)
 
 
 @router.callback_query(F.data == "arena:refill")
@@ -1349,19 +1443,25 @@ async def on_fight(callback: CallbackQuery):
     uid = callback.from_user.id
     target = st.get("target")
     if not target:
-        await callback.answer("Сначала найди соперника", show_alert=True)
+        await callback.answer("Сначала выбери соперника", show_alert=True)
+        await _show_choice(callback, user)
         return
     if st["energy"] < 1:
         await callback.answer("Нет энергии: подожди или восстанови её за монеты", show_alert=True)
         return
+    mode = _target_mode(target)
     info = resolve_fight(str(uid), user, st, target)
     if info is None:
         st["target"] = None
         _save_users()
-        await callback.answer("Соперник больше недоступен, подбираем другого", show_alert=True)
-        target = _new_target(user, uid, st)
+        target = _new_target(user, uid, st, mode=mode)
         _save_users()
-        await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+        if target is None:
+            await callback.answer(NO_PLAYERS, show_alert=True)
+            await _show_choice(callback, user)
+            return
+        await callback.answer("Соперник больше недоступен, подбираем другого", show_alert=True)
+        await _show_target(callback, user, uid, target)
         return
     await callback.answer("Бой!")
     frames = battle_frames(info)
@@ -1369,10 +1469,11 @@ async def on_fight(callback: CallbackQuery):
         # Первый кадр всегда новым сообщением, дальше обновляем его же
         msg = await _show(callback, "arena_battle", frames[0], None, force_new=True)
         wrapper = SimpleNamespace(message=msg, bot=callback.bot, from_user=callback.from_user)
+        await asyncio.sleep(FRAME_DELAY + 0.5)
         for frame in frames[1:]:
-            await asyncio.sleep(1.4)
             await _show(wrapper, "arena_battle", frame, None)
-        await asyncio.sleep(1.4)
+            await asyncio.sleep(FRAME_DELAY)
+        await asyncio.sleep(0.6)
         await _show(wrapper, "arena_battle", lambda wi: result_html(info, wi), result_kb(info))
     except TelegramAPIError as e:
         log.warning("не удалось показать бой игроку %s: %s", uid, e)
@@ -1469,7 +1570,7 @@ def send_preview_builders(user: dict, uid) -> dict:
     _prepare(user, uid)
     return {
         "arena": lambda wi: main_html(user, uid, wi),
-        "arena_find": lambda wi: rules_html(wi),
+        "arena_find": lambda wi: choose_html(user, wi),
         "arena_battle": lambda wi: f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ</b></p>",
         "arena_top": lambda wi: top_html(uid, wi),
         "arena_tasks": lambda wi: tasks_html(user, wi),
