@@ -29,6 +29,7 @@ import admin
 import boss
 import cases
 import equipment
+import arena
 import exrn
 import settings
 import mine
@@ -738,6 +739,7 @@ IMG_TARGETS: dict[str, str] = {
     **equipment.IMG_TARGETS,
     **exrn.IMG_TARGETS,
     **settings.IMG_TARGETS,
+    **arena.IMG_TARGETS,
     **{key: pet["name"] for key, pet in PETS.items()},
 }
 
@@ -959,6 +961,31 @@ settings.setup(
     ),
 )
 dp.include_router(settings.router)
+
+# Раздел «Арена»: бои питомцев, рейтинг, подбор соперников
+arena.setup(
+    get_user=get_user,
+    save_users=save_users,
+    show_rich_card=show_rich_card,
+    send_rich_card=send_rich_card,
+    custom_emoji=custom_emoji,
+    PETS=PETS,
+    user_stats=equipment.user_stats,     # характеристики с учётом артефактов
+    bonus=equipment.bonus,               # бонусы артефактов (перезарядка навыков)
+    skills=boss.PET_SKILLS,              # те же три навыка, что и в боях с боссами
+    BACK_EMOJI_ID=BACK_EMOJI_ID,
+    COIN_EMOJI=COIN_EMOJI,
+    INFO_EMOJI=INFO_EMOJI,
+    STAT_EMOJI=STAT_EMOJI,
+    STAT_LABELS=STAT_LABELS,
+    ELEMENT_EMOJI=ELEMENT_EMOJI,
+    WINS_EMOJI=WINS_EMOJI,
+    LOSSES_EMOJI=LOSSES_EMOJI,
+    LEVEL_EMOJI=LEVEL_EMOJI,
+    SKILL_EMOJI=SKILL_EMOJI,
+    registry_path=Path(__file__).with_name("arena.json"),   # участники арены и рейтинг
+)
+dp.include_router(arena.router)
 settings.install_name_book(boss.STATS)   # топ бойцов босса показывает никнеймы, а не юзернеймы
 
 
@@ -1272,9 +1299,7 @@ async def on_upgrade_back(callback: CallbackQuery):
     )
 
 
-@dp.message(F.text == "Арена")
-async def open_arena(message: Message):
-    await message.answer("<b>Арена</b>")
+# «Арена» (бои питомцев между игроками) живёт в arena.py
 
 
 @dp.message(F.text == "Рынок")
