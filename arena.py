@@ -10,7 +10,7 @@
     по рейтингу и силе, даже если он не в сети) или тренировочный робот (безопасный спарринг
     с уменьшенной наградой). Перед боем показывается оценка шанса победы.
   * Бой показывается по раундам, поэтому длится заметно дольше нескольких секунд.
-  * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои (10 штук, +1 за 10 минут), серия побед,
+  * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои (10 штук, +1 за 10 минут), серия побед, награды монетами, мясом и фруктами,
     ежедневные задания, недельные сезоны с наградой за лигу, топ-10 и история боёв.
 
 Защита: данные игрока проверяются при каждом входе (_sanitize), энергия и награды считаются
@@ -119,6 +119,12 @@ GHOST_TUNE_RUNS = 30         # пробных боёв на каждый шаг 
 BOT_REWARD_MULT = 0.6        # против тренировочного робота награда меньше
 FIRST_WIN_BONUS = 300        # бонус за первую победу за день
 
+# Мясо и фрукты за бой (растут с уровнем питомца: прокачка тоже требует ~уровень мяса и фруктов)
+MEAT_PER_LEVEL = 0.15        # мясо за победу = уровень x это (минимум 1)
+FRUIT_PER_LEVEL = 0.20       # фрукты за победу = уровень x это (минимум 1)
+RES_LOSS_SHARE = 0.4         # за поражение столько от награды за победу (может выйти 0)
+FIRST_WIN_MEAT, FIRST_WIN_FRUIT = 2, 2   # бонус за первую победу за день
+
 # Ежедневные задания: (ключ, описание, что считаем, цель, награда монетами)
 QUESTS = [
     ("q_fights3", "Проведи 3 боя", "fights", 3, 400),
@@ -170,6 +176,7 @@ _WINS = ("5454014806950429357", "⚔️")
 _LOSSES = ("5285535716808342592", "☠️")
 _LEVEL = ("5431816358675366190", "🆙")
 _SKILL = ("5364265456641258077", "⭐️")
+_MEAT, _FRUIT = "🥩", "🥭"
 ARENA_EMOJI = ("5454014806950429357", "⚔️")      # эмодзи заголовка (как на кнопке «Арена»)
 _REG_FILE: Path | None = None
 _REG: dict = {"players": {}, "fights": 0}         # общий список участников арены
@@ -178,12 +185,13 @@ _REG: dict = {"players": {}, "fights": 0}         # общий список уч
 def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji, PETS, user_stats,
           bonus, skills, BACK_EMOJI_ID, COIN_EMOJI=None, INFO_EMOJI=None, STAT_EMOJI=None,
           STAT_LABELS=None, ELEMENT_EMOJI=None, WINS_EMOJI=None, LOSSES_EMOJI=None,
-          LEVEL_EMOJI=None, SKILL_EMOJI=None, registry_path=None, **_ignored) -> None:
+          LEVEL_EMOJI=None, SKILL_EMOJI=None, MEAT_EMOJI=None, FRUIT_EMOJI=None, registry_path=None,
+          **_ignored) -> None:
     """user_stats(user): характеристики питомца с артефактами; bonus(user, вид): бонус артефактов
     в процентах; skills: навыки питомцев (boss.PET_SKILLS); registry_path: путь к arena.json."""
     global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji, _PETS
     global _user_stats, _bonus, _skills, _COIN, _INFO, _BACK_ID, _STAT_EMOJI, _STAT_LABELS
-    global _ELEMENT_EMOJI, _WINS, _LOSSES, _LEVEL, _SKILL, _REG_FILE
+    global _ELEMENT_EMOJI, _WINS, _LOSSES, _LEVEL, _SKILL, _REG_FILE, _MEAT, _FRUIT
     _get_user, _save_users = get_user, save_users
     _show_rich_card, _send_rich_card = show_rich_card, send_rich_card
     _custom_emoji, _PETS, _user_stats, _bonus, _skills = custom_emoji, PETS, user_stats, bonus, skills
@@ -194,6 +202,7 @@ def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji,
     _ELEMENT_EMOJI = ELEMENT_EMOJI or {}
     _WINS, _LOSSES = WINS_EMOJI or _WINS, LOSSES_EMOJI or _LOSSES
     _LEVEL, _SKILL = LEVEL_EMOJI or _LEVEL, SKILL_EMOJI or _SKILL
+    _MEAT, _FRUIT = MEAT_EMOJI or _MEAT, FRUIT_EMOJI or _FRUIT
     if registry_path:
         _REG_FILE = Path(registry_path)
         _load_registry()
@@ -685,6 +694,14 @@ def target_fighter(target: dict) -> dict | None:
 # Бой: итоги, награды, рейтинг
 # ---------------------------------------------------------------------------
 
+def res_reward(level: int, win: bool, mult: float = 1.0) -> tuple[int, int]:
+    """(мясо, фрукты) за бой. mult: лига, серия побед и робот, как у монет."""
+    meat, fruit = level * MEAT_PER_LEVEL * mult, level * FRUIT_PER_LEVEL * mult
+    if win:
+        return max(1, round(meat)), max(1, round(fruit))
+    return round(meat * RES_LOSS_SHARE), round(fruit * RES_LOSS_SHARE)
+
+
 def _max_coins() -> int:
     """Наибольшая возможная награда за один бой (для проверки на подлог)."""
     return round(WIN_COINS * (1 + LEAGUE_COIN_BONUS * (len(LEAGUES) - 1)) * (1 + STREAK_BONUS * STREAK_MAX)) \
@@ -760,23 +777,31 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
 
     # --- награды ---
     league_mult = 1 + LEAGUE_COIN_BONUS * old_league
+    mult = league_mult                                   # общий множитель наград (и для монет, и для еды)
     bonus_lines: list[tuple[str, str]] = []
     if win:
         coins = WIN_COINS * league_mult
         if streak_before > 0:
             sb = STREAK_BONUS * min(streak_before, STREAK_MAX)
             coins *= 1 + sb
+            mult *= 1 + sb
             bonus_lines.append(("Серия побед", f"+{round(sb * 100)}%"))
     else:
         coins = LOSS_COINS * league_mult
     if not real:
         coins *= BOT_REWARD_MULT
+        mult *= BOT_REWARD_MULT
     coins = round(coins)
+    meat, fruit = res_reward(user["level"], win, mult)
     if win and not daily["first_win"]:
         daily["first_win"] = True
         coins += FIRST_WIN_BONUS
-        bonus_lines.append(("Первая победа дня", f"+{_num(FIRST_WIN_BONUS)}"))
+        meat += FIRST_WIN_MEAT
+        fruit += FIRST_WIN_FRUIT
+        bonus_lines.append(("Первая победа дня", f"+{_num(FIRST_WIN_BONUS)} {_coin()}, +{FIRST_WIN_MEAT} {_MEAT}, +{FIRST_WIN_FRUIT} {_FRUIT}"))
     user["coins"] = user.get("coins", 0) + coins
+    user["meat"] = user.get("meat", 0) + meat
+    user["fruit"] = user.get("fruit", 0) + fruit
 
     # --- соперник-игрок: изменение рейтинга и запись в его историю ---
     opp_delta = 0
@@ -801,7 +826,7 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
 
     st["log"].append({
         "ts": int(time.time()), "opp": opp["name_plain"], "pet": opp["pet_name"], "win": win,
-        "delta": delta, "coins": coins, "bot": not real, "def": False,
+        "delta": delta, "coins": coins, "meat": meat, "fruit": fruit, "bot": not real, "def": False,
     })
     del st["log"][:-HISTORY_KEEP]
     if real:
@@ -818,13 +843,13 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
     _led("arena_fight", uid=str(uid), opp=str(opp_uid) if real else "bot", win=win, rounds=battle["rounds"],
          old=old_rating, new=new_rating, delta=delta, coins=coins, my_pet=me["pet"], opp_pet=opp["pet"],
          my_power=power_of(me["stats"]), opp_power=power_of(opp["stats"]), energy=st["energy"],
-         coins_total=user["coins"])
+         coins_total=user["coins"], meat=meat, fruit=fruit)
     if abs(delta) > ELO_K + 2 or coins > _max_coins():
         _led("arena_suspicious", uid=str(uid), reason="delta_or_coins_out_of_range", delta=delta, coins=coins)
 
     return {
         "battle": battle, "win": win, "me": me, "opp": opp, "real": real, "delta": delta,
-        "old_rating": old_rating, "new_rating": new_rating, "coins": coins, "bonus": bonus_lines,
+        "old_rating": old_rating, "new_rating": new_rating, "coins": coins, "meat": meat, "fruit": fruit, "bonus": bonus_lines,
         "league_up": league_index(new_rating) > old_league, "league_down": league_index(new_rating) < old_league,
         "streak": st["streak"], "energy": st["energy"], "opp_rating": opp_rating,
         "counts": _count_stats(battle["events"]),
@@ -1033,18 +1058,11 @@ def choose_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
     return (
         f"{_image(with_image)}<p><b>🎯 ВЫБОР СОПЕРНИКА</b></p>"
-        "<blockquote><i>Кого вызовешь на песок: живого бойца или железного спарринг-партнёра?</i></blockquote>"
-        + _sec("👤 Настоящий игрок", [
-            ("Кто это", "питомец реального игрока, подобранный по кубкам и силе"),
-            ("В сети", "не обязательно, бой всё равно состоится"),
-            ("Награда", "полная, кубки меняются у вас обоих"),
-        ])
-        + _sec("🤖 Тренировочный робот", [
-            ("Кто это", "безопасный спарринг, сила близка к твоей, но он чуть слабее"),
-            ("Награда", f"монет около {round(BOT_REWARD_MULT * 100)}% от обычного"),
-            ("Кубки", "меняются только у тебя"),
-        ])
-        + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Стоимость боя", "1 энергия")], "Состояние")
+        + _tree([
+            ("👤 Игрок", "живой питомец, полная награда"),
+            ("🤖 Робот", f"спарринг, награда ×{BOT_REWARD_MULT}, кубки только твои"),
+            ("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}, бой стоит 1"),
+        ], "Против кого сражаться?")
     )
 
 
@@ -1070,39 +1088,31 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
     win_d, loss_d = rating_deltas(st["rating"], target["rating"])
     league_mult = 1 + LEAGUE_COIN_BONUS * league_index(st["rating"])
     bot = bool(target.get("bot"))
-    reward = round(WIN_COINS * league_mult * (BOT_REWARD_MULT if bot else 1.0))
+    mult = league_mult * (BOT_REWARD_MULT if bot else 1.0)
+    coins = round(WIN_COINS * mult)
+    meat, fruit = res_reward(user["level"], True, mult)
     chance = float(target.get("chance", 0.5))
     if (me["element"], opp["element"]) in ADVANTAGE:
-        elem = f"✅ У тебя преимущество стихии: урон ×{ELEMENT_ADV}"
+        elem = "✅ Стихия на твоей стороне"
     elif (opp["element"], me["element"]) in ADVANTAGE:
-        elem = f"⚠️ У соперника преимущество стихии: твой урон ×{ELEMENT_DIS}"
+        elem = "⚠️ Стихия против тебя"
     else:
-        elem = "Стихии равны, всё решат навыки и удача"
-    if bot:
-        head, quote = "🤖 РОБОТ ГОТОВ К СПАРРИНГУ", "Тренировочный боец вышел на песок. Проверь свои силы без лишнего риска."
-        status = "🤖 Тренировочный робот"
-    else:
-        head, quote = "🎯 СОПЕРНИК НАЙДЕН", "Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай."
-        status = f"{league_name(target['rating'])}, {_num(target['rating'])} кубков"
-    compare = [(_stat_label(k), _cmp(me["stats"][k], opp["stats"][k])) for k in ("hp", "atk", "def", "spd", "luck")]
-    foe = [
-        ("Имя", opp["name_html"]),
-        ("Питомец", _pet_line(opp)),
-        (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
-        ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
-        ("Статус", status),
-    ]
+        elem = ""
+    status = "🤖 Робот" if bot else f"{league_name(target['rating'])}, {_num(target['rating'])} 🏆"
+    head = "🤖 РОБОТ ГОТОВ" if bot else "🎯 СОПЕРНИК НАЙДЕН"
     return (
         f"{_image(with_image)}<p><b>{head}</b></p>"
-        f"<blockquote><i>{quote}</i></blockquote>"
-        + _sec("🆚 Противник", foe)
-        + _sec("📊 Сравнение (ты против него)", compare)
-        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), f"<i>{elem}</i>") + _gap()
-        + _sec("💰 Ставки", [
-            ("Победа", f"+{win_d} кубков и около {_num(reward)} {_coin()}"),
-            ("Поражение", f"{loss_d} кубков"),
-            ("Энергия", f"−1 (сейчас {st['energy']}/{ENERGY_MAX})"),
-        ])
+        + _tree([
+            ("Имя", opp["name_html"]),
+            ("Питомец", f"{_pet_line(opp)}, ур. {opp['level']}"),
+            ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+            ("Статус", status),
+        ], "Противник")
+        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), *([f"<i>{elem}</i>"] if elem else []))
+        + _tree([
+            ("Победа", f"+{win_d} 🏆, {_num(coins)} {_coin()}, {meat} {_MEAT}, {fruit} {_FRUIT}"),
+            ("Поражение", f"{loss_d} 🏆"),
+        ], "Ставки")
     )
 
 
@@ -1186,6 +1196,8 @@ def result_html(info: dict, with_image: bool = False) -> str:
     rewards = [
         ("🏆 Кубки", f"{sign}{info['delta']} (теперь {_num(info['new_rating'])})"),
         (f"{_coin()} Монеты", f"+{_num(info['coins'])}"),
+        (f"{_MEAT} Мясо", f"+{info['meat']}"),
+        (f"{_FRUIT} Фрукты", f"+{info['fruit']}"),
     ] + [(label, value) for label, value in info["bonus"]]
     rewards.append(("⚡ Энергия", f"{info['energy']}/{ENERGY_MAX}"))
     if win:
@@ -1240,6 +1252,8 @@ def hist_html(user: dict, with_image: bool = False) -> str:
         res = "✅" if e["win"] else "❌"
         sign = "+" if e["delta"] >= 0 else ""
         coins = f" · +{_num(e['coins'])}" if e.get("coins") else ""
+        if e.get("meat") or e.get("fruit"):
+            coins += f" · +{e.get('meat', 0)}{_MEAT} +{e.get('fruit', 0)}{_FRUIT}"
         tag = " 🤖" if e.get("bot") else ""
         rows.append((f"{res} {icon} {escape(str(e.get('opp', '?')))}{tag}",
                      f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']}{coins}"))
@@ -1291,7 +1305,8 @@ def rules_html(with_image: bool = False) -> str:
         + _tree([("Лиги", leagues),
                  ("Сезон", f"длится {SEASON_LENGTH // 86400} дней, в конце награда за лучшую лигу и сброс кубков наполовину"),
                  ("Серия", f"каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%"),
-                 ("Робот", f"даёт около {round(BOT_REWARD_MULT * 100)}% монет, кубки меняются только у тебя"),
+                 ("Награда", "монеты, мясо и фрукты за каждый бой (за победу больше, с ростом уровня и лиги тоже)"),
+                 ("Робот", f"даёт около {round(BOT_REWARD_MULT * 100)}% награды, кубки меняются только у тебя"),
                  ("Защита", f"против одного игрока можно драться {PAIR_LIMIT_DAY} раза в сутки")], "Прогресс")
         + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
     )
