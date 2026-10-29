@@ -1,0 +1,1484 @@
+"""Раздел «Арена»: бои питомцев между игроками.
+
+Как это работает
+  * Сражаются питомцы, а не игроки. Бой автоматический и пошаговый: порядок хода зависит от
+    скорости, в каждом раунде питомец использует лучший из своих навыков (те же три навыка, что
+    и в боях с боссами), удары могут быть критическими, а противник может увернуться.
+  * Стихии: Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды. Врождённые способности
+    питомцев (Огненная ярость, Приливная волна, Каменная кожа) работают и на арене.
+  * Соперника подбирает система: по рейтингу (кубкам) и силе питомца. Бой идёт против питомца
+    реального игрока (даже если он не в сети), а если подходящих нет, против тренировочного
+    «призрака». Перед боем показывается оценка шанса победы.
+  * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои, серия побед,
+    ежедневные задания, недельные сезоны с наградой за лигу, топ-10 и история боёв.
+
+Защита: данные игрока проверяются при каждом входе (_sanitize), энергия и награды считаются
+на сервере до анимации боя, все бои пишутся в audit.log (arena_fight), подозрительные случаи
+в arena_suspicious. Против одного и того же игрока можно драться ограниченное число раз в сутки,
+чтобы нельзя было «накручивать» рейтинг.
+
+Данные игрока лежат в user["arena"] (см. _state), общий список участников и счётчики в arena.json.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import random
+import time
+from html import escape
+from pathlib import Path
+from types import SimpleNamespace
+
+from aiogram import F, Router
+from aiogram.enums import ButtonStyle
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+import settings
+
+try:
+    from storage import atomic_write_json, ledger as _ledger, read_json_safe
+except ImportError:                      # запуск модуля отдельно (например, в тестах)
+    _ledger = None
+    atomic_write_json = read_json_safe = None
+
+log = logging.getLogger(__name__)
+router = Router()
+
+# Куда админ может добавить фото через /img
+IMG_TARGETS: dict[str, str] = {
+    "arena": "Арена: главный экран",
+    "arena_find": "Арена: подбор соперника",
+    "arena_battle": "Арена: бой",
+    "arena_top": "Арена: рейтинг",
+    "arena_tasks": "Арена: задания",
+    "arena_history": "Арена: история боёв",
+}
+
+# ---------------------------------------------------------------------------
+# Настройки баланса: всё, что нужно крутить, собрано здесь
+# ---------------------------------------------------------------------------
+
+# --- Бой ---
+HP_MULT = 10                 # здоровье в бою = характеристика hp x HP_MULT (чтобы бой шёл несколько раундов)
+MAX_ROUNDS = 30              # если никто не победил, выигрывает тот, у кого осталось больше здоровья
+CRIT_MULT = 1.75             # во сколько раз крит сильнее
+CRIT_MAX = 0.5               # шанс крита не выше
+DODGE_K = 300                # шанс уворота: скорость / (скорость + DODGE_K)
+DODGE_MAX = 0.35             # уворот не чаще 35%
+PET_DMG_MULT = {"flame": 0.92, "aqua": 1.8, "terra": 1.2}   # тонкая подстройка баланса питомцев на арене
+DEF_WEIGHT = 0.8             # насколько защита снижает урон (больше: защита сильнее)
+ELEMENT_ADV = 1.12           # урон по слабой стихии
+ELEMENT_DIS = 0.85           # урон по сильной стихии
+ADVANTAGE = {("Вода", "Огонь"), ("Огонь", "Земля"), ("Земля", "Вода")}   # (кто сильнее, кого)
+
+# Способности питомцев (ключи как в PETS)
+FLAME_RAGE = 0.6             # Огненная ярость: до +60% урона при почти нулевом здоровье
+AQUA_SLOW = 0.8              # Приливная волна: скорость врага x0.8 ...
+AQUA_ROUNDS = 3              # ... первые 3 раунда
+TERRA_ABSORB = 0.85          # Каменная кожа: входящий урон x0.85
+
+# Откаты навыков в раундах (навыки берутся из боёв с боссами по порядку: быстрый, средний, мощный)
+SKILL_CD_ROUNDS = (2, 4, 7)
+SKILL_START_CD = (0, 1, 3)   # с какого раунда доступен каждый навык (0 = сразу)
+PCT_CAP_ATK = 3.0            # навык с «% здоровья» не больше атака x 3
+
+# --- Рейтинг и лиги ---
+START_RATING = 1000
+ELO_K = 30
+MIN_WIN_DELTA, MIN_LOSS_DELTA = 6, 5
+DEFENDER_SHARE = 0.5         # защитник получает/теряет столько от изменения рейтинга нападающего
+# (порог рейтинга, название, значок). Значки можно заменить на кастомные эмодзи.
+LEAGUES: list[tuple[int, str, str]] = [
+    (0, "Бронза", "🥉"),
+    (800, "Серебро", "🥈"),
+    (1200, "Золото", "🥇"),
+    (1600, "Платина", "💠"),
+    (2000, "Алмаз", "💎"),
+    (2500, "Легенда", "👑"),
+]
+SEASON_LENGTH = 7 * 86400
+SEASON_REWARD = [300, 1_500, 5_000, 15_000, 40_000, 100_000]   # монеты за лучшую лигу сезона
+
+# --- Энергия ---
+ENERGY_MAX = 5
+ENERGY_REGEN_SEC = 20 * 60   # +1 энергия за 20 минут
+ENERGY_REFILL_COST = 1_000   # монет за полное восстановление
+
+# --- Награды ---
+WIN_COINS = 150              # базовая награда за победу
+LOSS_COINS = 30              # утешительная награда
+LEAGUE_COIN_BONUS = 0.5      # +50% к награде за каждую лигу выше бронзы
+STREAK_BONUS = 0.10          # +10% за каждую победу в серии
+STREAK_MAX = 5
+BOT_REWARD_MULT = 0.6        # против тренировочного призрака награда меньше
+FIRST_WIN_BONUS = 300        # бонус за первую победу за день
+
+# Ежедневные задания: (ключ, описание, что считаем, цель, награда монетами)
+QUESTS = [
+    ("q_fights3", "Проведи 3 боя", "fights", 3, 400),
+    ("q_wins2", "Выиграй 2 боя", "wins", 2, 600),
+    ("q_wins5", "Выиграй 5 боёв", "wins", 5, 1_500),
+]
+
+# --- Подбор соперников ---
+RATING_RANGE = 150           # изначальный разброс рейтинга
+RATING_RANGE_STEP = 100      # шире на каждый повторный поиск
+RATING_RANGE_MAX = 700
+POWER_RATIO = (0.6, 1.7)     # сила соперника относительно своей
+PAIR_LIMIT_DAY = 3           # сколько раз в сутки можно драться с одним и тем же игроком
+RECENT_KEEP = 5              # не предлагать недавних соперников
+TARGET_TTL = 15 * 60         # выбранный соперник «держится» столько секунд
+REROLL_COST = 100            # монет за повторный поиск (первый бесплатно)
+SIM_PREVIEW = 80             # сколько пробных боёв для оценки шанса победы
+HISTORY_KEEP = 10
+TOP_SIZE = 10
+
+# Тренировочные призраки
+BOT_NAMES = ["Тень Гладиатора", "Эхо Арены", "Призрачный Боец", "Страж Колизея", "Безымянный Воин",
+             "Дух Чемпиона", "Мираж", "Тренер Гром", "Отражение", "Железный Гость"]
+
+# ---------------------------------------------------------------------------
+# Подключение к боту
+# ---------------------------------------------------------------------------
+
+_get_user = None
+_save_users = None
+_show_rich_card = None
+_send_rich_card = None
+_custom_emoji = None
+_PETS: dict = {}
+_user_stats = None
+_bonus = None
+_skills: dict[str, list[dict]] = {}
+_COIN = ("5449418135381759397", "🪙")
+_INFO = ("5334544901428229844", "ℹ️")
+_BACK_ID: str | None = None
+_STAT_EMOJI: dict = {}
+_STAT_LABELS: dict = {}
+_ELEMENT_EMOJI: dict = {}
+_WINS = ("5454014806950429357", "⚔️")
+_LOSSES = ("5285535716808342592", "☠️")
+_LEVEL = ("5431816358675366190", "🆙")
+_SKILL = ("5364265456641258077", "⭐️")
+ARENA_EMOJI = ("5454014806950429357", "⚔️")      # эмодзи заголовка (как на кнопке «Арена»)
+_REG_FILE: Path | None = None
+_REG: dict = {"players": {}, "fights": 0}         # общий список участников арены
+
+
+def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji, PETS, user_stats,
+          bonus, skills, BACK_EMOJI_ID, COIN_EMOJI=None, INFO_EMOJI=None, STAT_EMOJI=None,
+          STAT_LABELS=None, ELEMENT_EMOJI=None, WINS_EMOJI=None, LOSSES_EMOJI=None,
+          LEVEL_EMOJI=None, SKILL_EMOJI=None, registry_path=None, **_ignored) -> None:
+    """user_stats(user): характеристики питомца с артефактами; bonus(user, вид): бонус артефактов
+    в процентах; skills: навыки питомцев (boss.PET_SKILLS); registry_path: путь к arena.json."""
+    global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji, _PETS
+    global _user_stats, _bonus, _skills, _COIN, _INFO, _BACK_ID, _STAT_EMOJI, _STAT_LABELS
+    global _ELEMENT_EMOJI, _WINS, _LOSSES, _LEVEL, _SKILL, _REG_FILE
+    _get_user, _save_users = get_user, save_users
+    _show_rich_card, _send_rich_card = show_rich_card, send_rich_card
+    _custom_emoji, _PETS, _user_stats, _bonus, _skills = custom_emoji, PETS, user_stats, bonus, skills
+    _BACK_ID = BACK_EMOJI_ID
+    _COIN = COIN_EMOJI or _COIN
+    _INFO = INFO_EMOJI or _INFO
+    _STAT_EMOJI, _STAT_LABELS = STAT_EMOJI or {}, STAT_LABELS or {}
+    _ELEMENT_EMOJI = ELEMENT_EMOJI or {}
+    _WINS, _LOSSES = WINS_EMOJI or _WINS, LOSSES_EMOJI or _LOSSES
+    _LEVEL, _SKILL = LEVEL_EMOJI or _LEVEL, SKILL_EMOJI or _SKILL
+    if registry_path:
+        _REG_FILE = Path(registry_path)
+        _load_registry()
+
+
+def _led(name: str, /, **fields) -> None:
+    if _ledger is None:
+        return
+    try:
+        _ledger(name, **fields)
+    except Exception:
+        log.exception("не удалось записать в audit.log: %s", name)
+
+
+# ---------------------------------------------------------------------------
+# Лиги и рейтинг
+# ---------------------------------------------------------------------------
+
+def league_index(rating: int) -> int:
+    idx = 0
+    for i, (need, _, _) in enumerate(LEAGUES):
+        if rating >= need:
+            idx = i
+    return idx
+
+
+def league_name(rating: int) -> str:
+    _, name, icon = LEAGUES[league_index(rating)]
+    return f"{icon} {name}"
+
+
+def expected_score(ra: float, rb: float) -> float:
+    return 1 / (1 + 10 ** ((rb - ra) / 400))
+
+
+def rating_deltas(ra: int, rb: int) -> tuple[int, int]:
+    """(изменение при победе, изменение при поражении) для игрока с рейтингом ra против rb."""
+    e = expected_score(ra, rb)
+    win = max(MIN_WIN_DELTA, round(ELO_K * (1 - e)))
+    loss = -max(MIN_LOSS_DELTA, round(ELO_K * e))
+    return win, loss
+
+
+# ---------------------------------------------------------------------------
+# Бойцы и движок боя
+# ---------------------------------------------------------------------------
+
+def power_of(stats: dict) -> int:
+    """Условная «сила» питомца для подбора соперников и показа игроку."""
+    return round(stats["hp"] * 0.8 + stats["atk"] * 2.0 + stats["def"] * 1.4
+                 + stats["spd"] * 0.6 + stats["luck"] * 0.6)
+
+
+def _scale(pet_key: str, hp: float) -> float:
+    """Во сколько раз питомец сильнее базового (рост от уровня). Нужен, чтобы шанс крита и
+    уворота не упирался в потолок на высоких уровнях."""
+    base = _PETS[pet_key]["stats"]["hp"]
+    return max(1.0, hp / base) if base else 1.0
+
+
+def make_fighter(user: dict, uid: str | None, name_html: str, name_plain: str, bot: bool = False) -> dict:
+    pet = _PETS[user["pet"]]
+    stats = _user_stats(user)
+    return {
+        "uid": uid, "bot": bot, "name_html": name_html, "name_plain": name_plain,
+        "pet": user["pet"], "pet_name": pet["name"], "element": pet["element"],
+        "level": user["level"], "stats": {k: int(stats[k]) for k in ("hp", "atk", "def", "spd", "luck")},
+        "cd_cut": _bonus(user, "cd") if uid else 0,
+        "scale": _scale(user["pet"], stats["hp"]),
+    }
+
+
+def make_ghost(me: dict, rating: int, rng=random) -> dict:
+    """Тренировочный соперник: питомец чужой породы, сила близка к силе игрока."""
+    pets = [k for k in _PETS]
+    mine = me["pet"]
+    key = rng.choice([k for k in pets if k != mine] or pets)
+    base = _PETS[key]["stats"]
+    my_power = power_of(me["stats"])
+    scale = my_power / max(1, power_of(base)) * rng.uniform(0.9, 1.08)
+    stats = {k: max(1, round(base[k] * scale)) for k in ("hp", "atk", "def", "spd", "luck")}
+    name = rng.choice(BOT_NAMES)
+    return {
+        "uid": None, "bot": True, "name_html": escape(name), "name_plain": name,
+        "pet": key, "pet_name": _PETS[key]["name"], "element": _PETS[key]["element"],
+        "level": max(1, round(me["level"] * rng.uniform(0.9, 1.05))), "stats": stats,
+        "cd_cut": 0, "rating": max(0, rating + rng.randint(-60, 60)),
+        "scale": _scale(key, stats["hp"]),
+    }
+
+
+class _Side:
+    """Состояние бойца внутри одного боя."""
+
+    def __init__(self, f: dict):
+        self.f = f
+        self.max_hp = max(1, f["stats"]["hp"]) * HP_MULT
+        self.hp = float(self.max_hp)
+        self.skills = _skills.get(f["pet"], [])
+        cuts = 1 - min(50, f.get("cd_cut", 0)) / 100
+        self.cd_rounds = [max(1, round(c * cuts)) for c in SKILL_CD_ROUNDS]
+        self.cd = list(SKILL_START_CD)
+
+    @property
+    def share(self) -> float:
+        return max(0.0, self.hp / self.max_hp)
+
+
+def _element_mult(att: str, dfn: str) -> float:
+    if (att, dfn) in ADVANTAGE:
+        return ELEMENT_ADV
+    if (dfn, att) in ADVANTAGE:
+        return ELEMENT_DIS
+    return 1.0
+
+
+def _pick_skill(side: _Side) -> tuple[dict, int | None]:
+    """Выбирает лучший доступный навык: мощный, затем средний, затем быстрый, иначе обычный удар."""
+    for i in (2, 1, 0):
+        if i < len(side.skills) and side.cd[i] <= 0:
+            return side.skills[i], i
+    return {"name": "Удар", "icon": "👊", "mult": 1.0, "hits": 1}, None
+
+
+def simulate(a: dict, b: dict, rng=random) -> dict:
+    """Проводит бой. Возвращает {"winner": 0/1, "rounds": N, "events": [...], "hp": (доля a, доля b)}."""
+    sides = [_Side(a), _Side(b)]
+    events: list[dict] = []
+    winner = None
+    rnd = 0
+    while winner is None and rnd < MAX_ROUNDS:
+        rnd += 1
+        # Порядок хода: скорость с небольшим разбросом; Приливная волна замедляет врага в начале боя
+        init = []
+        for i, s in enumerate(sides):
+            spd = s.f["stats"]["spd"] * rng.uniform(0.9, 1.1)
+            enemy = sides[1 - i].f
+            if enemy["pet"] == "aqua" and rnd <= AQUA_ROUNDS:
+                spd *= AQUA_SLOW
+            init.append((spd, i))
+        order = [i for _, i in sorted(init, reverse=True)]
+
+        for i in order:
+            att, dfn = sides[i], sides[1 - i]
+            if att.hp <= 0 or dfn.hp <= 0:
+                continue
+            skill, slot = _pick_skill(att)
+            hits, total = [], 0
+            a_stats, d_stats = att.f["stats"], dfn.f["stats"]
+            crit_chance = min(CRIT_MAX, a_stats["luck"] / (400 * att.f.get("scale", 1.0)) + skill.get("crit", 0.0))
+            dodge = min(DODGE_MAX, d_stats["spd"] / (d_stats["spd"] + DODGE_K * dfn.f.get("scale", 1.0)))
+            elem = _element_mult(att.f["element"], dfn.f["element"])
+            for _ in range(skill["hits"]):
+                if rng.random() < dodge:
+                    hits.append({"dmg": 0, "crit": False, "dodge": True})
+                    continue
+                dmg = (a_stats["atk"] * skill["mult"] * rng.uniform(0.9, 1.1) * elem
+                       * PET_DMG_MULT.get(att.f["pet"], 1.0))
+                if not skill.get("pierce"):
+                    # Защита режет урон в зависимости от отношения защиты к атаке: так расклад
+                    # сил одинаков на любом уровне (обе величины растут вместе с уровнем)
+                    dmg *= a_stats["atk"] / (a_stats["atk"] + DEF_WEIGHT * d_stats["def"])
+                if att.f["pet"] == "flame":                      # Огненная ярость
+                    dmg *= 1 + FLAME_RAGE * (1 - att.share)
+                if dfn.f["pet"] == "terra":                      # Каменная кожа
+                    dmg *= TERRA_ABSORB
+                crit = rng.random() < crit_chance
+                if crit:
+                    dmg *= CRIT_MULT
+                dmg = max(1, round(dmg))
+                hits.append({"dmg": dmg, "crit": crit, "dodge": False})
+                total += dmg
+            if skill.get("pct") and total:
+                extra = min(round(dfn.max_hp * skill["pct"]), round(a_stats["atk"] * PCT_CAP_ATK))
+                total += extra
+            dfn.hp = max(0.0, dfn.hp - total)
+            if slot is not None:
+                att.cd[slot] = att.cd_rounds[slot]
+            events.append({
+                "r": rnd, "who": i, "skill": skill["name"], "icon": skill.get("icon", "👊"),
+                "hits": hits, "total": total, "hp": (sides[0].share, sides[1].share),
+                "ult": slot == 2,
+            })
+            if dfn.hp <= 0:
+                winner = i
+                break
+        for s in sides:
+            s.cd = [c - 1 for c in s.cd]
+
+    if winner is None:                                           # время вышло: у кого больше здоровья
+        s0, s1 = sides[0].share, sides[1].share
+        winner = 0 if s0 > s1 else 1 if s1 > s0 else 1           # при равенстве побеждает защитник
+    return {"winner": winner, "rounds": rnd, "events": events, "hp": (sides[0].share, sides[1].share)}
+
+
+def win_chance(a: dict, b: dict, runs: int = SIM_PREVIEW) -> float:
+    """Оценка шанса победы a над b пробными боями."""
+    wins = sum(1 for _ in range(runs) if simulate(a, b)["winner"] == 0)
+    return wins / runs
+
+
+# ---------------------------------------------------------------------------
+# Данные игрока и общий список участников
+# ---------------------------------------------------------------------------
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _season_id(now: float | None = None) -> int:
+    return int((now if now is not None else time.time()) // SEASON_LENGTH)
+
+
+def _season_left() -> int:
+    return int((_season_id() + 1) * SEASON_LENGTH - time.time())
+
+
+def _state(user: dict) -> dict:
+    """Возвращает user["arena"], создавая недостающие поля."""
+    st = user.get("arena")
+    if not isinstance(st, dict):
+        st = user["arena"] = {}
+    st.setdefault("rating", START_RATING)
+    st.setdefault("best", st["rating"])            # лучший рейтинг в этом сезоне
+    st.setdefault("peak", st["rating"])            # лучший рейтинг за всё время
+    st.setdefault("season", _season_id())
+    st.setdefault("energy", ENERGY_MAX)
+    st.setdefault("energy_ts", time.time())
+    for key in ("streak", "best_streak", "wins", "losses", "def_w", "def_l", "unseen"):
+        st.setdefault(key, 0)
+    st.setdefault("log", [])
+    st.setdefault("recent", [])
+    st.setdefault("pairs", {"day": _today(), "n": {}})
+    st.setdefault("daily", {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False})
+    st.setdefault("target", None)
+    return st
+
+
+def _int(value, lo: int, hi: int, default: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def _sanitize(user: dict, uid) -> list[str]:
+    """Проверяет и чинит user["arena"] (вызывается при входе игрока в раздел)."""
+    st = user.get("arena")
+    if not isinstance(st, dict):
+        return []
+    fixes: list[str] = []
+
+    def fix_int(key: str, lo: int, hi: int, default: int) -> None:
+        v = _int(st.get(key), lo, hi, default)
+        if st.get(key) != v:
+            st[key] = v
+            fixes.append(key)
+
+    fix_int("rating", 0, 9999, START_RATING)
+    fix_int("best", 0, 9999, st.get("rating", START_RATING))
+    fix_int("peak", 0, 9999, st.get("rating", START_RATING))
+    fix_int("energy", 0, ENERGY_MAX, ENERGY_MAX)
+    fix_int("season", 0, 10**6, _season_id())
+    for key, hi in (("streak", 1000), ("best_streak", 1000), ("wins", 10**7), ("losses", 10**7),
+                    ("def_w", 10**7), ("def_l", 10**7), ("unseen", 10**4)):
+        fix_int(key, 0, hi, 0)
+    now = time.time()
+    ts = st.get("energy_ts")
+    if not isinstance(ts, (int, float)) or not math.isfinite(ts) or ts > now + 60:
+        st["energy_ts"] = now
+        fixes.append("energy_ts")
+
+    log_ok = [e for e in (st.get("log") if isinstance(st.get("log"), list) else [])
+              if isinstance(e, dict) and isinstance(e.get("win"), bool) and isinstance(e.get("delta"), int)][-HISTORY_KEEP:]
+    if log_ok != st.get("log"):
+        st["log"] = log_ok
+        fixes.append("log")
+    rec = [r for r in (st.get("recent") if isinstance(st.get("recent"), list) else []) if isinstance(r, str)][-RECENT_KEEP:]
+    if rec != st.get("recent"):
+        st["recent"] = rec
+        fixes.append("recent")
+    pairs = st.get("pairs")
+    if not (isinstance(pairs, dict) and isinstance(pairs.get("n"), dict) and isinstance(pairs.get("day"), str)):
+        st["pairs"] = {"day": _today(), "n": {}}
+        fixes.append("pairs")
+    daily = st.get("daily")
+    if not (isinstance(daily, dict) and isinstance(daily.get("claimed"), list)):
+        st["daily"] = {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False}
+        fixes.append("daily")
+    else:
+        for key in ("fights", "wins"):
+            daily[key] = _int(daily.get(key), 0, 1000, 0)
+        daily["claimed"] = [k for k in daily["claimed"] if k in {q[0] for q in QUESTS}]
+    if st.get("target") is not None and not isinstance(st["target"], dict):
+        st["target"] = None
+        fixes.append("target")
+
+    if fixes:
+        log.warning("исправлены данные арены игрока %s: %s", uid, fixes)
+        _led("arena_integrity_fix", uid=str(uid), fixes=",".join(fixes))
+    return fixes
+
+
+def _regen(st: dict) -> None:
+    """Начисляет энергию за прошедшее время."""
+    now = time.time()
+    if st["energy"] >= ENERGY_MAX:
+        st["energy_ts"] = now
+        return
+    gained = int((now - st["energy_ts"]) // ENERGY_REGEN_SEC)
+    if gained > 0:
+        st["energy"] = min(ENERGY_MAX, st["energy"] + gained)
+        st["energy_ts"] += gained * ENERGY_REGEN_SEC
+        if st["energy"] >= ENERGY_MAX:
+            st["energy_ts"] = now
+
+
+def _energy_wait(st: dict) -> int:
+    """Через сколько секунд появится следующая единица энергии."""
+    if st["energy"] >= ENERGY_MAX:
+        return 0
+    return max(0, int(st["energy_ts"] + ENERGY_REGEN_SEC - time.time()))
+
+
+def _rollover_day(st: dict) -> None:
+    today = _today()
+    if st["pairs"].get("day") != today:
+        st["pairs"] = {"day": today, "n": {}}
+    if st["daily"].get("day") != today:
+        st["daily"] = {"day": today, "fights": 0, "wins": 0, "claimed": [], "first_win": False}
+
+
+def _roll_season(user: dict, uid) -> None:
+    """Если начался новый сезон: награда за лучшую лигу и мягкий сброс рейтинга."""
+    st = _state(user)
+    cur = _season_id()
+    if st["season"] == cur:
+        return
+    best_before = st["best"]
+    idx = league_index(best_before)
+    reward = SEASON_REWARD[min(idx, len(SEASON_REWARD) - 1)]
+    user["coins"] = user.get("coins", 0) + reward
+    old = st["rating"]
+    new = START_RATING + (old - START_RATING) // 2 if old > START_RATING else old
+    st["rating"], st["best"], st["season"] = new, new, cur
+    st["note"] = (f"<b>🏁 Сезон завершён!</b><br>Твоя лучшая лига: {league_name(best_before)}. "
+                  f"Награда: <b>+{_num(reward)}</b> {_coin()}.<br>"
+                  f"Рейтинг после сброса: <b>{new}</b>. Новый сезон начался!")
+    _led("arena_season", uid=str(uid), best_league=LEAGUES[idx][1], reward=reward, old=old, new=new)
+
+
+# --- общий список участников (для подбора соперников и рейтинга) ---
+
+def _load_registry() -> None:
+    if _REG_FILE is None or read_json_safe is None:
+        return
+    try:
+        saved = read_json_safe(_REG_FILE)
+    except RuntimeError:
+        log.critical("arena.json повреждён и копии нет: список участников начат с нуля")
+        return
+    if isinstance(saved, dict) and isinstance(saved.get("players"), dict):
+        _REG["players"] = saved["players"]
+        _REG["fights"] = int(saved.get("fights", 0) or 0)
+
+
+def _save_registry() -> None:
+    if _REG_FILE is None or atomic_write_json is None:
+        return
+    try:
+        atomic_write_json(_REG_FILE, _REG, backup_every=300)
+    except OSError:
+        log.exception("не удалось сохранить arena.json")
+
+
+def _reg_update(uid, user: dict) -> None:
+    st = _state(user)
+    stats = _user_stats(user)
+    _REG["players"][str(uid)] = {
+        "r": st["rating"], "p": power_of(stats), "pet": user["pet"], "lv": user["level"],
+        "seen": int(time.time()),
+    }
+
+
+def _reg_remove(uid) -> None:
+    _REG["players"].pop(str(uid), None)
+    _save_registry()
+
+
+def rank_of(uid) -> tuple[int, int]:
+    """(место в рейтинге, всего участников)."""
+    players = _REG["players"]
+    mine = players.get(str(uid))
+    if not mine:
+        return len(players) + 1, len(players)
+    better = sum(1 for p in players.values() if p.get("r", 0) > mine["r"])
+    return better + 1, len(players)
+
+
+def top_list(n: int = TOP_SIZE) -> list[tuple[str, dict]]:
+    items = sorted(_REG["players"].items(), key=lambda kv: (-kv[1].get("r", 0), -kv[1].get("p", 0)))
+    return items[:n]
+
+
+# ---------------------------------------------------------------------------
+# Подбор соперника
+# ---------------------------------------------------------------------------
+
+def _fighter_of(uid: str) -> dict | None:
+    """Боец реального игрока по его ID (живые характеристики) или None, если игрока нет."""
+    try:
+        user = _get_user(int(uid))
+    except (TypeError, ValueError):
+        return None
+    if not user or user.get("pet") not in _PETS:
+        return None
+    html = settings.public_name_html_by_id(uid) or "Игрок"
+    plain = settings.public_name_plain_by_id(uid) or "Игрок"
+    return make_fighter(user, str(uid), html, plain)
+
+
+def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random) -> dict:
+    """Подбирает соперника. Возвращает цель (см. структуру ниже); реального игрока или призрака."""
+    me = make_fighter(user, str(uid), "", "")
+    my_power = power_of(me["stats"])
+    my_rating = st["rating"]
+    pairs = st["pairs"]["n"]
+    for widen in range(3):                                     # если никого нет, постепенно расширяем поиск
+        span = min(RATING_RANGE_MAX, RATING_RANGE + RATING_RANGE_STEP * (attempt + widen * 2))
+        pool = []
+        for oid, info in _REG["players"].items():
+            if oid == str(uid) or oid in st["recent"] or pairs.get(oid, 0) >= PAIR_LIMIT_DAY:
+                continue
+            if abs(info.get("r", 0) - my_rating) > span:
+                continue
+            ratio = info.get("p", 0) / max(1, my_power)
+            if not (POWER_RATIO[0] <= ratio <= POWER_RATIO[1]):
+                continue
+            pool.append((abs(info["r"] - my_rating) + rng.uniform(0, 40), oid, info))
+        pool.sort(key=lambda x: x[0])
+        top = pool[:6]                                         # из ближайших по рейтингу берём случайного
+        rng.shuffle(top)
+        for _, oid, info in top:
+            if _fighter_of(oid) is not None:
+                return {"uid": oid, "bot": False, "rating": info["r"], "ts": time.time(),
+                        "rerolls": attempt}
+    ghost = make_ghost(me, my_rating, rng)
+    return {"uid": None, "bot": True, "ghost": ghost, "rating": ghost["rating"], "ts": time.time(),
+            "rerolls": attempt}
+
+
+def target_fighter(target: dict) -> dict | None:
+    if target.get("bot"):
+        return target.get("ghost")
+    return _fighter_of(target.get("uid"))
+
+
+# ---------------------------------------------------------------------------
+# Бой: итоги, награды, рейтинг
+# ---------------------------------------------------------------------------
+
+def _max_coins() -> int:
+    """Наибольшая возможная награда за один бой (для проверки на подлог)."""
+    return round(WIN_COINS * (1 + LEAGUE_COIN_BONUS * (len(LEAGUES) - 1)) * (1 + STREAK_BONUS * STREAK_MAX)) \
+        + FIRST_WIN_BONUS + 1
+
+
+def _count_stats(events: list[dict]) -> dict:
+    out = {"my_crits": 0, "opp_crits": 0, "my_dodges": 0, "opp_dodges": 0, "my_best": 0, "opp_best": 0}
+    for e in events:
+        att = "my" if e["who"] == 0 else "opp"
+        dfn = "opp" if e["who"] == 0 else "my"
+        for h in e["hits"]:
+            if h["dodge"]:
+                out[f"{dfn}_dodges"] += 1
+            elif h["crit"]:
+                out[f"{att}_crits"] += 1
+        out[f"{att}_best"] = max(out[f"{att}_best"], e["total"])
+    return out
+
+
+def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
+    """Проводит бой с выбранным соперником и применяет все последствия. None, если бой невозможен.
+    Всё считается и сохраняется сразу (до анимации), поэтому сбой показа ничего не ломает."""
+    _regen(st)
+    _rollover_day(st)
+    if st["energy"] < 1:
+        return None
+    opp = target_fighter(target)
+    if opp is None:
+        return None
+    me = make_fighter(user, str(uid), settings.name_html(user), settings.name_plain(user))
+    real = not target.get("bot")
+    opp_uid = target.get("uid")
+    opp_user = _get_user(int(opp_uid)) if real else None
+    if real and opp_user is None:
+        return None
+    if real:
+        _roll_season(opp_user, opp_uid)
+        opp_st = _state(opp_user)
+        opp_rating = opp_st["rating"]
+    else:
+        opp_st = None
+        opp_rating = int(target.get("rating", st["rating"]))
+
+    battle = simulate(me, opp)
+    win = battle["winner"] == 0
+    old_rating = st["rating"]
+    win_d, loss_d = rating_deltas(old_rating, opp_rating)
+    new_rating = max(0, old_rating + (win_d if win else loss_d))
+    delta = new_rating - old_rating
+    old_league = league_index(old_rating)
+
+    # --- энергия, серия, счётчики ---
+    st["energy"] -= 1
+    if st["energy"] < ENERGY_MAX and st["energy_ts"] <= 0:
+        st["energy_ts"] = time.time()
+    streak_before = st["streak"]
+    st["rating"] = new_rating
+    st["best"] = max(st["best"], new_rating)
+    st["peak"] = max(st["peak"], new_rating)
+    daily = st["daily"]
+    daily["fights"] += 1
+    if win:
+        st["wins"] += 1
+        st["streak"] += 1
+        st["best_streak"] = max(st["best_streak"], st["streak"])
+        user["wins"] = user.get("wins", 0) + 1
+        daily["wins"] += 1
+    else:
+        st["losses"] += 1
+        st["streak"] = 0
+        user["losses"] = user.get("losses", 0) + 1
+
+    # --- награды ---
+    league_mult = 1 + LEAGUE_COIN_BONUS * old_league
+    bonus_lines: list[tuple[str, str]] = []
+    if win:
+        coins = WIN_COINS * league_mult
+        if streak_before > 0:
+            sb = STREAK_BONUS * min(streak_before, STREAK_MAX)
+            coins *= 1 + sb
+            bonus_lines.append(("Серия побед", f"+{round(sb * 100)}%"))
+    else:
+        coins = LOSS_COINS * league_mult
+    if not real:
+        coins *= BOT_REWARD_MULT
+    coins = round(coins)
+    if win and not daily["first_win"]:
+        daily["first_win"] = True
+        coins += FIRST_WIN_BONUS
+        bonus_lines.append(("Первая победа дня", f"+{_num(FIRST_WIN_BONUS)}"))
+    user["coins"] = user.get("coins", 0) + coins
+
+    # --- соперник-игрок: изменение рейтинга и запись в его историю ---
+    opp_delta = 0
+    if real:
+        if win:
+            opp_new = max(0, opp_rating - round(win_d * DEFENDER_SHARE))
+            opp_st["def_l"] += 1
+        else:
+            opp_new = opp_rating + round(abs(loss_d) * DEFENDER_SHARE)
+            opp_st["def_w"] += 1
+        opp_delta = opp_new - opp_rating
+        opp_st["rating"] = opp_new
+        opp_st["best"] = max(opp_st["best"], opp_new)
+        opp_st["peak"] = max(opp_st["peak"], opp_new)
+        opp_st["unseen"] = min(10**4, opp_st["unseen"] + 1)
+        opp_st["log"].append({
+            "ts": int(time.time()), "opp": settings.public_name_plain(user), "pet": me["pet_name"],
+            "win": not win, "delta": opp_delta, "coins": 0, "bot": False, "def": True,
+        })
+        del opp_st["log"][:-HISTORY_KEEP]
+        _reg_update(opp_uid, opp_user)
+
+    st["log"].append({
+        "ts": int(time.time()), "opp": opp["name_plain"], "pet": opp["pet_name"], "win": win,
+        "delta": delta, "coins": coins, "bot": not real, "def": False,
+    })
+    del st["log"][:-HISTORY_KEEP]
+    if real:
+        st["recent"].append(str(opp_uid))
+        st["pairs"]["n"][str(opp_uid)] = st["pairs"]["n"].get(str(opp_uid), 0) + 1
+    del st["recent"][:-RECENT_KEEP]
+    st["target"] = None
+    _reg_update(uid, user)
+    _REG["fights"] = _REG.get("fights", 0) + 1
+    _save_registry()
+    _save_users()
+
+    # --- слежка ---
+    _led("arena_fight", uid=str(uid), opp=str(opp_uid) if real else "bot", win=win, rounds=battle["rounds"],
+         old=old_rating, new=new_rating, delta=delta, coins=coins, my_pet=me["pet"], opp_pet=opp["pet"],
+         my_power=power_of(me["stats"]), opp_power=power_of(opp["stats"]), energy=st["energy"],
+         coins_total=user["coins"])
+    if abs(delta) > ELO_K + 2 or coins > _max_coins():
+        _led("arena_suspicious", uid=str(uid), reason="delta_or_coins_out_of_range", delta=delta, coins=coins)
+
+    return {
+        "battle": battle, "win": win, "me": me, "opp": opp, "real": real, "delta": delta,
+        "old_rating": old_rating, "new_rating": new_rating, "coins": coins, "bonus": bonus_lines,
+        "league_up": league_index(new_rating) > old_league, "league_down": league_index(new_rating) < old_league,
+        "streak": st["streak"], "energy": st["energy"], "opp_rating": opp_rating,
+        "counts": _count_stats(battle["events"]),
+    }
+
+
+def quest_value(st: dict, kind: str) -> int:
+    return int(st["daily"].get(kind, 0))
+
+
+def claim_quest(user: dict, uid: str, key: str) -> int | None:
+    """Выдаёт награду за задание. Возвращает монеты или None, если нельзя."""
+    st = _state(user)
+    _rollover_day(st)
+    quest = next((q for q in QUESTS if q[0] == key), None)
+    if quest is None or key in st["daily"]["claimed"]:
+        return None
+    if quest_value(st, quest[2]) < quest[3]:
+        return None
+    st["daily"]["claimed"].append(key)
+    user["coins"] = user.get("coins", 0) + quest[4]
+    _save_users()
+    _led("arena_quest", uid=str(uid), quest=key, coins=quest[4], coins_total=user["coins"])
+    return quest[4]
+
+
+# ---------------------------------------------------------------------------
+# Оформление
+# ---------------------------------------------------------------------------
+
+def _em(pair) -> str:
+    return _custom_emoji(pair)
+
+
+def _coin() -> str:
+    return _em(_COIN)
+
+
+def _num(n) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def _dur(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    d, rest = divmod(seconds, 86400)
+    h, rest = divmod(rest, 3600)
+    m = rest // 60
+    if d:
+        return f"{d} д {h} ч"
+    if h:
+        return f"{h} ч {m} мин"
+    return f"{max(m, 1)} мин" if seconds >= 60 else f"{seconds} с"
+
+
+def _bar(share: float, width: int = 10) -> str:
+    full = round(max(0.0, min(1.0, share)) * width)
+    return "▰" * full + "▱" * (width - full)
+
+
+def _tree(rows: list, title: str = "") -> str:
+    lines = []
+    for n, row in enumerate(rows):
+        label, value = row[0], row[1]
+        mark = "└" if n == len(rows) - 1 else "├"
+        lines.append(f"{mark} {label}" + (f": <b>{value}</b>" if value != "" else ""))
+    head = f"<b>{title}</b><br>" if title else ""
+    return f"<p>{head}{'<br>'.join(lines)}</p>"
+
+
+def _gap() -> str:
+    return "<p>&nbsp;</p>"
+
+
+def _p(*lines: str) -> str:
+    return "<p>" + "<br>".join(lines) + "</p>"
+
+
+def _image(with_image: bool) -> str:
+    return '<img src="tg://photo?id=pet"/>' if with_image else ""
+
+
+def _kb(*rows) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows if r])
+
+
+def _btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
+
+
+def _back(data: str, text: str = "Назад") -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=ButtonStyle.PRIMARY,
+                                icon_custom_emoji_id=_BACK_ID)
+
+
+def _elem(element: str) -> str:
+    pair = _ELEMENT_EMOJI.get(element)
+    return _em(pair) if pair else ""
+
+
+def _stat_label(key: str) -> str:
+    emoji = _em(_STAT_EMOJI[key]) + " " if key in _STAT_EMOJI else ""
+    return f"{emoji}{_STAT_LABELS.get(key, key)}"
+
+
+def _pet_line(f: dict) -> str:
+    return f"{escape(f['pet_name'])} {_elem(f['element'])}".strip()
+
+
+# ---------------------------------------------------------------------------
+# Экраны
+# ---------------------------------------------------------------------------
+
+ARENA_LINES = [
+    "Трибуны гудят, песок раскалён, а на арене снова ждут достойных. Кто выйдет сегодня?",
+    "Здесь побеждает не тот, кто громче рычит, а тот, чей питомец лучше вырос и смелее в бою.",
+    "Гонг ещё не прозвучал, но противники уже точат когти. Приготовь своего бойца.",
+    "Каждый бой на арене это шаг вверх по лестнице лиг. Хочешь дойти до самой вершины?",
+    "Старые чемпионы говорят: сила питомца это уровень, артефакты и немного удачи.",
+]
+WIN_LINES = [
+    "Трибуны взрываются овациями! Твой питомец стоит над поверженным соперником.",
+    "Точный удар, и всё решено. Арена скандирует твоё имя!",
+    "Это была красивая победа. Соперник ещё долго будет вспоминать этот бой.",
+]
+LOSS_LINES = [
+    "Сегодня удача отвернулась. Но каждый бой делает питомца и тебя опытнее.",
+    "Соперник оказался сильнее. Прокачай питомца, надень артефакты и возвращайся!",
+    "Поражение это не конец. Чемпионы начинаются с проигранных боёв.",
+]
+
+
+def _fighter_hp(f: dict) -> int:
+    return max(1, f["stats"]["hp"]) * HP_MULT
+
+
+def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
+    st = _state(user)
+    stats = _user_stats(user)
+    pet = _PETS[user["pet"]]
+    rank, total = rank_of(uid)
+    games = st["wins"] + st["losses"]
+    rate = f"{round(st['wins'] * 100 / games)}%" if games else "нет боёв"
+    wait = _energy_wait(st)
+    energy = f"{st['energy']}/{ENERGY_MAX}" + (f" · следующая через {_dur(wait)}" if st["energy"] < ENERGY_MAX else "")
+    fighter = [
+        ("Питомец", f"{escape(pet['name'])} {_elem(pet['element'])}".strip()),
+        (f"{_em(_LEVEL)} Уровень", str(user["level"])),
+        ("💪 Сила", _num(power_of(stats))),
+    ]
+    rating = [
+        ("Лига", league_name(st["rating"])),
+        ("🏆 Кубки", f"{_num(st['rating'])} (рекорд сезона {_num(st['best'])})"),
+        ("📍 Место", f"{rank} из {total}"),
+        ("🔥 Серия побед", f"{st['streak']} (рекорд {st['best_streak']})"),
+    ]
+    fights = [
+        (f"{_em(_WINS)} Победы", _num(st["wins"])),
+        (f"{_em(_LOSSES)} Поражения", _num(st["losses"])),
+        ("Процент побед", rate),
+        ("🛡 Защиты", f"{st['def_w']} отбито · {st['def_l']} проиграно"),
+    ]
+    extra = []
+    if st["unseen"]:
+        extra.append(f"<b>🛡 На тебя нападали: {st['unseen']} раз. Подробности в «История».</b>")
+    if note:
+        extra.append(note)
+    return (
+        f"{_image(with_image)}"
+        f"<p><b>{_em(ARENA_EMOJI)} АРЕНА</b></p>"
+        f"<blockquote><i>{random.choice(ARENA_LINES)}</i></blockquote>"
+        + _tree(fighter, "Твой боец")
+        + _gap() + _tree(rating, "Рейтинг")
+        + _gap() + _tree(fights, "Бои")
+        + _gap() + _tree([("⚡ Энергия", energy), ("⏳ Сезон закончится через", _dur(_season_left()))], "Состояние")
+        + (_p(*extra) if extra else "")
+    )
+
+
+def main_kb(user: dict) -> InlineKeyboardMarkup:
+    st = _state(user)
+    rows = [[_btn("⚔️ В бой: найти соперника", "arena:find", ButtonStyle.SUCCESS)]]
+    if st["energy"] < 1:
+        rows.insert(0, [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)])
+    rows += [
+        [_btn("🏆 Рейтинг", "arena:top", ButtonStyle.PRIMARY), _btn("📜 История", "arena:hist", ButtonStyle.PRIMARY)],
+        [_btn("🎯 Задания", "arena:tasks", ButtonStyle.PRIMARY), _btn("ℹ️ Правила", "arena:rules", ButtonStyle.PRIMARY)],
+        [_btn("Закрыть", "arena:close", ButtonStyle.DANGER)],
+    ]
+    return _kb(*rows)
+
+
+def _cmp(mine: int, theirs: int) -> str:
+    return f"{_num(mine)} · {_num(theirs)} " + ("▲" if mine > theirs else "▼" if mine < theirs else "=")
+
+
+def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
+    st = _state(user)
+    me = make_fighter(user, str(uid), "", "")
+    opp = target_fighter(target)
+    if opp is None:
+        return f"{_image(with_image)}<p><b>Соперник не найден.</b></p>"
+    win_d, loss_d = rating_deltas(st["rating"], target["rating"])
+    league_mult = 1 + LEAGUE_COIN_BONUS * league_index(st["rating"])
+    mult = 1.0 if not target.get("bot") else BOT_REWARD_MULT
+    reward = round(WIN_COINS * league_mult * mult)
+    chance = float(target.get("chance", 0.5))
+    if (me["element"], opp["element"]) in ADVANTAGE:
+        elem = f"✅ у тебя преимущество: урон ×{ELEMENT_ADV}"
+    elif (opp["element"], me["element"]) in ADVANTAGE:
+        elem = f"⚠️ у соперника преимущество: твой урон ×{ELEMENT_DIS}"
+    else:
+        elem = "стихии равны"
+    label = "🤖 Тренировочный призрак" if target.get("bot") else f"{league_name(target['rating'])} · {_num(target['rating'])} кубков"
+    foe = [
+        ("Имя", opp["name_html"]),
+        ("Питомец", _pet_line(opp)),
+        (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
+        ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+        ("Статус", label),
+    ]
+    compare = [(_stat_label(k), _cmp(me["stats"][k], opp["stats"][k])) for k in ("hp", "atk", "def", "spd", "luck")]
+    stake = [
+        ("Победа", f"+{win_d} кубков · около {_num(reward)} {_coin()}"),
+        ("Поражение", f"{loss_d} кубков"),
+        ("Энергия", f"−1 (сейчас {st['energy']}/{ENERGY_MAX})"),
+    ]
+    return (
+        f"{_image(with_image)}"
+        "<p><b>🎯 СОПЕРНИК НАЙДЕН</b></p>"
+        "<blockquote><i>Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай.</i></blockquote>"
+        + _tree(foe, "Противник")
+        + _gap() + _tree(compare, "Сравнение (ты · он)")
+        + _gap() + _p(f"<b>Шанс победы: ~{round(chance * 100)}%</b>", f"{_bar(chance)}", f"<i>{elem}</i>")
+        + _gap() + _tree(stake, "Ставки")
+    )
+
+
+def find_kb(user: dict, target: dict) -> InlineKeyboardMarkup:
+    st = _state(user)
+    free = target.get("rerolls", 0) == 0
+    reroll = "🔄 Другой соперник" + ("" if free else f" · {_num(REROLL_COST)}")
+    if st["energy"] < 1:
+        first = [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)]
+    else:
+        first = [_btn("⚔️ В бой!", "arena:fight", ButtonStyle.SUCCESS)]
+    return _kb(first, [_btn(reroll, "arena:reroll", ButtonStyle.PRIMARY)], [_back("arena:main")])
+
+
+def _event_line(info: dict, e: dict) -> str:
+    who = "Ты" if e["who"] == 0 else info["opp"]["name_html"]
+    hits = e["hits"]
+    if all(h["dodge"] for h in hits):
+        tail = "💨 промах: увернулись"
+    else:
+        tail = f"<b>{_num(e['total'])}</b> урона"
+        if any(h["crit"] for h in hits):
+            tail += " ⚡КРИТ"
+        if len(hits) > 1:
+            tail += f" (×{len(hits)})"
+    return f"{e['icon']} <b>{who}</b>: {e['skill']} · {tail}"
+
+
+def _vs_block(info: dict, hp: tuple[float, float]) -> str:
+    me, opp = info["me"], info["opp"]
+    rows = []
+    for f, share, tag in ((me, hp[0], "Ты"), (opp, hp[1], "Соперник")):
+        mx = _fighter_hp(f)
+        rows.append(f"<b>{tag}: {f['name_html']}</b> · {_pet_line(f)}<br>{_bar(share)} {max(0, round(mx * share))}/{mx}")
+    return "<p>" + "<br>&nbsp;<br>".join(rows) + "</p>"
+
+
+def battle_frames(info: dict) -> list:
+    """Кадры анимации боя: функции, возвращающие HTML. Первый кадр это начало, последний итог раунда."""
+    events = info["battle"]["events"]
+    total_rounds = info["battle"]["rounds"]
+    marks = sorted({max(1, round(total_rounds * p)) for p in (0.3, 0.6, 1.0)})
+    frames = []
+    full = (1.0, 1.0)
+    frames.append(lambda wi: (
+        f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ НАЧИНАЕТСЯ</b></p>" + _vs_block(info, full)
+        + _p("<i>Бойцы выходят на арену…</i>")))
+    for m in marks:
+        shown = [e for e in events if e["r"] <= m]
+        if not shown:
+            continue
+        hp = shown[-1]["hp"]
+        last = shown[-3:]
+        frames.append(lambda wi, m=m, hp=hp, last=last: (
+            f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ · раунд {min(m, total_rounds)} из {total_rounds}</b></p>"
+            + _vs_block(info, hp) + _p(*[_event_line(info, e) for e in last])))
+    return frames
+
+
+def result_html(info: dict, with_image: bool = False) -> str:
+    win = info["win"]
+    c = info["counts"]
+    hp = info["battle"]["hp"]
+    my_left = max(0, round(_fighter_hp(info["me"]) * hp[0]))
+    head = "🏆 ПОБЕДА!" if win else "💔 ПОРАЖЕНИЕ"
+    summary = [
+        ("Раундов", str(info["battle"]["rounds"])),
+        ("Твоё здоровье", f"{my_left}/{_fighter_hp(info['me'])} ({round(hp[0] * 100)}%)"),
+        ("Лучший удар", f"{_num(c['my_best'])} (у соперника {_num(c['opp_best'])})"),
+        ("⚡ Критов", f"{c['my_crits']} (у соперника {c['opp_crits']})"),
+        ("💨 Уворотов", f"{c['my_dodges']} (у соперника {c['opp_dodges']})"),
+    ]
+    sign = "+" if info["delta"] >= 0 else ""
+    rewards = [
+        ("🏆 Кубки", f"{sign}{info['delta']} → {_num(info['new_rating'])}"),
+        (f"{_coin()} Монеты", f"+{_num(info['coins'])}"),
+    ] + [(label, value) for label, value in info["bonus"]]
+    rewards.append(("⚡ Энергия", f"{info['energy']}/{ENERGY_MAX}"))
+    if win:
+        rewards.append(("🔥 Серия побед", str(info["streak"])))
+    extra = []
+    if info["league_up"]:
+        extra.append(f"<b>🎉 Новая лига: {league_name(info['new_rating'])}!</b>")
+    elif info["league_down"]:
+        extra.append(f"<b>📉 Ты опустился в лигу: {league_name(info['new_rating'])}.</b>")
+    return (
+        f"{_image(with_image)}<p><b>{head}</b></p>"
+        f"<blockquote><i>{random.choice(WIN_LINES if win else LOSS_LINES)}</i></blockquote>"
+        + _vs_block(info, hp)
+        + _gap() + _tree(summary, "Итоги боя")
+        + _gap() + _tree(rewards, "Награды")
+        + (_p(*extra) if extra else "")
+    )
+
+
+def result_kb(info: dict) -> InlineKeyboardMarkup:
+    return _kb(
+        [_btn("⚔️ Ещё бой", "arena:find", ButtonStyle.SUCCESS)],
+        [_btn("🏆 Рейтинг", "arena:top", ButtonStyle.PRIMARY), _btn("🎯 Задания", "arena:tasks", ButtonStyle.PRIMARY)],
+        [_back("arena:main", "В арену")],
+    )
+
+
+def top_html(uid, with_image: bool = False) -> str:
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    rows = []
+    for n, (oid, info) in enumerate(top_list(), start=1):
+        name = settings.public_name_html_by_id(oid) or "Игрок"
+        you = " ◀ ты" if oid == str(uid) else ""
+        pet = _PETS.get(info.get("pet"), {}).get("name", "")
+        rows.append((f"{medals.get(n, f'{n}.')} {name}{you}",
+                     f"{league_name(info.get('r', 0)).split()[0]} {_num(info.get('r', 0))} · {escape(pet)}"))
+    rank, total = rank_of(uid)
+    body = _tree(rows, f"Лучшие бойцы сезона") if rows else _p("<i>Пока никого нет. Стань первым!</i>")
+    return (
+        f"{_image(with_image)}<p><b>🏆 РЕЙТИНГ АРЕНЫ</b></p>"
+        "<blockquote><i>Лучшие питомцы по кубкам. Скрытые игроки показаны без имени.</i></blockquote>"
+        + body + _gap()
+        + _tree([("📍 Твоё место", f"{rank} из {total}"), ("⏳ Сезон закончится через", _dur(_season_left()))], "Ты")
+    )
+
+
+def hist_html(user: dict, with_image: bool = False) -> str:
+    st = _state(user)
+    rows = []
+    for e in reversed(st["log"]):
+        icon = "🛡" if e.get("def") else "⚔️"
+        res = "✅" if e["win"] else "❌"
+        sign = "+" if e["delta"] >= 0 else ""
+        coins = f" · +{_num(e['coins'])}" if e.get("coins") else ""
+        tag = " 🤖" if e.get("bot") else ""
+        rows.append((f"{res} {icon} {escape(str(e.get('opp', '?')))}{tag}",
+                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']}{coins}"))
+    body = _tree(rows, "Последние бои") if rows else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
+    return (
+        f"{_image(with_image)}<p><b>📜 ИСТОРИЯ БОЁВ</b></p>"
+        "<blockquote><i>⚔️ твои атаки, 🛡 нападения на тебя, 🤖 тренировочные призраки.</i></blockquote>" + body
+    )
+
+
+def tasks_html(user: dict, with_image: bool = False) -> str:
+    st = _state(user)
+    _rollover_day(st)
+    rows = []
+    for key, text, kind, goal, reward in QUESTS:
+        val = min(goal, quest_value(st, kind))
+        state = "✅ получено" if key in st["daily"]["claimed"] else ("🎁 можно забрать" if val >= goal else f"{val}/{goal}")
+        rows.append((f"{text} · +{_num(reward)} {_coin()}", state))
+    return (
+        f"{_image(with_image)}<p><b>🎯 ЗАДАНИЯ ДНЯ</b></p>"
+        "<blockquote><i>Новые задания каждый день. Награды выдаются за бои на арене.</i></blockquote>"
+        + _tree(rows, "Сегодня")
+        + _p("<i>Задания обновляются в полночь.</i>")
+    )
+
+
+def tasks_kb(user: dict) -> InlineKeyboardMarkup:
+    st = _state(user)
+    rows = []
+    for key, text, kind, goal, reward in QUESTS:
+        if key not in st["daily"]["claimed"] and quest_value(st, kind) >= goal:
+            rows.append([_btn(f"🎁 Забрать: {text}", f"arena:claim:{key}", ButtonStyle.SUCCESS)])
+    rows.append([_back("arena:main")])
+    return _kb(*rows)
+
+
+def rules_html(with_image: bool = False) -> str:
+    leagues = " → ".join(f"{icon} {name}" for _, name, icon in LEAGUES)
+    return (
+        f"{_image(with_image)}<p><b>ℹ️ ПРАВИЛА АРЕНЫ</b></p>"
+        "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
+        + _tree([
+            ("Соперник", "подбирается по кубкам и силе питомца, а если игроков мало, выходит тренировочный призрак"),
+            ("Бой", "по очереди: быстрый питомец ходит первым, навыки и критические удары решают исход"),
+            ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды"),
+            ("Кубки", "за победу растут, за поражение падают, и чем сильнее соперник, тем больше награда"),
+            ("Энергия", f"бой стоит 1 энергии, максимум {ENERGY_MAX}, +1 каждые {ENERGY_REGEN_SEC // 60} мин"),
+        ], "Как проходит бой")
+        + _gap() + _tree([("Лиги", leagues),
+                          ("Сезон", f"длится {SEASON_LENGTH // 86400} дней, в конце награда за лучшую лигу и сброс кубков наполовину"),
+                          ("Серия", f"каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%"),
+                          ("Защита", f"против одного игрока можно драться {PAIR_LIMIT_DAY} раза в сутки")], "Прогресс")
+        + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Обработчики
+# ---------------------------------------------------------------------------
+
+def _prepare(user: dict, uid) -> dict:
+    """Приводит данные арены игрока в порядок: проверка, сезон, энергия, сутки, запись в список участников."""
+    _state(user)
+    _sanitize(user, uid)
+    st = _state(user)
+    _roll_season(user, uid)
+    _regen(st)
+    _rollover_day(st)
+    t = st.get("target")
+    if t and time.time() - t.get("ts", 0) > TARGET_TTL:
+        st["target"] = None                    # цель устарела
+    _reg_update(uid, user)
+    return st
+
+
+async def _need(callback: CallbackQuery):
+    user = _get_user(callback.from_user.id)
+    if user is None or user.get("pet") not in _PETS:
+        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        return None, None
+    return user, _prepare(user, callback.from_user.id)
+
+
+async def _show(callback, key: str, html_fn, kb=None, force_new: bool = False):
+    return await _show_rich_card(callback, key, html_fn, kb, force_new=force_new)
+
+
+@router.message(F.text == "Арена")
+async def open_arena(message: Message):
+    user = _get_user(message.from_user.id)
+    if user is None or user.get("pet") not in _PETS:
+        await message.answer("<i>Сначала выбери питомца: /start</i>")
+        return
+    uid = message.from_user.id
+    st = _prepare(user, uid)
+    note = st.pop("note", "")
+    _save_users()
+    await _send_rich_card(message.bot, message.chat.id, "arena",
+                          lambda wi: main_html(user, uid, wi, note), main_kb(user))
+
+
+@router.callback_query(F.data == "arena:main")
+async def on_main(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    await callback.answer()
+    uid = callback.from_user.id
+    note = st.pop("note", "")
+    await _show(callback, "arena", lambda wi: main_html(user, uid, wi, note), main_kb(user))
+
+
+@router.callback_query(F.data == "arena:close")
+async def on_close(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except TelegramAPIError:
+        pass
+
+
+def _new_target(user: dict, uid, st: dict, attempt: int = 0) -> dict:
+    target = find_target(str(uid), user, st, attempt)
+    me = make_fighter(user, str(uid), "", "")
+    opp = target_fighter(target)
+    target["chance"] = win_chance(me, opp) if opp else 0.5
+    st["target"] = target
+    return target
+
+
+@router.callback_query(F.data == "arena:find")
+async def on_find(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    uid = callback.from_user.id
+    target = st.get("target")
+    if not target or target_fighter(target) is None:
+        target = _new_target(user, uid, st)
+        _save_users()
+    await callback.answer()
+    await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+
+
+@router.callback_query(F.data == "arena:reroll")
+async def on_reroll(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    uid = callback.from_user.id
+    old = st.get("target")
+    rerolls = (old or {}).get("rerolls", 0)
+    if rerolls >= 1:                                      # первый повторный поиск бесплатный
+        if user.get("coins", 0) < REROLL_COST:
+            await callback.answer(f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
+            return
+        user["coins"] -= REROLL_COST
+        _led("arena_reroll", uid=str(uid), cost=REROLL_COST, coins_left=user["coins"])
+    if old and old.get("uid"):
+        st["recent"].append(str(old["uid"]))              # того же соперника второй раз не предлагаем
+        del st["recent"][:-RECENT_KEEP]
+    target = _new_target(user, uid, st, attempt=rerolls + 1)
+    _save_users()
+    await callback.answer("Ищем другого соперника…")
+    await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+
+
+@router.callback_query(F.data == "arena:refill")
+async def on_refill(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    uid = callback.from_user.id
+    if st["energy"] >= ENERGY_MAX:
+        await callback.answer("Энергия уже полная", show_alert=True)
+        return
+    if user.get("coins", 0) < ENERGY_REFILL_COST:
+        await callback.answer(f"Не хватает монет: нужно {_num(ENERGY_REFILL_COST)}", show_alert=True)
+        return
+    user["coins"] -= ENERGY_REFILL_COST
+    st["energy"], st["energy_ts"] = ENERGY_MAX, time.time()
+    _save_users()
+    _led("arena_refill", uid=str(uid), cost=ENERGY_REFILL_COST, coins_left=user["coins"])
+    await callback.answer("Энергия восстановлена!", show_alert=True)
+    note = st.pop("note", "")
+    await _show(callback, "arena", lambda wi: main_html(user, uid, wi, note), main_kb(user))
+
+
+@router.callback_query(F.data == "arena:fight")
+async def on_fight(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    uid = callback.from_user.id
+    target = st.get("target")
+    if not target:
+        await callback.answer("Сначала найди соперника", show_alert=True)
+        return
+    if st["energy"] < 1:
+        await callback.answer("Нет энергии: подожди или восстанови её за монеты", show_alert=True)
+        return
+    info = resolve_fight(str(uid), user, st, target)
+    if info is None:
+        st["target"] = None
+        _save_users()
+        await callback.answer("Соперник больше недоступен, подбираем другого", show_alert=True)
+        target = _new_target(user, uid, st)
+        _save_users()
+        await _show(callback, "arena_find", lambda wi: find_html(user, uid, target, wi), find_kb(user, target))
+        return
+    await callback.answer("Бой!")
+    frames = battle_frames(info)
+    try:
+        # Первый кадр всегда новым сообщением, дальше обновляем его же
+        msg = await _show(callback, "arena_battle", frames[0], None, force_new=True)
+        wrapper = SimpleNamespace(message=msg, bot=callback.bot, from_user=callback.from_user)
+        for frame in frames[1:]:
+            await asyncio.sleep(1.4)
+            await _show(wrapper, "arena_battle", frame, None)
+        await asyncio.sleep(1.4)
+        await _show(wrapper, "arena_battle", lambda wi: result_html(info, wi), result_kb(info))
+    except TelegramAPIError as e:
+        log.warning("не удалось показать бой игроку %s: %s", uid, e)
+        await _send_rich_card(callback.bot, callback.message.chat.id, "arena_battle",
+                              lambda wi: result_html(info, wi), result_kb(info))
+
+
+@router.callback_query(F.data == "arena:top")
+async def on_top(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    uid = callback.from_user.id
+    await callback.answer()
+    await _show(callback, "arena_top", lambda wi: top_html(uid, wi), _kb([_back("arena:main")]))
+
+
+@router.callback_query(F.data == "arena:hist")
+async def on_hist(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    st["unseen"] = 0
+    _save_users()
+    await callback.answer()
+    await _show(callback, "arena_history", lambda wi: hist_html(user, wi), _kb([_back("arena:main")]))
+
+
+@router.callback_query(F.data == "arena:tasks")
+async def on_tasks(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    await callback.answer()
+    await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
+
+
+@router.callback_query(F.data.regexp(r"^arena:claim:\w+$"))
+async def on_claim(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    key = callback.data.split(":")[2]
+    coins = claim_quest(user, str(callback.from_user.id), key)
+    if coins is None:
+        await callback.answer("Это задание нельзя забрать", show_alert=True)
+    else:
+        await callback.answer(f"Награда получена: +{_num(coins)} монет!", show_alert=True)
+    await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
+
+
+@router.callback_query(F.data == "arena:rules")
+async def on_rules(callback: CallbackQuery):
+    await callback.answer()
+    await _show(callback, "arena", lambda wi: rules_html(wi), _kb([_back("arena:main")]))
+
+
+# ---------------------------------------------------------------------------
+# Инструменты админа
+# ---------------------------------------------------------------------------
+
+def admin_lines(user: dict) -> list[str]:
+    st = user.get("arena")
+    if not isinstance(st, dict):
+        return ["Арена: <i>ещё не открывал</i>"]
+    st = _state(user)
+    return [
+        f"Арена: {league_name(st['rating'])} · кубки <b>{st['rating']}</b> (рекорд {st['peak']})",
+        f"Бои: <b>{st['wins']}</b> побед · <b>{st['losses']}</b> поражений · серия <b>{st['streak']}</b> · "
+        f"защит {st['def_w']}/{st['def_l']}",
+    ]
+
+
+def admin_reset(user: dict, uid) -> dict | None:
+    """Сбрасывает арену игрока и убирает его из рейтинга. Возвращает прежние данные."""
+    old = user.pop("arena", None)
+    _reg_remove(uid)
+    return old
+
+
+def admin_refill(user: dict) -> None:
+    st = _state(user)
+    st["energy"], st["energy_ts"] = ENERGY_MAX, time.time()
+
+
+def admin_stats() -> dict:
+    top = top_list(1)
+    return {"players": len(_REG["players"]), "fights": _REG.get("fights", 0),
+            "top": (top[0][0], top[0][1].get("r", 0)) if top else None}
+
+
+def send_preview_builders(user: dict, uid) -> dict:
+    """Для /img: сборщики экранов арены без кнопок."""
+    _prepare(user, uid)
+    return {
+        "arena": lambda wi: main_html(user, uid, wi),
+        "arena_find": lambda wi: rules_html(wi),
+        "arena_battle": lambda wi: f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ</b></p>",
+        "arena_top": lambda wi: top_html(uid, wi),
+        "arena_tasks": lambda wi: tasks_html(user, wi),
+        "arena_history": lambda wi: hist_html(user, wi),
+    }
+
+
+async def send_preview(bot, chat_id: int, user_id: int, key: str) -> None:
+    user = _get_user(user_id)
+    if user is None or user.get("pet") not in _PETS:
+        return
+    await _send_rich_card(bot, chat_id, key, send_preview_builders(user, user_id)[key])
