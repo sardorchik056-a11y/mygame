@@ -1058,11 +1058,18 @@ def choose_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
     return (
         f"{_image(with_image)}<p><b>🎯 ВЫБОР СОПЕРНИКА</b></p>"
-        + _tree([
-            ("👤 Игрок", "живой питомец, полная награда"),
-            ("🤖 Робот", f"спарринг, награда ×{BOT_REWARD_MULT}, кубки только твои"),
-            ("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}, бой стоит 1"),
-        ], "Против кого сражаться?")
+        "<blockquote><i>Кого вызовешь на песок: живого бойца или железного спарринг-партнёра?</i></blockquote>"
+        + _sec("👤 Настоящий игрок", [
+            ("Кто это", "питомец реального игрока, подобранный по кубкам и силе"),
+            ("В сети", "не обязательно, бой всё равно состоится"),
+            ("Награда", "полная, кубки меняются у вас обоих"),
+        ])
+        + _sec("🤖 Тренировочный робот", [
+            ("Кто это", "безопасный спарринг, сила близка к твоей, но он чуть слабее"),
+            ("Награда", f"около {round(BOT_REWARD_MULT * 100)}% от обычной"),
+            ("Кубки", "меняются только у тебя"),
+        ])
+        + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Стоимость боя", "1 энергия")], "Состояние")
     )
 
 
@@ -1093,26 +1100,37 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
     meat, fruit = res_reward(user["level"], True, mult)
     chance = float(target.get("chance", 0.5))
     if (me["element"], opp["element"]) in ADVANTAGE:
-        elem = "✅ Стихия на твоей стороне"
+        elem = f"✅ У тебя преимущество стихии: урон ×{ELEMENT_ADV}"
     elif (opp["element"], me["element"]) in ADVANTAGE:
-        elem = "⚠️ Стихия против тебя"
+        elem = f"⚠️ У соперника преимущество стихии: твой урон ×{ELEMENT_DIS}"
     else:
-        elem = ""
-    status = "🤖 Робот" if bot else f"{league_name(target['rating'])}, {_num(target['rating'])} 🏆"
-    head = "🤖 РОБОТ ГОТОВ" if bot else "🎯 СОПЕРНИК НАЙДЕН"
+        elem = "Стихии равны, всё решат навыки и удача"
+    if bot:
+        head, quote = "🤖 РОБОТ ГОТОВ К СПАРРИНГУ", "Тренировочный боец вышел на песок. Проверь свои силы без лишнего риска."
+        status = "🤖 Тренировочный робот"
+    else:
+        head, quote = "🎯 СОПЕРНИК НАЙДЕН", "Система подобрала бойца по рейтингу и силе питомца. Оцени шансы и решай."
+        status = f"{league_name(target['rating'])}, {_num(target['rating'])} кубков"
+    compare = [(_stat_label(k), _cmp(me["stats"][k], opp["stats"][k])) for k in ("hp", "atk", "def", "spd", "luck")]
+    foe = [
+        ("Имя", opp["name_html"]),
+        ("Питомец", _pet_line(opp)),
+        (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
+        ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+        ("Статус", status),
+    ]
     return (
         f"{_image(with_image)}<p><b>{head}</b></p>"
-        + _tree([
-            ("Имя", opp["name_html"]),
-            ("Питомец", f"{_pet_line(opp)}, ур. {opp['level']}"),
-            ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
-            ("Статус", status),
-        ], "Противник")
-        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), *([f"<i>{elem}</i>"] if elem else []))
-        + _tree([
-            ("Победа", f"+{win_d} 🏆, {_num(coins)} {_coin()}, {meat} {_MEAT}, {fruit} {_FRUIT}"),
-            ("Поражение", f"{loss_d} 🏆"),
-        ], "Ставки")
+        f"<blockquote><i>{quote}</i></blockquote>"
+        + _sec("🆚 Противник", foe)
+        + _sec("📊 Сравнение (ты против него)", compare)
+        + _p(f"<b>🎲 Шанс победы: ~{round(chance * 100)}%</b>", _bar(chance), f"<i>{elem}</i>") + _gap()
+        + _sec("💰 Ставки", [
+            ("Победа", f"+{win_d} кубков и около {_num(coins)} {_coin()}"),
+            ("Мясо и фрукты", f"около {meat} {_MEAT} и {fruit} {_FRUIT}"),
+            ("Поражение", f"{loss_d} кубков"),
+            ("Энергия", f"−1 (сейчас {st['energy']}/{ENERGY_MAX})"),
+        ])
     )
 
 
