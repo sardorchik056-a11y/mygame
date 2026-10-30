@@ -6,9 +6,10 @@
     и в боях с боссами), удары могут быть критическими, а противник может увернуться.
   * Стихии: Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды. Врождённые способности
     питомцев (Огненная ярость, Приливная волна, Каменная кожа) работают и на арене.
-  * Перед боем игрок сам выбирает соперника: настоящий игрок (питомец реального игрока подбирается
-    по рейтингу и силе, даже если он не в сети) или тренировочный робот (безопасный спарринг
-    с уменьшенной наградой). Перед боем показывается оценка шанса победы.
+  * Перед боем игрок сам выбирает соперника: настоящий игрок или тренировочный робот (безопасный
+    спарринг с уменьшенной наградой). Настоящего соперника ищем в живой очереди: бой начинается,
+    когда подходящие игроки (по кубкам, силе и шансу победы) ищут соперника одновременно. На экране
+    поиска идёт время, показано примерное ожидание и число ищущих.
   * Бой показывается по раундам, поэтому длится заметно дольше нескольких секунд.
   * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои (10 штук, +1 за 10 минут), серия побед, награды монетами, мясом и фруктами,
     ежедневные задания, недельные сезоны с наградой за лигу, топ-10 и история боёв.
@@ -28,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import copy
 import functools
 import logging
@@ -139,6 +141,27 @@ QUESTS = [
     ("q_wins5", "Выиграй 5 боёв", "wins", 5, 1_500),
 ]
 
+# --- Поиск настоящего игрока (бой начинается, когда подходящие игроки ищут соперника одновременно) ---
+SEARCH_MAX = 90              # сколько секунд длится один поиск, потом предлагаем повторить или робота
+SEARCH_TICK = 3.0            # как часто обновляется экран поиска (секунд)
+MATCH_TICK = 1.0             # как часто система ищет пары среди ищущих
+DEFAULT_WAIT = 40            # примерное время поиска, пока нет статистики
+WAIT_HISTORY = 20            # сколько последних поисков помним для оценки времени
+QUEUE_SPAN_BASE = 150        # допустимая разница кубков в начале поиска
+QUEUE_SPAN_GROW = 20         # на сколько кубков в секунду окно расширяется
+QUEUE_BANDS = [(0, (0.35, 0.65)), (15, (0.25, 0.75)), (35, (0.12, 0.88)), (60, (0.0, 1.0))]   # (с какой секунды, допустимый шанс победы)
+QUEUE_POWER = [(0, 1.7), (35, 2.5)]    # (с какой секунды, во сколько раз силы могут различаться)
+MAX_PAIR_CHECKS = 20         # сколько новых пар оцениваем пробными боями за один шаг
+SEARCH_LINES = [
+    "Глашатай ищет достойного соперника…",
+    "Трибуны гудят, арена ждёт бойцов…",
+    "Бойцы разминаются у ворот арены…",
+    "Слух о твоём питомце уже идёт по городу…",
+    "Судья проверяет, чтобы бой был честным…",
+    "Где-то рядом уже точит когти твой соперник…",
+]
+_CLOCKS = "🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚🕛"
+
 # --- Защита ---
 BATTLE_STUCK_SEC = 120       # если «бой идёт» дольше, считаем, что он завис, и снимаем блокировку
 REG_SAVE_EVERY = 30          # не чаще, чем раз в столько секунд сохранять список участников (кроме боёв)
@@ -202,6 +225,10 @@ _iter_users = None                                # необязательно: 
 _REG_DIRTY = False
 _REG_SAVED_AT = 0.0
 _FIGHTING: dict[int, float] = {}                  # игроки, у которых сейчас идёт показ боя
+_QUEUE: dict[int, dict] = {}                      # кто сейчас ищет настоящего соперника (только в памяти)
+_WAITS: collections.deque = collections.deque(maxlen=WAIT_HISTORY)   # сколько длились последние удачные поиски
+_CHANCE_CACHE: dict = {}                          # оценки шанса победы для пар из очереди
+_MATCHER: asyncio.Task | None = None
 
 
 def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji, PETS, user_stats,
@@ -921,6 +948,182 @@ def target_fighter(target: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Очередь поиска: бой начинается, когда ищут оба
+# ---------------------------------------------------------------------------
+
+def _window(table: list, wait: float):
+    """Значение из таблицы (секунда начала, значение) для данного времени ожидания."""
+    cur = table[0][1]
+    for start, value in table:
+        if wait >= start:
+            cur = value
+    return cur
+
+
+def _span(wait: float) -> int:
+    return min(RATING_RANGE_MAX, round(QUEUE_SPAN_BASE + QUEUE_SPAN_GROW * wait))
+
+
+def _clock(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _entry_problem(entry: dict) -> str | None:
+    """Почему этот игрок больше не может участвовать в поиске (или None, если всё в порядке)."""
+    user = _get_user(entry["uid"])
+    if not user or user.get("pet") not in _PETS:
+        return "gone"
+    st = _state(user)
+    _regen(st)
+    if st["energy"] < 1:
+        return "energy"
+    return None
+
+
+def _queue_fail(entry: dict, reason: str) -> None:
+    if entry["state"] != "wait":
+        return
+    entry["state"], entry["reason"] = "failed", reason
+    _QUEUE.pop(entry["uid"], None)
+    entry["event"].set()
+
+
+def _pair_cheap(ea: dict, eb: dict, wait: float) -> tuple | None:
+    """Быстрая проверка без пробных боёв. Возвращает (user_a, user_b, st_a, st_b) или None."""
+    ua, ub = _get_user(ea["uid"]), _get_user(eb["uid"])
+    if not ua or not ub:
+        return None
+    sa, sb = _state(ua), _state(ub)
+    _rollover_day(sa)
+    _rollover_day(sb)
+    ida, idb = str(ea["uid"]), str(eb["uid"])
+    if abs(sa["rating"] - sb["rating"]) > _span(wait):
+        return None
+    pa, pb = power_of(_user_stats(ua)), power_of(_user_stats(ub))
+    ratio = max(pa, pb) / max(1, min(pa, pb))
+    if ratio > _window(QUEUE_POWER, wait):
+        return None
+    if sa["pairs"]["n"].get(idb, 0) >= PAIR_LIMIT_DAY or sb["pairs"]["n"].get(ida, 0) >= PAIR_LIMIT_DAY:
+        return None
+    if wait < 60 and (idb in sa["recent"] or ida in sb["recent"]):         # только что дрались: даём другим шанс
+        return None
+    return ua, ub, sa, sb
+
+
+def _pair_chance(ea: dict, eb: dict, ua: dict, ub: dict, budget: list) -> float | None:
+    """Шанс победы A над B (пробные бои, с кэшем). None, если лимит оценок на этот шаг исчерпан."""
+    key = (ea["uid"], eb["uid"], power_of(_user_stats(ua)), power_of(_user_stats(ub)))
+    hit = _CHANCE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 20:
+        return hit[1]
+    if budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    fa = make_fighter(ua, str(ea["uid"]), "", "")
+    fb = make_fighter(ub, str(eb["uid"]), "", "")
+    chance = win_chance(fa, fb, SCREEN_RUNS)
+    _CHANCE_CACHE[key] = (time.time(), chance)
+    return chance
+
+
+def _match_pairs() -> None:
+    """Один шаг подбора: проверяет ищущих и сводит подходящих друг с другом."""
+    now = time.time()
+    for key in [k for k, v in _CHANCE_CACHE.items() if now - v[0] > 60]:
+        _CHANCE_CACHE.pop(key, None)
+    for entry in list(_QUEUE.values()):
+        reason = _entry_problem(entry)
+        if reason:
+            _queue_fail(entry, reason)
+    entries = sorted((e for e in _QUEUE.values() if e["state"] == "wait"), key=lambda e: e["since"])
+    used: set[int] = set()
+    budget = [MAX_PAIR_CHECKS]
+    for ea in entries:
+        if ea["uid"] in used:
+            continue
+        best = None
+        for eb in entries:
+            if eb is ea or eb["uid"] in used:
+                continue
+            wait = max(now - ea["since"], now - eb["since"])      # окно определяет тот, кто ждёт дольше
+            cheap = _pair_cheap(ea, eb, wait)
+            if cheap is None:
+                continue
+            ua, ub, sa, sb = cheap
+            chance = _pair_chance(ea, eb, ua, ub, budget)
+            if chance is None:
+                continue
+            lo, hi = _window(QUEUE_BANDS, wait)
+            if not (lo <= chance <= hi):
+                continue
+            score = abs(chance - 0.5) + abs(sa["rating"] - sb["rating"]) / 2000
+            if best is None or score < best[0]:
+                best = (score, eb)
+        if best is not None:
+            eb = best[1]
+            used.update((ea["uid"], eb["uid"]))
+            _start_duel(ea, eb, now)
+
+
+def _start_duel(ea: dict, eb: dict, now: float) -> None:
+    ua, ub = _get_user(ea["uid"]), _get_user(eb["uid"])
+    try:
+        info_a, info_b = resolve_duel(str(ea["uid"]), ua, str(eb["uid"]), ub)
+    except ArenaFightError:
+        _queue_fail(ea, "error")
+        _queue_fail(eb, "error")
+        return
+    for entry, info in ((ea, info_a), (eb, info_b)):
+        entry["state"], entry["info"] = "matched", info
+        entry["waited"] = now - entry["since"]
+        _WAITS.append(entry["waited"])
+        _QUEUE.pop(entry["uid"], None)
+        entry["event"].set()
+
+
+async def _matcher_loop() -> None:
+    global _MATCHER
+    try:
+        while _QUEUE:
+            try:
+                _match_pairs()
+            except Exception:
+                log.exception("ошибка в подборе пар арены")
+            await asyncio.sleep(MATCH_TICK)
+    finally:
+        _MATCHER = None
+
+
+def _ensure_matcher() -> None:
+    global _MATCHER
+    if _MATCHER is None or _MATCHER.done():
+        _MATCHER = asyncio.create_task(_matcher_loop())
+
+
+def _enqueue(callback, uid: int) -> dict:
+    entry = {
+        "uid": uid, "since": time.time(), "state": "wait", "reason": "", "info": None, "waited": 0.0,
+        "event": asyncio.Event(),
+        "wrapper": SimpleNamespace(message=callback.message, bot=callback.bot, from_user=callback.from_user),
+    }
+    _QUEUE[uid] = entry
+    _ensure_matcher()
+    return entry
+
+
+def _leave_queue(uid: int, state: str) -> None:
+    entry = _QUEUE.pop(uid, None)
+    if entry is not None and entry["state"] == "wait":
+        entry["state"] = state
+        entry["event"].set()
+
+
+def queue_size() -> int:
+    return sum(1 for e in _QUEUE.values() if e["state"] == "wait")
+
+
+# ---------------------------------------------------------------------------
 # Бой: итоги, награды, рейтинг
 # ---------------------------------------------------------------------------
 
@@ -991,7 +1194,17 @@ def _resolve_fight_impl(uid: str, user: dict, st: dict, target: dict) -> dict | 
         opp_rating = int(target.get("rating", st["rating"]))
 
     battle = simulate(me, opp)
-    win = battle["winner"] == 0
+    return _apply_result(str(uid), user, st, me, opp, opp_uid, opp_rating, battle, battle["winner"] == 0,
+                         real, opp_user, opp_st, defender=True)
+
+
+def _apply_result(uid: str, user: dict, st: dict, me: dict, opp: dict, opp_uid, opp_rating: int, battle: dict,
+                  win: bool, real: bool, opp_user, opp_st, defender: bool, finalize: bool = True) -> dict:
+    """Применяет итог уже проведённого боя к игроку: энергия, кубки, награды, история, задания.
+    defender=True: соперник-игрок не участвовал в поиске, и его тоже обновляем (офлайн-защита);
+    defender=False: соперник ищет бой сам, ему итог применяется отдельным вызовом.
+    finalize=False: не сохраняем и не считаем бой (это делает вызывающий после обоих игроков)."""
+    battle = simulate(me, opp)
     old_rating = st["rating"]
     win_d, loss_d = rating_deltas(old_rating, opp_rating)
     new_rating = max(0, old_rating + (win_d if win else loss_d))
@@ -1049,7 +1262,7 @@ def _resolve_fight_impl(uid: str, user: dict, st: dict, target: dict) -> dict | 
 
     # --- соперник-игрок: изменение рейтинга и запись в его историю ---
     opp_delta = 0
-    if real:
+    if real and defender:
         if win:
             opp_new = max(0, opp_rating - round(win_d * DEFENDER_SHARE))
             opp_st["def_l"] += 1
@@ -1080,12 +1293,13 @@ def _resolve_fight_impl(uid: str, user: dict, st: dict, target: dict) -> dict | 
     del st["recent"][:-RECENT_KEEP]
     st["target"] = None
     _reg_update(uid, user)
-    _REG["fights"] = _REG.get("fights", 0) + 1
-    _save_registry()
-    _save_users()
+    if finalize:
+        _REG["fights"] = _REG.get("fights", 0) + 1
+        _save_registry()
+        _save_users()
 
     # --- слежка ---
-    _led("arena_fight", uid=str(uid), opp=str(opp_uid) if real else "bot", win=win, rounds=battle["rounds"],
+    _led("arena_fight", uid=str(uid), opp=str(opp_uid) if real else "bot", mode="queue" if not defender else "offline", win=win, rounds=battle["rounds"],
          old=old_rating, new=new_rating, delta=delta, coins=coins, my_pet=me["pet"], opp_pet=opp["pet"],
          my_power=power_of(me["stats"]), opp_power=power_of(opp["stats"]), energy=st["energy"],
          coins_total=user["coins"], meat=meat, fruit=fruit)
@@ -1154,6 +1368,80 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
                 _REG["players"][k] = v
         _REG["fights"] = snap_fights
         _led("arena_fight_failed", uid=str(uid), error=type(exc).__name__)
+        raise ArenaFightError(str(exc)) from exc
+
+
+def _mirror(battle: dict) -> dict:
+    """Тот же бой глазами второго участника: кто «ты», а кто «соперник» меняется местами."""
+    return {
+        "winner": 1 - battle["winner"], "rounds": battle["rounds"],
+        "hp": (battle["hp"][1], battle["hp"][0]),
+        "events": [{**e, "who": 1 - e["who"], "hp": (e["hp"][1], e["hp"][0])} for e in battle["events"]],
+    }
+
+
+def _snapshot(user: dict):
+    """Снимок изменяемых полей игрока; возвращает функцию отката (на месте, объекты не подменяются)."""
+    keys = ("coins", "meat", "fruit", "wins", "losses")
+    snap = {k: user.get(k, _MISSING) for k in keys}
+    arena_snap = copy.deepcopy(user.get("arena"))
+
+    def restore() -> None:
+        for k, v in snap.items():
+            if v is _MISSING:
+                user.pop(k, None)
+            else:
+                user[k] = v
+        if isinstance(user.get("arena"), dict):
+            _restore(user["arena"], arena_snap)
+
+    return restore
+
+
+def resolve_duel(uid_a: str, user_a: dict, uid_b: str, user_b: dict) -> tuple[dict, dict]:
+    """Бой двух игроков, которые оба искали соперника. Один бой, итог применяется к обоим как
+    полноценный бой каждого (энергия, кубки, награды). Транзакция: при сбое откатываются оба.
+    Возвращает (итог для A, итог для B) или бросает ArenaFightError."""
+    if uid_a == uid_b:
+        raise ArenaFightError("тот же игрок")
+    for uid, user in ((uid_a, user_a), (uid_b, user_b)):
+        _roll_season(user, uid)
+    st_a, st_b = _state(user_a), _state(user_b)
+    for st in (st_a, st_b):
+        _regen(st)
+        _rollover_day(st)
+    if st_a["energy"] < 1 or st_b["energy"] < 1:
+        raise ArenaFightError("нет энергии")
+    restores = [_snapshot(user_a), _snapshot(user_b)]
+    snap_reg = {k: copy.deepcopy(_REG["players"].get(k)) for k in (uid_a, uid_b)}
+    snap_fights = _REG.get("fights", 0)
+    try:
+        opp_for_a, opp_for_b = _fighter_of(uid_b), _fighter_of(uid_a)          # публичные имена
+        if opp_for_a is None or opp_for_b is None:
+            raise ArenaFightError("соперник недоступен")
+        me_a = make_fighter(user_a, uid_a, settings.name_html(user_a), settings.name_plain(user_a))
+        me_b = make_fighter(user_b, uid_b, settings.name_html(user_b), settings.name_plain(user_b))
+        rating_a, rating_b = st_a["rating"], st_b["rating"]
+        battle = simulate(me_a, me_b)
+        info_a = _apply_result(uid_a, user_a, st_a, me_a, opp_for_a, uid_b, rating_b, battle,
+                               battle["winner"] == 0, True, None, None, defender=False, finalize=False)
+        info_b = _apply_result(uid_b, user_b, st_b, me_b, opp_for_b, uid_a, rating_a, _mirror(battle),
+                               battle["winner"] == 1, True, None, None, defender=False, finalize=False)
+        _REG["fights"] = _REG.get("fights", 0) + 1
+        _save_registry()
+        _save_users()
+        return info_a, info_b
+    except Exception as exc:
+        log.exception("дуэль %s и %s сорвалась, изменения отменены", uid_a, uid_b)
+        for r in restores:
+            r()
+        for k, v in snap_reg.items():
+            if v is None:
+                _REG["players"].pop(k, None)
+            else:
+                _REG["players"][k] = v
+        _REG["fights"] = snap_fights
+        _led("arena_fight_failed", uid=f"{uid_a}+{uid_b}", error=type(exc).__name__)
         raise ArenaFightError(str(exc)) from exc
 
 
@@ -1355,22 +1643,124 @@ def _cmp(mine: int, theirs: int) -> str:
     return f"{_num(mine)} против {_num(theirs)} {arrow}"
 
 
+def _eta_text(entry: dict, waited: float) -> str:
+    """Примерное время поиска: по подходящим в очереди и по тому, сколько длились прошлые поиски."""
+    close = 0
+    for other in _QUEUE.values():
+        if other is not entry and other["state"] == "wait" and _pair_cheap(entry, other, waited) is not None:
+            close += 1
+    if close:
+        return "почти сразу, подходящий игрок уже ищет бой"
+    if len(_WAITS) >= 3:
+        mid = sorted(_WAITS)[len(_WAITS) // 2]
+    else:
+        mid = DEFAULT_WAIT
+    lo, hi = max(5, round(mid * 0.6)), min(SEARCH_MAX, max(15, round(mid * 1.6)))
+    if waited > hi:
+        return "ещё немного, окно поиска уже расширено"
+    if queue_size() <= 1 and len(_WAITS) < 3:
+        return f"зависит от числа игроков, не дольше {_clock(SEARCH_MAX)}"
+    return f"около {_clock(lo)}–{_clock(hi)}"
+
+
+def search_html(entry: dict, user: dict, with_image: bool = False) -> str:
+    st = _state(user)
+    waited = time.time() - entry["since"]
+    tick = int(waited // SEARCH_TICK)
+    dots = "." * (tick % 3 + 1)
+    clock = _CLOCKS[int(waited // 5) % len(_CLOCKS)]
+    if waited < 15:
+        phase = "ищем игроков с похожими кубками и силой"
+    elif waited < 35:
+        phase = "окно поиска расширяется"
+    elif waited < 60:
+        phase = "берём всех, кто сейчас ищет бой"
+    else:
+        phase = "последние секунды поиска"
+    others = max(0, queue_size() - 1)
+    stats = _user_stats(user)
+    return (
+        f"{_image(with_image)}<p><b>🔎 ПОИСК СОПЕРНИКА</b></p>"
+        f"<blockquote><i>{SEARCH_LINES[tick % len(SEARCH_LINES)]}</i></blockquote>"
+        + _tree([
+            (f"{clock} Прошло", _clock(waited)),
+            ("⌛ Примерно ждать", _eta_text(entry, waited)),
+            ("Ход поиска", _bar(min(1.0, waited / SEARCH_MAX))),
+            ("Этап", phase),
+        ], f"Ищем{dots}")
+        + _gap()
+        + _tree([
+            ("👥 Ищут бой, кроме тебя", str(others)),
+            ("🎯 Допустимая разница кубков", f"±{_span(waited)}"),
+            ("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}, спишется после начала боя"),
+        ], "Арена сейчас")
+        + _gap()
+        + _tree([
+            ("Питомец", f"{escape(_PETS[user['pet']]['name'])} {_elem(_PETS[user['pet']]['element'])}".strip()),
+            ("💪 Сила", _num(power_of(stats))),
+            ("🏆 Кубки", _num(st["rating"])),
+        ], "Твой боец")
+        + _p("<i>Бой начнётся, когда подходящий игрок тоже будет искать соперника.</i>")
+    )
+
+
+def search_kb() -> InlineKeyboardMarkup:
+    return _kb([_btn("✖️ Отменить поиск", "arena:cancel", ButtonStyle.DANGER)])
+
+
+def matched_html(entry: dict, with_image: bool = False) -> str:
+    info = entry["info"]
+    opp = info["opp"]
+    me = info["me"]
+    return (
+        f"{_image(with_image)}<p><b>✅ СОПЕРНИК НАЙДЕН</b></p>"
+        f"<blockquote><i>Поиск занял {_clock(entry['waited'])}. Бойцы выходят на арену…</i></blockquote>"
+        + _tree([
+            ("Имя", opp["name_html"]),
+            ("Питомец", _pet_line(opp)),
+            (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
+            ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+            ("🏆 Кубки", _num(info["opp_rating"])),
+        ], "Противник")
+        + _p("<i>Энергия списана, бой начинается!</i>")
+    )
+
+
+def timeout_html(entry: dict, with_image: bool = False) -> str:
+    return (
+        f"{_image(with_image)}<p><b>😔 ПОКА НИКОГО</b></p>"
+        f"<blockquote><i>За {_clock(SEARCH_MAX)} подходящий игрок не нашёлся. Энергия не потрачена.</i></blockquote>"
+        + _tree([
+            ("🔁 Искать ещё", "вдруг кто-то зайдёт в арену прямо сейчас"),
+            ("🤖 Робот", "спарринг без ожидания, награда меньше"),
+        ], "Что дальше?")
+        + _p("<i>Чем больше игроков в арене, тем быстрее находится соперник. Вечером обычно людно.</i>")
+    )
+
+
+def timeout_kb() -> InlineKeyboardMarkup:
+    return _kb([_btn("🔁 Искать ещё", "arena:find:pvp", ButtonStyle.SUCCESS)],
+               [_btn("🤖 Против робота", "arena:find:bot", ButtonStyle.PRIMARY)],
+               [_back("arena:main")])
+
+
 def choose_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
     return (
         f"{_image(with_image)}<p><b>🎯 ВЫБОР СОПЕРНИКА</b></p>"
         "<blockquote><i>Кого вызовешь на песок: живого бойца или железного спарринг-партнёра?</i></blockquote>"
         + _sec("👤 Настоящий игрок", [
-            ("Кто это", "питомец реального игрока, подобранный по кубкам и силе"),
-            ("В сети", "не обязательно, бой всё равно состоится"),
+            ("Как это работает", "поиск среди тех, кто тоже ищет бой прямо сейчас"),
+            ("Ожидание", f"обычно до {_clock(DEFAULT_WAIT * 1.6)}, не дольше {_clock(SEARCH_MAX)}"),
             ("Награда", "полная, кубки меняются у вас обоих"),
         ])
         + _sec("🤖 Тренировочный робот", [
-            ("Кто это", "безопасный спарринг, сила близка к твоей, но он чуть слабее"),
+            ("Как это работает", "бой начинается сразу, сила близка к твоей, но он чуть слабее"),
             ("Награда", f"около {round(BOT_REWARD_MULT * 100)}% от обычной"),
             ("Кубки", "меняются только у тебя"),
         ])
-        + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Стоимость боя", "1 энергия")], "Состояние")
+        + _tree([("🔎 Сейчас ищут бой", str(queue_size())), ("⚡ Твоя энергия", f"{st['energy']}/{ENERGY_MAX}"),
+                 ("Стоимость боя", "1 энергия")], "Арена")
     )
 
 
@@ -1615,7 +2005,8 @@ def rules_html(with_image: bool = False) -> str:
         f"{_image(with_image)}<p><b>ℹ️ ПРАВИЛА АРЕНЫ</b></p>"
         "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
         + _sec("Как проходит бой", [
-            ("Соперник", "ты выбираешь: настоящий игрок (подбирается по кубкам и силе) или тренировочный робот"),
+            ("Соперник", "настоящий игрок (бой начинается, когда вы оба ищете соперника) или тренировочный робот"),
+            ("Поиск", f"идёт до {_clock(SEARCH_MAX)}, со временем окно по кубкам и силе расширяется, энергия тратится только при начале боя"),
             ("Бой", "по очереди: быстрый питомец ходит первым, навыки, криты и увороты решают исход"),
             ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды"),
             ("Кубки", "за победу растут, за поражение падают, и чем сильнее соперник, тем больше награда"),
@@ -1672,8 +2063,8 @@ def _prepare(user: dict, uid) -> dict:
     _regen(st)
     _rollover_day(st)
     t = st.get("target")
-    if t and time.time() - t.get("ts", 0) > TARGET_TTL:
-        st["target"] = None                    # цель устарела
+    if t and (time.time() - t.get("ts", 0) > TARGET_TTL or _target_mode(t) == "pvp"):
+        st["target"] = None                    # цель устарела (настоящих игроков теперь ищем через очередь)
     _reg_update(uid, user)
     return st
 
@@ -1682,6 +2073,9 @@ async def _need(callback: CallbackQuery):
     user = _get_user(callback.from_user.id)
     if user is None or user.get("pet") not in _PETS:
         await _ans(callback, "Сначала выбери питомца: /start", show_alert=True)
+        return None, None
+    if callback.from_user.id in _QUEUE and callback.data != "arena:cancel":
+        await _ans(callback, "Идёт поиск соперника. Дождись результата или нажми «Отменить поиск»", show_alert=True)
         return None, None
     return user, _prepare(user, callback.from_user.id)
 
@@ -1711,7 +2105,7 @@ async def on_main(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
-    await _ans(callback, )
+    await _ans(callback)
     uid = callback.from_user.id
     note = st.pop("note", "")
     await _show(callback, "arena", lambda wi: main_html(user, uid, wi, note), main_kb(user))
@@ -1720,7 +2114,8 @@ async def on_main(callback: CallbackQuery):
 @router.callback_query(F.data == "arena:close")
 @_guard
 async def on_close(callback: CallbackQuery):
-    await _ans(callback, )
+    _leave_queue(callback.from_user.id, "cancelled")
+    await _ans(callback)
     try:
         await callback.message.delete()
     except TelegramAPIError:
@@ -1739,7 +2134,7 @@ def _new_target(user: dict, uid, st: dict, attempt: int = 0, mode: str = "pvp") 
     return target
 
 
-NO_PLAYERS = "Сейчас нет подходящих игроков. Попробуй чуть позже или сразись с роботом"
+NO_PLAYERS = "Сейчас нет подходящего соперника. Попробуй чуть позже или сразись с роботом"
 
 
 async def _show_choice(callback, user: dict):
@@ -1757,8 +2152,81 @@ async def on_find(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
-    await _ans(callback, )
+    await _ans(callback)
     await _show_choice(callback, user)
+
+
+async def _search_flow(callback, user: dict, uid: int) -> None:
+    """Поиск настоящего игрока: ждём, пока подходящий игрок тоже начнёт искать бой. Экран обновляется
+    каждые SEARCH_TICK секунд (время поиска, оценка ожидания, число ищущих)."""
+    st = _state(user)
+    if st["energy"] < 1:
+        await _ans(callback, "Нет энергии: подожди (+1 каждые 10 минут) или восстанови её за монеты", show_alert=True)
+        await _show_choice(callback, user)
+        return
+    if uid in _FIGHTING:
+        await _ans(callback, "Бой ещё идёт, дождись результата", show_alert=True)
+        return
+    st["target"] = None
+    entry = _enqueue(callback, uid)
+    await _ans(callback, "Ищем соперника…")
+    wrapper = entry["wrapper"]
+    bad_edits = 0
+
+    async def paint(builder, kb):
+        nonlocal bad_edits
+        try:
+            msg = await _show(wrapper, "arena_find", builder, kb)
+            if msg is not None and hasattr(msg, "message_id"):
+                wrapper.message = msg
+            bad_edits = 0
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(min(5, e.retry_after))
+        except Exception:
+            bad_edits += 1
+            log.debug("экран поиска не обновился (%s)", bad_edits, exc_info=True)
+
+    try:
+        await paint(lambda wi: search_html(entry, user, wi), search_kb())
+        while entry["state"] == "wait":
+            try:
+                await asyncio.wait_for(entry["event"].wait(), SEARCH_TICK)
+            except asyncio.TimeoutError:
+                pass
+            if entry["state"] != "wait":
+                break
+            if time.time() - entry["since"] >= SEARCH_MAX:
+                _leave_queue(uid, "timeout")
+                break
+            if bad_edits < 5:                                  # если сообщение пропало, просто ждём результата
+                await paint(lambda wi: search_html(entry, user, wi), search_kb())
+    except asyncio.CancelledError:
+        _leave_queue(uid, "cancelled")
+        raise
+    finally:
+        _QUEUE.pop(uid, None)
+
+    state = entry["state"]
+    if state == "matched":
+        _FIGHTING[uid] = time.time()
+        try:
+            await paint(lambda wi: matched_html(entry, wi), None)
+            await asyncio.sleep(2.5)
+            await _play_battle(wrapper, entry["info"])
+        finally:
+            _FIGHTING.pop(uid, None)
+    elif state == "timeout":
+        await paint(lambda wi: timeout_html(entry, wi), timeout_kb())
+    elif state == "failed":
+        text = {"energy": "Энергия закончилась, поиск остановлен", "gone": "Профиль недоступен",
+                }.get(entry["reason"], "Поиск сорвался, энергия не потрачена. Попробуй ещё раз")
+        try:
+            await callback.bot.send_message(uid, f"<i>{text}</i>")
+        except Exception:
+            log.debug("не удалось сообщить об остановке поиска", exc_info=True)
+        await paint(lambda wi: choose_html(user, wi), choose_kb(user))
+    else:                                                       # cancelled
+        await paint(lambda wi: choose_html(user, wi), choose_kb(user))
 
 
 @router.callback_query(F.data.regexp(r"^arena:find:(pvp|bot)$"))
@@ -1769,6 +2237,9 @@ async def on_find_mode(callback: CallbackQuery):
         return
     uid = callback.from_user.id
     mode = callback.data.split(":")[2]
+    if mode == "pvp":
+        await _search_flow(callback, user, uid)
+        return
     target = st.get("target")
     if not target or _target_mode(target) != mode or target_fighter(target) is None:
         target = _new_target(user, uid, st, mode=mode)
@@ -1777,8 +2248,20 @@ async def on_find_mode(callback: CallbackQuery):
         await _ans(callback, NO_PLAYERS, show_alert=True)
         await _show_choice(callback, user)
         return
-    await _ans(callback, )
+    await _ans(callback)
     await _show_target(callback, user, uid, target)
+
+
+@router.callback_query(F.data == "arena:cancel")
+@_guard
+async def on_cancel(callback: CallbackQuery):
+    uid = callback.from_user.id
+    entry = _QUEUE.get(uid)
+    if entry is None or entry["state"] != "wait":
+        await _ans(callback, "Поиск уже завершён")
+        return
+    _leave_queue(uid, "cancelled")
+    await _ans(callback, "Поиск отменён")
 
 
 @router.callback_query(F.data == "arena:reroll")
@@ -1790,7 +2273,7 @@ async def on_reroll(callback: CallbackQuery):
     uid = callback.from_user.id
     old = st.get("target")
     if not old:
-        await _ans(callback, )
+        await _ans(callback)
         await _show_choice(callback, user)
         return
     mode = _target_mode(old)
@@ -1927,7 +2410,7 @@ async def on_top(callback: CallbackQuery):
     if user is None:
         return
     uid = callback.from_user.id
-    await _ans(callback, )
+    await _ans(callback)
     await _show(callback, "arena_top", lambda wi: top_html(uid, wi), _kb([_back("arena:main")]))
 
 
@@ -1939,7 +2422,7 @@ async def on_hist(callback: CallbackQuery):
         return
     st["unseen"] = 0
     _save_users()
-    await _ans(callback, )
+    await _ans(callback)
     await _show(callback, "arena_history", lambda wi: hist_html(user, wi), _kb([_back("arena:main")]))
 
 
@@ -1949,7 +2432,7 @@ async def on_tasks(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
-    await _ans(callback, )
+    await _ans(callback)
     await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
 
 
@@ -1971,7 +2454,7 @@ async def on_claim(callback: CallbackQuery):
 @router.callback_query(F.data == "arena:rules")
 @_guard
 async def on_rules(callback: CallbackQuery):
-    await _ans(callback, )
+    await _ans(callback)
     await _show(callback, "arena", lambda wi: rules_html(wi), _kb([_back("arena:main")]))
 
 
@@ -2005,7 +2488,7 @@ def admin_refill(user: dict) -> None:
 
 def admin_stats() -> dict:
     top = top_list(1)
-    return {"players": len(_REG["players"]), "fights": _REG.get("fights", 0),
+    return {"players": len(_REG["players"]), "fights": _REG.get("fights", 0), "searching": queue_size(),
             "top": (top[0][0], top[0][1].get("r", 0)) if top else None}
 
 
