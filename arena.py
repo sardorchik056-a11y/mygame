@@ -13,10 +13,14 @@
   * Рейтинг по системе Эло, лиги (Бронза ... Легенда), энергия на бои (10 штук, +1 за 10 минут), серия побед, награды монетами, мясом и фруктами,
     ежедневные задания, недельные сезоны с наградой за лигу, топ-10 и история боёв.
 
-Защита: данные игрока проверяются при каждом входе (_sanitize), энергия и награды считаются
-на сервере до анимации боя, все бои пишутся в audit.log (arena_fight), подозрительные случаи
-в arena_suspicious. Против одного и того же игрока можно драться ограниченное число раз в сутки,
-чтобы нельзя было «накручивать» рейтинг.
+Защита: данные игрока проверяются при каждом входе (_sanitize), энергия и награды считаются на сервере
+до анимации боя, бой выполняется как транзакция (при сбое всё откатывается, энергия не тратится),
+двойное нажатие «В бой» даёт один бой, любая ошибка в обработчике превращается в сообщение игроку,
+список участников (arena.json) проверяется при загрузке и сохраняется атомарно. Все бои пишутся
+в audit.log (arena_fight), подозрительные случаи в arena_suspicious. Против одного игрока можно
+драться ограниченное число раз в сутки, а на одного защитника нападают не больше DEFENDER_DAILY_CAP
+раз в сутки, чтобы нельзя было «накручивать» рейтинг и «фармить» офлайн-игроков. Восстановление
+энергии за монеты ограничено по цене и числу раз в сутки.
 
 Данные игрока лежат в user["arena"] (см. _state), общий список участников и счётчики в arena.json.
 """
@@ -24,6 +28,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import functools
 import logging
 import math
 import random
@@ -34,7 +40,7 @@ from types import SimpleNamespace
 
 from aiogram import F, Router
 from aiogram.enums import ButtonStyle
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import settings
@@ -106,7 +112,8 @@ SEASON_REWARD = [300, 1_500, 5_000, 15_000, 40_000, 100_000]   # монеты з
 # --- Энергия ---
 ENERGY_MAX = 10
 ENERGY_REGEN_SEC = 10 * 60   # +1 энергия за 10 минут
-ENERGY_REFILL_COST = 1_000   # монет за полное восстановление
+ENERGY_REFILL_COST = 2_000   # монет за полное восстановление (за недостающие единицы пропорционально)
+ENERGY_REFILLS_PER_DAY = 3   # сколько раз в сутки можно восстанавливать энергию за монеты
 
 # --- Награды ---
 WIN_COINS = 150              # базовая награда за победу
@@ -132,6 +139,10 @@ QUESTS = [
     ("q_wins5", "Выиграй 5 боёв", "wins", 5, 1_500),
 ]
 
+# --- Защита ---
+BATTLE_STUCK_SEC = 120       # если «бой идёт» дольше, считаем, что он завис, и снимаем блокировку
+REG_SAVE_EVERY = 30          # не чаще, чем раз в столько секунд сохранять список участников (кроме боёв)
+
 # --- Показ боя ---
 FRAME_DELAY = 1.7            # пауза между кадрами боя, секунд
 LIVE_LINES = 3               # сколько последних ударов показывать в бою
@@ -144,6 +155,12 @@ RATING_RANGE_MAX = 700
 POWER_RATIO = (0.6, 1.7)     # сила соперника относительно своей
 PAIR_LIMIT_DAY = 3           # сколько раз в сутки можно драться с одним и тем же игроком
 RECENT_KEEP = 5              # не предлагать недавних соперников
+DEFENDER_DAILY_CAP = 8       # сколько раз в сутки могут напасть на одного игрока (защита от «фарма» офлайн-игрока)
+ACTIVE_DAYS = 14             # игроков, не заходивших дольше, предлагаем только если больше никого нет
+CANDIDATES_CHECKED = 14      # сколько кандидатов оцениваем пробными боями
+SCREEN_RUNS = 20             # пробных боёв на кандидата при выборе
+FAIR_BAND = (0.30, 0.75)     # хороший соперник: шанс победы игрока в этих пределах
+FAIR_TARGET = 0.5            # если подходящих нет, берём ближайшего к этому шансу
 TARGET_TTL = 15 * 60         # выбранный соперник «держится» столько секунд
 REROLL_COST = 100            # монет за повторный поиск (первый бесплатно)
 SIM_PREVIEW = 80             # сколько пробных боёв для оценки шанса победы
@@ -181,19 +198,24 @@ _MEAT, _FRUIT = "🥩", "🥭"
 ARENA_EMOJI = ("5454014806950429357", "⚔️")      # эмодзи заголовка (как на кнопке «Арена»)
 _REG_FILE: Path | None = None
 _REG: dict = {"players": {}, "fights": 0}         # общий список участников арены
+_iter_users = None                                # необязательно: () -> итератор (id, user) для первичного заполнения списка
+_REG_DIRTY = False
+_REG_SAVED_AT = 0.0
+_FIGHTING: dict[int, float] = {}                  # игроки, у которых сейчас идёт показ боя
 
 
 def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji, PETS, user_stats,
           bonus, skills, BACK_EMOJI_ID, COIN_EMOJI=None, INFO_EMOJI=None, STAT_EMOJI=None,
           STAT_LABELS=None, ELEMENT_EMOJI=None, WINS_EMOJI=None, LOSSES_EMOJI=None,
           LEVEL_EMOJI=None, SKILL_EMOJI=None, MEAT_EMOJI=None, FRUIT_EMOJI=None, registry_path=None,
-          **_ignored) -> None:
+          iter_users=None, **_ignored) -> None:
     """user_stats(user): характеристики питомца с артефактами; bonus(user, вид): бонус артефактов
     в процентах; skills: навыки питомцев (boss.PET_SKILLS); registry_path: путь к arena.json."""
     global _get_user, _save_users, _show_rich_card, _send_rich_card, _custom_emoji, _PETS
     global _user_stats, _bonus, _skills, _COIN, _INFO, _BACK_ID, _STAT_EMOJI, _STAT_LABELS
-    global _ELEMENT_EMOJI, _WINS, _LOSSES, _LEVEL, _SKILL, _REG_FILE, _MEAT, _FRUIT
+    global _ELEMENT_EMOJI, _WINS, _LOSSES, _LEVEL, _SKILL, _REG_FILE, _MEAT, _FRUIT, _iter_users
     _get_user, _save_users = get_user, save_users
+    _iter_users = iter_users
     _show_rich_card, _send_rich_card = show_rich_card, send_rich_card
     _custom_emoji, _PETS, _user_stats, _bonus, _skills = custom_emoji, PETS, user_stats, bonus, skills
     _BACK_ID = BACK_EMOJI_ID
@@ -207,6 +229,7 @@ def setup(*, get_user, save_users, show_rich_card, send_rich_card, custom_emoji,
     if registry_path:
         _REG_FILE = Path(registry_path)
         _load_registry()
+    _seed_registry()
 
 
 def _led(name: str, /, **fields) -> None:
@@ -456,7 +479,8 @@ def _state(user: dict) -> dict:
     st.setdefault("log", [])
     st.setdefault("recent", [])
     st.setdefault("pairs", {"day": _today(), "n": {}})
-    st.setdefault("daily", {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False})
+    st.setdefault("daily", {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False, "refills": 0})
+    st.setdefault("defended", {"day": _today(), "n": 0})
     st.setdefault("target", None)
     return st
 
@@ -467,6 +491,26 @@ def _int(value, lo: int, hi: int, default: int) -> int:
     except (TypeError, ValueError, OverflowError):
         return default
     return max(lo, min(hi, n))
+
+
+_GHOST_KEYS = ("name_html", "name_plain", "pet", "pet_name", "element", "level", "stats", "scale")
+
+
+def _target_ok(target) -> bool:
+    """Проверяет сохранённую цель: битая цель не должна ронять бой."""
+    if not isinstance(target, dict):
+        return False
+    if target.get("bot") or target.get("mode") == "bot":
+        g = target.get("ghost")
+        if not isinstance(g, dict) or any(k not in g for k in _GHOST_KEYS):
+            return False
+        if g["pet"] not in _PETS or not isinstance(g["stats"], dict):
+            return False
+        try:
+            return all(int(g["stats"][k]) >= 1 for k in ("hp", "atk", "def", "spd", "luck")) and float(g["scale"]) > 0
+        except (KeyError, TypeError, ValueError):
+            return False
+    return isinstance(target.get("uid"), (str, int))
 
 
 def _sanitize(user: dict, uid) -> list[str]:
@@ -483,21 +527,41 @@ def _sanitize(user: dict, uid) -> list[str]:
             fixes.append(key)
 
     fix_int("rating", 0, 9999, START_RATING)
-    fix_int("best", 0, 9999, st.get("rating", START_RATING))
-    fix_int("peak", 0, 9999, st.get("rating", START_RATING))
+    fix_int("best", st["rating"], 9999, st["rating"])           # рекорд сезона не ниже текущего рейтинга
+    fix_int("peak", st["best"], 9999, st["best"])
     fix_int("energy", 0, ENERGY_MAX, ENERGY_MAX)
     fix_int("season", 0, 10**6, _season_id())
     for key, hi in (("streak", 1000), ("best_streak", 1000), ("wins", 10**7), ("losses", 10**7),
                     ("def_w", 10**7), ("def_l", 10**7), ("unseen", 10**4)):
         fix_int(key, 0, hi, 0)
+    if st["best_streak"] < st["streak"]:
+        st["best_streak"] = st["streak"]
+        fixes.append("best_streak")
     now = time.time()
     ts = st.get("energy_ts")
-    if not isinstance(ts, (int, float)) or not math.isfinite(ts) or ts > now + 60:
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) or ts > now + 60:
         st["energy_ts"] = now
         fixes.append("energy_ts")
+    if not isinstance(st.get("note", ""), str):
+        st.pop("note", None)
+        fixes.append("note")
 
-    log_ok = [e for e in (st.get("log") if isinstance(st.get("log"), list) else [])
-              if isinstance(e, dict) and isinstance(e.get("win"), bool) and isinstance(e.get("delta"), int)][-HISTORY_KEEP:]
+    # история боёв: оставляем только целые записи и приводим поля к нужным типам
+    raw_log = st.get("log") if isinstance(st.get("log"), list) else []
+    log_ok = []
+    for e in raw_log:
+        if not (isinstance(e, dict) and isinstance(e.get("win"), bool) and isinstance(e.get("delta"), int)
+                and not isinstance(e.get("delta"), bool)):
+            continue
+        e["coins"] = _int(e.get("coins"), 0, 10**9, 0)
+        e["meat"] = _int(e.get("meat"), 0, 10**6, 0)
+        e["fruit"] = _int(e.get("fruit"), 0, 10**6, 0)
+        e["opp"] = str(e.get("opp", "?"))[:60]
+        e["pet"] = str(e.get("pet", ""))[:60]
+        e["bot"] = bool(e.get("bot"))
+        e["def"] = bool(e.get("def"))
+        log_ok.append(e)
+    log_ok = log_ok[-HISTORY_KEEP:]
     if log_ok != st.get("log"):
         st["log"] = log_ok
         fixes.append("log")
@@ -509,15 +573,23 @@ def _sanitize(user: dict, uid) -> list[str]:
     if not (isinstance(pairs, dict) and isinstance(pairs.get("n"), dict) and isinstance(pairs.get("day"), str)):
         st["pairs"] = {"day": _today(), "n": {}}
         fixes.append("pairs")
+    else:
+        pairs["n"] = {str(k): _int(v, 0, 10**4, 0) for k, v in pairs["n"].items()}
     daily = st.get("daily")
-    if not (isinstance(daily, dict) and isinstance(daily.get("claimed"), list)):
-        st["daily"] = {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False}
+    if not (isinstance(daily, dict) and isinstance(daily.get("claimed"), list) and isinstance(daily.get("day"), str)):
+        st["daily"] = {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False, "refills": 0}
         fixes.append("daily")
     else:
-        for key in ("fights", "wins"):
+        for key in ("fights", "wins", "refills"):
             daily[key] = _int(daily.get(key), 0, 1000, 0)
+        daily["first_win"] = bool(daily.get("first_win"))
         daily["claimed"] = [k for k in daily["claimed"] if k in {q[0] for q in QUESTS}]
-    if st.get("target") is not None and not isinstance(st["target"], dict):
+    dfn = st.get("defended")
+    if not (isinstance(dfn, dict) and isinstance(dfn.get("day"), str)):
+        st["defended"] = {"day": _today(), "n": 0}
+    else:
+        dfn["n"] = _int(dfn.get("n"), 0, 10**6, 0)
+    if st.get("target") is not None and not _target_ok(st["target"]):
         st["target"] = None
         fixes.append("target")
 
@@ -553,7 +625,9 @@ def _rollover_day(st: dict) -> None:
     if st["pairs"].get("day") != today:
         st["pairs"] = {"day": today, "n": {}}
     if st["daily"].get("day") != today:
-        st["daily"] = {"day": today, "fights": 0, "wins": 0, "claimed": [], "first_win": False}
+        st["daily"] = {"day": today, "fights": 0, "wins": 0, "claimed": [], "first_win": False, "refills": 0}
+    if st["defended"].get("day") != today:
+        st["defended"] = {"day": today, "n": 0}
 
 
 def _roll_season(user: dict, uid) -> None:
@@ -577,40 +651,124 @@ def _roll_season(user: dict, uid) -> None:
 
 # --- общий список участников (для подбора соперников и рейтинга) ---
 
+def _clean_entry(info) -> dict | None:
+    """Проверяет запись реестра, возвращает исправленную или None."""
+    if not isinstance(info, dict):
+        return None
+    pet = info.get("pet")
+    if pet not in _PETS:
+        return None
+    return {
+        "r": _int(info.get("r"), 0, 9999, START_RATING), "p": _int(info.get("p"), 0, 10**9, 0),
+        "pet": pet, "lv": _int(info.get("lv"), 1, 10**4, 1), "seen": _int(info.get("seen"), 0, 4_000_000_000, 0),
+    }
+
+
 def _load_registry() -> None:
     if _REG_FILE is None or read_json_safe is None:
         return
     try:
         saved = read_json_safe(_REG_FILE)
     except RuntimeError:
-        log.critical("arena.json повреждён и копии нет: список участников начат с нуля")
+        log.critical("arena.json повреждён и копии нет: список участников начат с нуля и заполнится заново")
         return
     if isinstance(saved, dict) and isinstance(saved.get("players"), dict):
-        _REG["players"] = saved["players"]
-        _REG["fights"] = int(saved.get("fights", 0) or 0)
+        players = {}
+        for k, v in saved["players"].items():
+            e = _clean_entry(v)
+            if e is not None:
+                players[str(k)] = e
+        _REG["players"] = players
+        _REG["fights"] = _int(saved.get("fights"), 0, 10**9, 0)
 
 
-def _save_registry() -> None:
-    if _REG_FILE is None or atomic_write_json is None:
+def _seed_registry() -> None:
+    """Если передан iter_users: добавляет в список всех игроков с питомцем, даже тех, кто ещё не открывал арену
+    (у них стартовый рейтинг). Так настоящих соперников хватает с первого дня."""
+    if _iter_users is None:
+        return
+    added = 0
+    try:
+        for uid, user in _iter_users():
+            if not isinstance(user, dict) or user.get("pet") not in _PETS or str(uid) in _REG["players"]:
+                continue
+            try:
+                _REG["players"][str(uid)] = {"r": _state_rating(user), "p": power_of(_user_stats(user)),
+                                             "pet": user["pet"], "lv": int(user.get("level", 1)), "seen": 0}
+                added += 1
+            except Exception:
+                continue
+    except Exception:
+        log.exception("не удалось заполнить список участников арены из базы игроков")
+    if added:
+        log.info("в список арены добавлено игроков: %s", added)
+        _mark_dirty()
+        _flush_registry(force=True)
+
+
+def _state_rating(user: dict) -> int:
+    st = user.get("arena")
+    return _int(st.get("rating"), 0, 9999, START_RATING) if isinstance(st, dict) else START_RATING
+
+
+def _mark_dirty() -> None:
+    global _REG_DIRTY
+    _REG_DIRTY = True
+
+
+def _flush_registry(force: bool = False) -> None:
+    """Сохраняет список участников: сразу после боёв и не чаще раза в REG_SAVE_EVERY секунд в остальных случаях."""
+    global _REG_DIRTY, _REG_SAVED_AT
+    if _REG_FILE is None or atomic_write_json is None or not _REG_DIRTY:
+        return
+    now = time.time()
+    if not force and now - _REG_SAVED_AT < REG_SAVE_EVERY:
         return
     try:
         atomic_write_json(_REG_FILE, _REG, backup_every=300)
+        _REG_DIRTY = False
+        _REG_SAVED_AT = now
     except OSError:
         log.exception("не удалось сохранить arena.json")
 
 
+def _save_registry() -> None:
+    _mark_dirty()
+    _flush_registry(force=True)
+
+
+def flush() -> None:
+    """Вызови при остановке бота: дописывает несохранённый список участников."""
+    _mark_dirty()
+    _flush_registry(force=True)
+
+
 def _reg_update(uid, user: dict) -> None:
-    st = _state(user)
-    stats = _user_stats(user)
-    _REG["players"][str(uid)] = {
-        "r": st["rating"], "p": power_of(stats), "pet": user["pet"], "lv": user["level"],
-        "seen": int(time.time()),
-    }
+    try:
+        st = _state(user)
+        entry = {"r": st["rating"], "p": power_of(_user_stats(user)), "pet": user["pet"],
+                 "lv": int(user["level"]), "seen": int(time.time())}
+    except Exception:
+        log.exception("не удалось обновить запись игрока %s в списке арены", uid)
+        return
+    old = _REG["players"].get(str(uid))
+    _REG["players"][str(uid)] = entry
+    if not old or old.get("r") != entry["r"] or old.get("p") != entry["p"] or old.get("pet") != entry["pet"]:
+        _mark_dirty()
+    _flush_registry()
 
 
 def _reg_remove(uid) -> None:
     _REG["players"].pop(str(uid), None)
     _save_registry()
+
+
+def _exists(oid: str) -> bool:
+    try:
+        u = _get_user(int(oid))
+    except (TypeError, ValueError):
+        return False
+    return bool(u) and u.get("pet") in _PETS
 
 
 def rank_of(uid) -> tuple[int, int]:
@@ -624,8 +782,21 @@ def rank_of(uid) -> tuple[int, int]:
 
 
 def top_list(n: int = TOP_SIZE) -> list[tuple[str, dict]]:
+    """Лучшие n участников. Удалённых игроков по пути убираем из списка."""
     items = sorted(_REG["players"].items(), key=lambda kv: (-kv[1].get("r", 0), -kv[1].get("p", 0)))
-    return items[:n]
+    out, gone = [], []
+    for oid, info in items:
+        if len(out) >= n:
+            break
+        if _exists(oid):
+            out.append((oid, info))
+        else:
+            gone.append(oid)
+    for oid in gone:
+        _REG["players"].pop(oid, None)
+    if gone:
+        _mark_dirty()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -640,9 +811,13 @@ def _fighter_of(uid: str) -> dict | None:
         return None
     if not user or user.get("pet") not in _PETS:
         return None
-    html = settings.public_name_html_by_id(uid) or "Игрок"
-    plain = settings.public_name_plain_by_id(uid) or "Игрок"
-    return make_fighter(user, str(uid), html, plain)
+    try:
+        html = settings.public_name_html_by_id(uid) or "Игрок"
+        plain = settings.public_name_plain_by_id(uid) or "Игрок"
+        return make_fighter(user, str(uid), html, plain)
+    except Exception:
+        log.exception("не удалось собрать бойца для игрока %s", uid)
+        return None
 
 
 def _target_mode(target: dict) -> str:
@@ -650,9 +825,49 @@ def _target_mode(target: dict) -> str:
     return target.get("mode") or ("bot" if target.get("bot") else "pvp")
 
 
+def _live_candidate(oid: str, my_rating: int, my_power: int, span: int, ratio: tuple[float, float],
+                    pair_n: int, now: float, need_active: bool) -> tuple[dict, dict, dict] | None:
+    """Проверяет кандидата по ЖИВЫМ данным (а не по устаревшей записи списка). Возвращает
+    (пользователь, его арена-состояние, боец) или None, если не подходит."""
+    try:
+        ouser = _get_user(int(oid))
+    except (TypeError, ValueError):
+        return None
+    if not ouser or ouser.get("pet") not in _PETS:
+        return None
+    try:
+        ost = _state(ouser)
+        _rollover_day(ost)
+        if ost["defended"]["n"] >= DEFENDER_DAILY_CAP:              # игрока и так уже много атаковали
+            return None
+        if abs(ost["rating"] - my_rating) > span:
+            return None
+        fighter = _fighter_of(oid)
+        if fighter is None:
+            return None
+        if not (ratio[0] <= power_of(fighter["stats"]) / max(1, my_power) <= ratio[1]):
+            return None
+        seen = _REG["players"].get(oid, {}).get("seen", 0)
+        if need_active and seen and now - seen > ACTIVE_DAYS * 86400:
+            return None
+    except Exception:
+        log.exception("кандидат %s пропущен из-за ошибки данных", oid)
+        return None
+    return ouser, ost, fighter
+
+
 def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random, mode: str = "pvp") -> dict | None:
-    """Подбирает соперника выбранного вида. mode=\"bot\" всегда даёт робота; mode=\"pvp\" даёт
-    реального игрока или None, если подходящих сейчас нет."""
+    """Подбирает соперника выбранного вида. mode="bot" всегда даёт робота; mode="pvp" даёт
+    реального игрока или None, если подходящих сейчас нет.
+
+    Подбор настоящих игроков:
+      1. кандидаты берутся из списка участников по рейтингу и силе, но проверяются по живым данным;
+      2. не предлагаем себя, недавних соперников, тех, с кем уже дрались PAIR_LIMIT_DAY раз сегодня,
+         и тех, кого сегодня уже атаковали DEFENDER_DAILY_CAP раз;
+      3. давно не заходивших игроков берём только если никого другого нет;
+      4. из ближайших по рейтингу пробными боями выбираем честного соперника (шанс победы
+         FAIR_BAND), а если таких нет, то ближайшего к 50%;
+      5. если никого нет, окно рейтинга расширяется (и на каждый повторный поиск ещё шире)."""
     me = make_fighter(user, str(uid), "", "")
     my_power = power_of(me["stats"])
     my_rating = st["rating"]
@@ -661,27 +876,41 @@ def find_target(uid: str, user: dict, st: dict, attempt: int = 0, rng=random, mo
         return {"uid": None, "bot": True, "mode": "bot", "ghost": ghost, "rating": ghost["rating"],
                 "ts": time.time(), "rerolls": attempt}
     pairs = st["pairs"]["n"]
-    passes = [(min(RATING_RANGE_MAX, RATING_RANGE + RATING_RANGE_STEP * (attempt + w * 2)), POWER_RATIO)
-              for w in range(3)]
-    passes.append((10**6, (0.5, 2.5)))                         # в последней попытке рейтинг не ограничиваем
-    for span, (lo, hi) in passes:
+    now = time.time()
+    base = RATING_RANGE + RATING_RANGE_STEP * attempt
+    passes = [(min(RATING_RANGE_MAX, base), POWER_RATIO, True),
+              (min(RATING_RANGE_MAX, base + RATING_RANGE_STEP * 2), POWER_RATIO, True),
+              (RATING_RANGE_MAX, POWER_RATIO, False),
+              (10**6, (0.5, 2.5), False)]                       # в последней попытке рейтинг почти не ограничиваем
+    for span, ratio, need_active in passes:
         pool = []
-        for oid, info in _REG["players"].items():
+        for oid, info in list(_REG["players"].items()):
             if oid == str(uid) or oid in st["recent"] or pairs.get(oid, 0) >= PAIR_LIMIT_DAY:
                 continue
-            if abs(info.get("r", 0) - my_rating) > span:
+            if abs(info.get("r", 0) - my_rating) > span + 150:      # грубый отсев по записи списка
                 continue
-            ratio = info.get("p", 0) / max(1, my_power)
-            if not (lo <= ratio <= hi):
-                continue
-            pool.append((abs(info["r"] - my_rating) + rng.uniform(0, 40), oid, info))
-        pool.sort(key=lambda x: x[0])
-        top = pool[:6]                                         # из ближайших по рейтингу берём случайного
-        rng.shuffle(top)
-        for _, oid, info in top:
-            if _fighter_of(oid) is not None:
-                return {"uid": oid, "bot": False, "mode": "pvp", "rating": info["r"], "ts": time.time(),
-                        "rerolls": attempt}
+            pool.append((abs(info.get("r", 0) - my_rating) + rng.uniform(0, 40), oid))
+        pool.sort()
+        checked = []
+        for _, oid in pool:
+            live = _live_candidate(oid, my_rating, my_power, span, ratio, pairs.get(oid, 0), now, need_active)
+            if live is not None:
+                checked.append((oid, live))
+            if len(checked) >= CANDIDATES_CHECKED:
+                break
+        if not checked:
+            continue
+        scored = []
+        for oid, (ouser, ost, fighter) in checked:
+            chance = win_chance(me, fighter, SCREEN_RUNS)
+            scored.append((chance, oid, ost))
+        good = [x for x in scored if FAIR_BAND[0] <= x[0] <= FAIR_BAND[1]]
+        if good:
+            chance, oid, ost = rng.choice(good)
+        else:
+            chance, oid, ost = min(scored, key=lambda x: abs(x[0] - FAIR_TARGET))
+        return {"uid": oid, "bot": False, "mode": "pvp", "rating": ost["rating"], "ts": time.time(),
+                "rerolls": attempt}
     return None
 
 
@@ -701,6 +930,17 @@ def res_reward(level: int, win: bool, mult: float = 1.0) -> tuple[int, int]:
     if win:
         return max(1, round(meat)), max(1, round(fruit))
     return round(meat * RES_LOSS_SHARE), round(fruit * RES_LOSS_SHARE)
+
+
+def _refill_price(st: dict) -> int:
+    """Цена восстановления: пропорционально недостающей энергии."""
+    missing = max(0, ENERGY_MAX - st["energy"])
+    return max(1, math.ceil(ENERGY_REFILL_COST * missing / ENERGY_MAX)) if missing else 0
+
+
+def _refills_left(st: dict) -> int:
+    _rollover_day(st)
+    return max(0, ENERGY_REFILLS_PER_DAY - st["daily"].get("refills", 0))
 
 
 def _max_coins() -> int:
@@ -723,7 +963,7 @@ def _count_stats(events: list[dict]) -> dict:
     return out
 
 
-def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
+def _resolve_fight_impl(uid: str, user: dict, st: dict, target: dict) -> dict | None:
     """Проводит бой с выбранным соперником и применяет все последствия. None, если бой невозможен.
     Всё считается и сохраняется сразу (до анимации), поэтому сбой показа ничего не ломает."""
     _regen(st)
@@ -736,12 +976,15 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
     me = make_fighter(user, str(uid), settings.name_html(user), settings.name_plain(user))
     real = not target.get("bot")
     opp_uid = target.get("uid")
+    if real and str(opp_uid) == str(uid):                 # сам с собой драться нельзя
+        return None
     opp_user = _get_user(int(opp_uid)) if real else None
     if real and opp_user is None:
         return None
     if real:
         _roll_season(opp_user, opp_uid)
         opp_st = _state(opp_user)
+        _rollover_day(opp_st)
         opp_rating = opp_st["rating"]
     else:
         opp_st = None
@@ -818,6 +1061,7 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
         opp_st["best"] = max(opp_st["best"], opp_new)
         opp_st["peak"] = max(opp_st["peak"], opp_new)
         opp_st["unseen"] = min(10**4, opp_st["unseen"] + 1)
+        opp_st["defended"]["n"] += 1
         opp_st["log"].append({
             "ts": int(time.time()), "opp": settings.public_name_plain(user), "pet": me["pet_name"],
             "win": not win, "delta": opp_delta, "coins": 0, "bot": False, "def": True,
@@ -855,6 +1099,62 @@ def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
         "streak": st["streak"], "energy": st["energy"], "opp_rating": opp_rating,
         "counts": _count_stats(battle["events"]),
     }
+
+
+class ArenaFightError(Exception):
+    """Бой не удалось провести из-за внутренней ошибки (все изменения отменены)."""
+
+
+_MISSING = object()
+
+
+def _restore(target: dict, snap) -> None:
+    target.clear()
+    if snap:
+        target.update(snap)
+
+
+def resolve_fight(uid: str, user: dict, st: dict, target: dict) -> dict | None:
+    """Обёртка с откатом: если внутри боя что-то сломалось, энергия, рейтинг, монеты и еда
+    возвращаются как были, а наружу уходит ArenaFightError."""
+    opp_user = None
+    if not target.get("bot"):
+        try:
+            opp_user = _get_user(int(target.get("uid")))
+        except (TypeError, ValueError):
+            opp_user = None
+    keys = ("coins", "meat", "fruit", "wins", "losses")
+    snap_user = {k: user.get(k, _MISSING) for k in keys}
+    snap_st = copy.deepcopy(st)
+    snap_opp_st = copy.deepcopy(opp_user.get("arena")) if opp_user is not None else None
+    snap_opp_coins = opp_user.get("coins", _MISSING) if opp_user is not None else None
+    snap_reg = {k: copy.deepcopy(_REG["players"].get(k)) for k in {str(uid), str(target.get("uid"))}}
+    snap_fights = _REG.get("fights", 0)
+    try:
+        return _resolve_fight_impl(uid, user, st, target)
+    except Exception as exc:
+        log.exception("бой игрока %s сорвался, изменения отменены", uid)
+        _restore(st, snap_st)
+        for k, v in snap_user.items():
+            if v is _MISSING:
+                user.pop(k, None)
+            else:
+                user[k] = v
+        if opp_user is not None:
+            if isinstance(opp_user.get("arena"), dict):
+                _restore(opp_user["arena"], snap_opp_st)
+            if snap_opp_coins is _MISSING:
+                opp_user.pop("coins", None)
+            else:
+                opp_user["coins"] = snap_opp_coins
+        for k, v in snap_reg.items():
+            if v is None:
+                _REG["players"].pop(k, None)
+            else:
+                _REG["players"][k] = v
+        _REG["fights"] = snap_fights
+        _led("arena_fight_failed", uid=str(uid), error=type(exc).__name__)
+        raise ArenaFightError(str(exc)) from exc
 
 
 def quest_value(st: dict, kind: str) -> int:
@@ -1040,8 +1340,8 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
 def main_kb(user: dict) -> InlineKeyboardMarkup:
     st = _state(user)
     rows = [[_btn("⚔️ В бой: выбрать соперника", "arena:find", ButtonStyle.SUCCESS)]]
-    if st["energy"] < 1:
-        rows.insert(0, [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)])
+    if st["energy"] < 1 and _refills_left(st):
+        rows.insert(0, [_btn(f"⚡ Восстановить энергию · {_num(_refill_price(st))}", "arena:refill", ButtonStyle.DANGER)])
     rows += [
         [_btn("🏆 Рейтинг", "arena:top", ButtonStyle.PRIMARY), _btn("📜 История", "arena:hist", ButtonStyle.PRIMARY)],
         [_btn("🎯 Задания", "arena:tasks", ButtonStyle.PRIMARY), _btn("ℹ️ Правила", "arena:rules", ButtonStyle.PRIMARY)],
@@ -1077,8 +1377,8 @@ def choose_html(user: dict, with_image: bool = False) -> str:
 def choose_kb(user: dict) -> InlineKeyboardMarkup:
     st = _state(user)
     rows = []
-    if st["energy"] < 1:
-        rows.append([_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)])
+    if st["energy"] < 1 and _refills_left(st):
+        rows.append([_btn(f"⚡ Восстановить энергию · {_num(_refill_price(st))}", "arena:refill", ButtonStyle.DANGER)])
     rows += [
         [_btn("👤 Против игрока", "arena:find:pvp", ButtonStyle.SUCCESS)],
         [_btn("🤖 Против робота", "arena:find:bot", ButtonStyle.PRIMARY)],
@@ -1140,8 +1440,8 @@ def find_kb(user: dict, target: dict) -> InlineKeyboardMarkup:
     free = target.get("rerolls", 0) == 0
     bot = _target_mode(target) == "bot"
     reroll = ("🔄 Другой робот" if bot else "🔄 Другой соперник") + ("" if free else f" · {_num(REROLL_COST)}")
-    if st["energy"] < 1:
-        first = [_btn(f"⚡ Восстановить энергию · {_num(ENERGY_REFILL_COST)}", "arena:refill", ButtonStyle.DANGER)]
+    if st["energy"] < 1 and _refills_left(st):
+        first = [_btn(f"⚡ Восстановить энергию · {_num(_refill_price(st))}", "arena:refill", ButtonStyle.DANGER)]
     else:
         first = [_btn("⚔️ В бой!", "arena:fight", ButtonStyle.SUCCESS)]
     return _kb(first, [_btn(reroll, "arena:reroll", ButtonStyle.PRIMARY)],
@@ -1335,6 +1635,34 @@ def rules_html(with_image: bool = False) -> str:
 # Обработчики
 # ---------------------------------------------------------------------------
 
+def _guard(fn):
+    """Любая необработанная ошибка в обработчике: пишем в лог и вежливо отвечаем игроку, а не
+    оставляем кнопку «висеть»."""
+    @functools.wraps(fn)
+    async def wrapper(event, *args, **kwargs):
+        try:
+            return await fn(event, *args, **kwargs)
+        except Exception:
+            log.exception("ошибка в обработчике арены %s", fn.__name__)
+            text = "Что-то пошло не так. Попробуй ещё раз через минуту."
+            try:
+                if isinstance(event, CallbackQuery):
+                    await event.answer(text, show_alert=True)
+                else:
+                    await event.answer(f"<i>{text}</i>")
+            except Exception:
+                pass
+    return wrapper
+
+
+async def _ans(callback, text: str | None = None, show_alert: bool = False) -> None:
+    """Ответ на нажатие кнопки, который не падает, если запрос уже устарел."""
+    try:
+        await callback.answer(text, show_alert=show_alert)
+    except TelegramAPIError as e:
+        log.debug("ответ на кнопку не доставлен: %s", e)
+
+
 def _prepare(user: dict, uid) -> dict:
     """Приводит данные арены игрока в порядок: проверка, сезон, энергия, сутки, запись в список участников."""
     _state(user)
@@ -1353,7 +1681,7 @@ def _prepare(user: dict, uid) -> dict:
 async def _need(callback: CallbackQuery):
     user = _get_user(callback.from_user.id)
     if user is None or user.get("pet") not in _PETS:
-        await callback.answer("Сначала выбери питомца: /start", show_alert=True)
+        await _ans(callback, "Сначала выбери питомца: /start", show_alert=True)
         return None, None
     return user, _prepare(user, callback.from_user.id)
 
@@ -1363,6 +1691,7 @@ async def _show(callback, key: str, html_fn, kb=None, force_new: bool = False):
 
 
 @router.message(F.text == "Арена")
+@_guard
 async def open_arena(message: Message):
     user = _get_user(message.from_user.id)
     if user is None or user.get("pet") not in _PETS:
@@ -1377,19 +1706,21 @@ async def open_arena(message: Message):
 
 
 @router.callback_query(F.data == "arena:main")
+@_guard
 async def on_main(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
-    await callback.answer()
+    await _ans(callback, )
     uid = callback.from_user.id
     note = st.pop("note", "")
     await _show(callback, "arena", lambda wi: main_html(user, uid, wi, note), main_kb(user))
 
 
 @router.callback_query(F.data == "arena:close")
+@_guard
 async def on_close(callback: CallbackQuery):
-    await callback.answer()
+    await _ans(callback, )
     try:
         await callback.message.delete()
     except TelegramAPIError:
@@ -1420,16 +1751,18 @@ async def _show_target(callback, user: dict, uid, target: dict):
 
 
 @router.callback_query(F.data == "arena:find")
+@_guard
 async def on_find(callback: CallbackQuery):
     """Первый шаг: выбор, с кем драться (настоящий игрок или тренировочный робот)."""
     user, st = await _need(callback)
     if user is None:
         return
-    await callback.answer()
+    await _ans(callback, )
     await _show_choice(callback, user)
 
 
 @router.callback_query(F.data.regexp(r"^arena:find:(pvp|bot)$"))
+@_guard
 async def on_find_mode(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
@@ -1441,14 +1774,15 @@ async def on_find_mode(callback: CallbackQuery):
         target = _new_target(user, uid, st, mode=mode)
         _save_users()
     if target is None:
-        await callback.answer(NO_PLAYERS, show_alert=True)
+        await _ans(callback, NO_PLAYERS, show_alert=True)
         await _show_choice(callback, user)
         return
-    await callback.answer()
+    await _ans(callback, )
     await _show_target(callback, user, uid, target)
 
 
 @router.callback_query(F.data == "arena:reroll")
+@_guard
 async def on_reroll(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
@@ -1456,14 +1790,14 @@ async def on_reroll(callback: CallbackQuery):
     uid = callback.from_user.id
     old = st.get("target")
     if not old:
-        await callback.answer()
+        await _ans(callback, )
         await _show_choice(callback, user)
         return
     mode = _target_mode(old)
     rerolls = old.get("rerolls", 0)
     paid = rerolls >= 1                                   # первый повторный поиск бесплатный
     if paid and user.get("coins", 0) < REROLL_COST:
-        await callback.answer(f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
+        await _ans(callback, f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
         return
     added = False
     if old.get("uid"):
@@ -1473,115 +1807,154 @@ async def on_reroll(callback: CallbackQuery):
     if target is None:                                    # других игроков нет: оставляем прежнего, монеты не списываем
         if added and str(old["uid"]) in st["recent"]:
             st["recent"].remove(str(old["uid"]))
-        await callback.answer("Других игроков сейчас нет. Попробуй позже или выбери робота", show_alert=True)
+        await _ans(callback, "Других игроков сейчас нет. Попробуй позже или выбери робота", show_alert=True)
         return
     del st["recent"][:-RECENT_KEEP]
     if paid:
         user["coins"] -= REROLL_COST
         _led("arena_reroll", uid=str(uid), cost=REROLL_COST, coins_left=user["coins"])
     _save_users()
-    await callback.answer("Ищем другого соперника…")
+    await _ans(callback, "Ищем другого соперника…")
     await _show_target(callback, user, uid, target)
 
 
 @router.callback_query(F.data == "arena:refill")
+@_guard
 async def on_refill(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     uid = callback.from_user.id
     if st["energy"] >= ENERGY_MAX:
-        await callback.answer("Энергия уже полная", show_alert=True)
+        await _ans(callback, "Энергия уже полная", show_alert=True)
         return
-    if user.get("coins", 0) < ENERGY_REFILL_COST:
-        await callback.answer(f"Не хватает монет: нужно {_num(ENERGY_REFILL_COST)}", show_alert=True)
+    if not _refills_left(st):
+        await _ans(callback, f"Лимит на сегодня: {ENERGY_REFILLS_PER_DAY} восстановления. Энергия и так возвращается сама", show_alert=True)
         return
-    user["coins"] -= ENERGY_REFILL_COST
+    price = _refill_price(st)
+    if user.get("coins", 0) < price:
+        await _ans(callback, f"Не хватает монет: нужно {_num(price)}", show_alert=True)
+        return
+    user["coins"] -= price
     st["energy"], st["energy_ts"] = ENERGY_MAX, time.time()
+    st["daily"]["refills"] = st["daily"].get("refills", 0) + 1
     _save_users()
-    _led("arena_refill", uid=str(uid), cost=ENERGY_REFILL_COST, coins_left=user["coins"])
-    await callback.answer("Энергия восстановлена!", show_alert=True)
+    _led("arena_refill", uid=str(uid), cost=price, coins_left=user["coins"])
+    await _ans(callback, "Энергия восстановлена!", show_alert=True)
     note = st.pop("note", "")
     await _show(callback, "arena", lambda wi: main_html(user, uid, wi, note), main_kb(user))
 
 
+async def _play_battle(callback, info: dict) -> None:
+    """Показывает бой кадрами. Бой уже посчитан и сохранён, поэтому любой сбой показа не страшен:
+    в худшем случае игрок просто получит итоговое сообщение."""
+    chat_id = callback.message.chat.id if getattr(callback, "message", None) else callback.from_user.id
+    result = lambda wi: result_html(info, wi)
+    kb = result_kb(info)
+    try:
+        frames = battle_frames(info)
+        msg = await _show(callback, "arena_battle", frames[0], None, force_new=True)
+        wrapper = SimpleNamespace(message=msg, bot=callback.bot, from_user=callback.from_user)
+        await asyncio.sleep(FRAME_DELAY + 0.5)
+        for frame in frames[1:]:
+            try:
+                await _show(wrapper, "arena_battle", frame, None)
+            except TelegramRetryAfter as e:                    # Telegram просит притормозить
+                await asyncio.sleep(min(5, e.retry_after))
+            except TelegramAPIError as e:                      # один кадр не прошёл: пропускаем
+                log.debug("кадр боя пропущен: %s", e)
+            await asyncio.sleep(FRAME_DELAY)
+        await asyncio.sleep(0.6)
+        await _show(wrapper, "arena_battle", result, kb)
+        return
+    except Exception:
+        log.warning("не удалось показать бой игроку %s, отправляем итог", callback.from_user.id, exc_info=True)
+    try:
+        await _send_rich_card(callback.bot, chat_id, "arena_battle", result, kb)
+    except Exception:
+        log.exception("не удалось отправить итог боя игроку %s", callback.from_user.id)
+
+
 @router.callback_query(F.data == "arena:fight")
+@_guard
 async def on_fight(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     uid = callback.from_user.id
+    started = _FIGHTING.get(uid)
+    if started is not None and time.time() - started < BATTLE_STUCK_SEC:
+        await _ans(callback, "Бой ещё идёт, дождись результата", show_alert=True)
+        return
     target = st.get("target")
     if not target:
-        await callback.answer("Сначала выбери соперника", show_alert=True)
+        await _ans(callback, "Сначала выбери соперника", show_alert=True)
         await _show_choice(callback, user)
         return
     if st["energy"] < 1:
-        await callback.answer("Нет энергии: подожди или восстанови её за монеты", show_alert=True)
+        await _ans(callback, "Нет энергии: подожди (+1 каждые 10 минут) или восстанови её за монеты", show_alert=True)
         return
-    mode = _target_mode(target)
-    info = resolve_fight(str(uid), user, st, target)
-    if info is None:
-        st["target"] = None
-        _save_users()
-        target = _new_target(user, uid, st, mode=mode)
-        _save_users()
-        if target is None:
-            await callback.answer(NO_PLAYERS, show_alert=True)
-            await _show_choice(callback, user)
-            return
-        await callback.answer("Соперник больше недоступен, подбираем другого", show_alert=True)
-        await _show_target(callback, user, uid, target)
-        return
-    await callback.answer("Бой!")
-    frames = battle_frames(info)
+    _FIGHTING[uid] = time.time()
     try:
-        # Первый кадр всегда новым сообщением, дальше обновляем его же
-        msg = await _show(callback, "arena_battle", frames[0], None, force_new=True)
-        wrapper = SimpleNamespace(message=msg, bot=callback.bot, from_user=callback.from_user)
-        await asyncio.sleep(FRAME_DELAY + 0.5)
-        for frame in frames[1:]:
-            await _show(wrapper, "arena_battle", frame, None)
-            await asyncio.sleep(FRAME_DELAY)
-        await asyncio.sleep(0.6)
-        await _show(wrapper, "arena_battle", lambda wi: result_html(info, wi), result_kb(info))
-    except TelegramAPIError as e:
-        log.warning("не удалось показать бой игроку %s: %s", uid, e)
-        await _send_rich_card(callback.bot, callback.message.chat.id, "arena_battle",
-                              lambda wi: result_html(info, wi), result_kb(info))
+        mode = _target_mode(target)
+        try:
+            info = resolve_fight(str(uid), user, st, target)
+        except ArenaFightError:
+            await _ans(callback, "Что-то пошло не так, энергия не потрачена. Попробуй ещё раз", show_alert=True)
+            return
+        if info is None:
+            st["target"] = None
+            _save_users()
+            target = _new_target(user, uid, st, mode=mode)
+            _save_users()
+            if target is None:
+                await _ans(callback, NO_PLAYERS, show_alert=True)
+                await _show_choice(callback, user)
+                return
+            await _ans(callback, "Соперник больше недоступен, подбираем другого", show_alert=True)
+            await _show_target(callback, user, uid, target)
+            return
+        await _ans(callback, "Бой!")
+        await _play_battle(callback, info)
+    finally:
+        _FIGHTING.pop(uid, None)
 
 
 @router.callback_query(F.data == "arena:top")
+@_guard
 async def on_top(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     uid = callback.from_user.id
-    await callback.answer()
+    await _ans(callback, )
     await _show(callback, "arena_top", lambda wi: top_html(uid, wi), _kb([_back("arena:main")]))
 
 
 @router.callback_query(F.data == "arena:hist")
+@_guard
 async def on_hist(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     st["unseen"] = 0
     _save_users()
-    await callback.answer()
+    await _ans(callback, )
     await _show(callback, "arena_history", lambda wi: hist_html(user, wi), _kb([_back("arena:main")]))
 
 
 @router.callback_query(F.data == "arena:tasks")
+@_guard
 async def on_tasks(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
-    await callback.answer()
+    await _ans(callback, )
     await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
 
 
 @router.callback_query(F.data.regexp(r"^arena:claim:\w+$"))
+@_guard
 async def on_claim(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
@@ -1589,15 +1962,16 @@ async def on_claim(callback: CallbackQuery):
     key = callback.data.split(":")[2]
     coins = claim_quest(user, str(callback.from_user.id), key)
     if coins is None:
-        await callback.answer("Это задание нельзя забрать", show_alert=True)
+        await _ans(callback, "Это задание нельзя забрать", show_alert=True)
     else:
-        await callback.answer(f"Награда получена: +{_num(coins)} монет!", show_alert=True)
+        await _ans(callback, f"Награда получена: +{_num(coins)} монет!", show_alert=True)
     await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
 
 
 @router.callback_query(F.data == "arena:rules")
+@_guard
 async def on_rules(callback: CallbackQuery):
-    await callback.answer()
+    await _ans(callback, )
     await _show(callback, "arena", lambda wi: rules_html(wi), _kb([_back("arena:main")]))
 
 
