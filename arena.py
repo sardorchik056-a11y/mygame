@@ -1664,21 +1664,18 @@ def _eta_text(entry: dict, waited: float) -> str:
 
 
 def search_html(entry: dict, user: dict, with_image: bool = False) -> str:
-    st = _state(user)
     waited = time.time() - entry["since"]
     tick = int(waited // SEARCH_TICK)
     dots = "." * (tick % 3 + 1)
     clock = _CLOCKS[int(waited // 5) % len(_CLOCKS)]
     if waited < 15:
-        phase = "ищем игроков с похожими кубками и силой"
+        phase = "ищем с похожими кубками и силой"
     elif waited < 35:
         phase = "окно поиска расширяется"
     elif waited < 60:
-        phase = "берём всех, кто сейчас ищет бой"
+        phase = "берём всех, кто ищет бой"
     else:
         phase = "последние секунды поиска"
-    others = max(0, queue_size() - 1)
-    stats = _user_stats(user)
     return (
         f"{_image(with_image)}<p><b>🔎 ПОИСК СОПЕРНИКА</b></p>"
         f"<blockquote><i>{SEARCH_LINES[tick % len(SEARCH_LINES)]}</i></blockquote>"
@@ -1687,20 +1684,9 @@ def search_html(entry: dict, user: dict, with_image: bool = False) -> str:
             ("⌛ Примерно ждать", _eta_text(entry, waited)),
             ("Ход поиска", _bar(min(1.0, waited / SEARCH_MAX))),
             ("Этап", phase),
+            ("👥 Ищут бой, кроме тебя", str(max(0, queue_size() - 1))),
+            ("🎯 Разница кубков", f"±{_span(waited)}"),
         ], f"Ищем{dots}")
-        + _gap()
-        + _tree([
-            ("👥 Ищут бой, кроме тебя", str(others)),
-            ("🎯 Допустимая разница кубков", f"±{_span(waited)}"),
-            ("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}, спишется после начала боя"),
-        ], "Арена сейчас")
-        + _gap()
-        + _tree([
-            ("Питомец", f"{escape(_PETS[user['pet']]['name'])} {_elem(_PETS[user['pet']]['element'])}".strip()),
-            ("💪 Сила", _num(power_of(stats))),
-            ("🏆 Кубки", _num(st["rating"])),
-        ], "Твой боец")
-        + _p("<i>Бой начнётся, когда подходящий игрок тоже будет искать соперника.</i>")
     )
 
 
