@@ -2160,20 +2160,25 @@ async def on_find(callback: CallbackQuery):
     await _show_choice(callback, user)
 
 
-async def _search_flow(callback, user: dict, uid: int) -> None:
-    """Поиск настоящего игрока: ждём, пока подходящий игрок тоже начнёт искать бой. Экран обновляется
-    каждые SEARCH_TICK секунд (время поиска, оценка ожидания, число ищущих)."""
+_SEARCH_TASKS: set = set()                     # ссылки на фоновые задачи поиска (чтобы их не собрал сборщик мусора)
+
+
+def _search_start(callback, user: dict, uid: int) -> dict | None:
+    """Обработчик кнопки «Против игрока»: быстро ставит в очередь и запускает поиск в ФОНОВОЙ задаче.
+    Важно: поиск нельзя вести внутри самого обработчика. Guard пускает нажатия одного игрока по очереди,
+    и «Отменить поиск» ждало бы окончания поиска. Поэтому обработчик сразу возвращается."""
     st = _state(user)
-    if st["energy"] < 1:
-        await _ans(callback, "Нет энергии: подожди (+1 каждые 10 минут) или восстанови её за монеты", show_alert=True)
-        await _show_choice(callback, user)
-        return
-    if uid in _FIGHTING:
-        await _ans(callback, "Бой ещё идёт, дождись результата", show_alert=True)
-        return
     st["target"] = None
     entry = _enqueue(callback, uid)
-    await _ans(callback, "Ищем соперника…")
+    task = asyncio.create_task(_search_run(entry, uid))
+    _SEARCH_TASKS.add(task)
+    task.add_done_callback(_SEARCH_TASKS.discard)
+    return entry
+
+
+async def _search_run(entry: dict, uid: int) -> None:
+    """Поиск настоящего игрока: ждём, пока подходящий игрок тоже начнёт искать бой. Экран обновляется
+    каждые SEARCH_TICK секунд (время поиска, оценка ожидания, число ищущих)."""
     wrapper = entry["wrapper"]
     bad_edits = 0
 
@@ -2190,8 +2195,11 @@ async def _search_flow(callback, user: dict, uid: int) -> None:
             bad_edits += 1
             log.debug("экран поиска не обновился (%s)", bad_edits, exc_info=True)
 
+    def fresh_user() -> dict:
+        return _get_user(uid) or {}
+
     try:
-        await paint(lambda wi: search_html(entry, user, wi), search_kb())
+        await paint(lambda wi: search_html(entry, fresh_user(), wi), search_kb())
         while entry["state"] == "wait":
             try:
                 await asyncio.wait_for(entry["event"].wait(), SEARCH_TICK)
@@ -2203,34 +2211,37 @@ async def _search_flow(callback, user: dict, uid: int) -> None:
                 _leave_queue(uid, "timeout")
                 break
             if bad_edits < 5:                                  # если сообщение пропало, просто ждём результата
-                await paint(lambda wi: search_html(entry, user, wi), search_kb())
+                await paint(lambda wi: search_html(entry, fresh_user(), wi), search_kb())
+        _QUEUE.pop(uid, None)
+        state = entry["state"]
+        if state == "matched":
+            _FIGHTING[uid] = time.time()
+            try:
+                await paint(lambda wi: matched_html(entry, wi), None)
+                await asyncio.sleep(2.5)
+                await _play_battle(wrapper, entry["info"])
+            finally:
+                _FIGHTING.pop(uid, None)
+        elif state == "timeout":
+            await paint(lambda wi: timeout_html(entry, wi), timeout_kb())
+        elif state == "failed":
+            text = {"energy": "Энергия закончилась, поиск остановлен", "gone": "Профиль недоступен",
+                    }.get(entry["reason"], "Поиск сорвался, энергия не потрачена. Попробуй ещё раз")
+            try:
+                await wrapper.bot.send_message(uid, f"<i>{text}</i>")
+            except Exception:
+                log.debug("не удалось сообщить об остановке поиска", exc_info=True)
+            await paint(lambda wi: choose_html(fresh_user(), wi), choose_kb(fresh_user()))
+        else:                                                   # cancelled
+            await paint(lambda wi: choose_html(fresh_user(), wi), choose_kb(fresh_user()))
     except asyncio.CancelledError:
         _leave_queue(uid, "cancelled")
         raise
+    except Exception:
+        log.exception("поиск соперника игрока %s завершился ошибкой", uid)
     finally:
-        _QUEUE.pop(uid, None)
-
-    state = entry["state"]
-    if state == "matched":
-        _FIGHTING[uid] = time.time()
-        try:
-            await paint(lambda wi: matched_html(entry, wi), None)
-            await asyncio.sleep(2.5)
-            await _play_battle(wrapper, entry["info"])
-        finally:
-            _FIGHTING.pop(uid, None)
-    elif state == "timeout":
-        await paint(lambda wi: timeout_html(entry, wi), timeout_kb())
-    elif state == "failed":
-        text = {"energy": "Энергия закончилась, поиск остановлен", "gone": "Профиль недоступен",
-                }.get(entry["reason"], "Поиск сорвался, энергия не потрачена. Попробуй ещё раз")
-        try:
-            await callback.bot.send_message(uid, f"<i>{text}</i>")
-        except Exception:
-            log.debug("не удалось сообщить об остановке поиска", exc_info=True)
-        await paint(lambda wi: choose_html(user, wi), choose_kb(user))
-    else:                                                       # cancelled
-        await paint(lambda wi: choose_html(user, wi), choose_kb(user))
+        if _QUEUE.get(uid) is entry:
+            _QUEUE.pop(uid, None)
 
 
 @router.callback_query(F.data.regexp(r"^arena:find:(pvp|bot)$"))
@@ -2242,7 +2253,15 @@ async def on_find_mode(callback: CallbackQuery):
     uid = callback.from_user.id
     mode = callback.data.split(":")[2]
     if mode == "pvp":
-        await _search_flow(callback, user, uid)
+        if st["energy"] < 1:
+            await _ans(callback, "Нет энергии: подожди (+1 каждые 10 минут) или восстанови её за монеты", show_alert=True)
+            await _show_choice(callback, user)
+            return
+        if uid in _FIGHTING:
+            await _ans(callback, "Бой ещё идёт, дождись результата", show_alert=True)
+            return
+        _search_start(callback, user, uid)
+        await _ans(callback, "Ищем соперника…")
         return
     target = st.get("target")
     if not target or _target_mode(target) != mode or target_fighter(target) is None:
