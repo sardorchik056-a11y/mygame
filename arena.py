@@ -2098,30 +2098,33 @@ def top_kb(period: str = "all") -> InlineKeyboardMarkup:
     )
 
 
+def _ago_short(ts) -> str:
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    sec = max(0, time.time() - ts)
+    if sec < 60:
+        return "сейчас"
+    if sec < 3600:
+        return f"{int(sec // 60)} мин"
+    if sec < 86400:
+        return f"{int(sec // 3600)} ч"
+    return f"{int(sec // 86400)} дн"
+
+
 def hist_html(user: dict, with_image: bool = False) -> str:
+    """Одна строка на бой: номер, значок результата, соперник, кубки, давность (всё курсивом)."""
     st = _state(user)
-    cards = []
+    lines = []
     for n, e in enumerate(reversed(st["log"]), start=1):
         mark = _em(E_TOP) if e["win"] else _em(_LOSSES)
         sign = "+" if e["delta"] >= 0 else ""
-        tag = " (робот)" if e.get("bot") else ""
-        ago = _ago(e.get("ts"))
-        lines = [f"{_num_e(n)} {mark} <b>{escape(str(e.get('opp', '?')))}</b>{tag}",
-                 f"{escape(str(e.get('pet', '')))} · <b>{sign}{e['delta']}</b> кубков" + (f" · {ago}" if ago else "")]
-        loot = []
-        if e.get("coins"):
-            loot.append(f"+{_num(e['coins'])} {_coin()}")
-        if e.get("meat"):
-            loot.append(f"+{e['meat']} {_MEAT}")
-        if e.get("fruit"):
-            loot.append(f"+{e['fruit']} {_FRUIT}")
-        if loot:
-            lines.append(" · ".join(loot))
-        cards.append("<br>".join(lines))
-    body = (_p("<b>Последние бои</b>") + _gap() + _cards(cards)) if cards else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
+        ago = _ago_short(e.get("ts"))
+        parts = [escape(str(e.get("opp", "?"))[:22]), f"{sign}{e['delta']}"] + ([ago] if ago else [])
+        lines.append(f"{_num_e(n)} {mark} <i>{' · '.join(parts)}</i>")
+    body = _p(*lines) if lines else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
     return (
         f"{_image(with_image)}<p><b>{_em(E_HIST)} ИСТОРИЯ БОЁВ</b></p>"
-        f"<blockquote><i>Победы отмечены кубком {_em(E_TOP)}, поражения значком {_em(_LOSSES)}.</i></blockquote>" + body
+        f"<blockquote><i>Победа {_em(E_TOP)}, поражение {_em(_LOSSES)}. Справа кубки и сколько прошло с боя.</i></blockquote>" + body
     )
 
 
@@ -2151,9 +2154,12 @@ def tasks_kb(user: dict) -> InlineKeyboardMarkup:
     return _kb(*rows)
 
 
-def rules_html(with_image: bool = False) -> str:
+RULE_PAGES = [(0, 4), (4, 7), (7, 10)]     # какие пункты правил на каких страницах (4 + 3 + 3)
+
+
+def _rule_points() -> list[tuple[str, str]]:
     leagues = ", ".join(name for _, name, _icon in LEAGUES)
-    points = [
+    return [
         ("Выбор соперника", "Сражайся с настоящим игроком или с тренировочным роботом. Игрок ищется среди тех, кто тоже ищет бой прямо сейчас."),
         ("Поиск", f"Идёт до {_clock(SEARCH_MAX)}. Со временем окно по кубкам и силе расширяется. Энергия тратится только когда бой начался."),
         ("Ход боя", "Питомцы атакуют по очереди, быстрый ходит первым. Исход решают навыки, критические удары и увороты."),
@@ -2165,13 +2171,25 @@ def rules_html(with_image: bool = False) -> str:
         ("Награды", f"За бой выдаются монеты, мясо и фрукты. Против робота награда около {round(BOT_REWARD_MULT * 100)}%, и кубки меняются только у тебя."),
         ("Лимиты", f"С одним и тем же игроком можно драться {PAIR_LIMIT_DAY} раза в сутки."),
     ]
-    cards = [f"{_num_e(n)} <b>{title}</b><br>{text}" for n, (title, text) in enumerate(points, start=1)]
+
+
+def rules_html(with_image: bool = False, page: int = 1) -> str:
+    page = min(max(1, page), len(RULE_PAGES))
+    start, end = RULE_PAGES[page - 1]
+    points = _rule_points()
+    cards = [f"{_num_e(n)} <b>{title}</b><br>{text}" for n, (title, text) in enumerate(points[start:end], start=start + 1)]
+    tail = _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>") if page == len(RULE_PAGES) else ""
     return (
-        f"{_image(with_image)}<p><b>{_em(E_RULES)} ПРАВИЛА АРЕНЫ</b></p>"
+        f"{_image(with_image)}<p><b>{_em(E_RULES)} ПРАВИЛА АРЕНЫ</b> · страница {page} из {len(RULE_PAGES)}</p>"
         "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
-        + _cards(cards) + _gap()
-        + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
+        + _cards(cards) + _gap() + tail
     )
+
+
+def rules_kb(page: int = 1) -> InlineKeyboardMarkup:
+    pages = [_btn(f"Стр. {i}", f"arena:rules:{i}", ButtonStyle.SUCCESS if i == page else ButtonStyle.PRIMARY)
+             for i in range(1, len(RULE_PAGES) + 1)]
+    return _kb(pages, [_back("arena:main")])
 
 
 # ---------------------------------------------------------------------------
@@ -2624,11 +2642,16 @@ async def on_claim(callback: CallbackQuery):
     await _show(callback, "arena_tasks", lambda wi: tasks_html(user, wi), tasks_kb(user))
 
 
-@router.callback_query(F.data == "arena:rules")
+@router.callback_query(F.data.regexp(r"^arena:rules(:[1-3])?$"))
 @_guard
 async def on_rules(callback: CallbackQuery):
+    user, st = await _need(callback)
+    if user is None:
+        return
+    parts = callback.data.split(":")
+    page = int(parts[2]) if len(parts) > 2 else 1
     await _ans(callback)
-    await _show(callback, "arena", lambda wi: rules_html(wi), _kb([_back("arena:main")]))
+    await _show(callback, "arena", lambda wi: rules_html(wi, page), rules_kb(page))
 
 
 # ---------------------------------------------------------------------------
