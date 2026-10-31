@@ -31,9 +31,11 @@ from __future__ import annotations
 import asyncio
 import collections
 import copy
+import datetime
 import functools
 import logging
 import math
+import re
 import random
 import time
 from html import escape
@@ -60,7 +62,8 @@ router = Router()
 IMG_TARGETS: dict[str, str] = {
     "arena": "Арена: главный экран",
     "arena_find": "Арена: выбор и подбор соперника",
-    "arena_battle": "Арена: бой",
+    "arena_battle": "Арена: бой (только во время самого боя)",
+    "arena_result": "Арена: итоги боя",
     "arena_top": "Арена: рейтинг",
     "arena_tasks": "Арена: задания",
     "arena_history": "Арена: история боёв",
@@ -188,6 +191,9 @@ REROLL_COST = 100            # монет за повторный поиск (п
 SIM_PREVIEW = 80             # сколько пробных боёв для оценки шанса победы
 HISTORY_KEEP = 10
 TOP_SIZE = 10
+PERIOD_KEEP_DAYS = 31        # сколько дней хранить очки для рейтингов за период
+PERIODS = {"all": 0, "day": 1, "week": 7, "month": 30}   # сколько дней в периоде (0 = за всё время)
+PERIOD_LABEL = {"all": "за всё время", "day": "за сегодня", "week": "за неделю", "month": "за месяц"}
 
 # Тренировочные роботы
 BOT_NAMES = ["Робот-Тренер", "Железный Гладиатор", "Сталь-7", "Страж Колизея", "Механический Воин",
@@ -693,10 +699,20 @@ def _clean_entry(info) -> dict | None:
     pet = info.get("pet")
     if pet not in _PETS:
         return None
-    return {
+    entry = {
         "r": _int(info.get("r"), 0, 9999, START_RATING), "p": _int(info.get("p"), 0, 10**9, 0),
         "pet": pet, "lv": _int(info.get("lv"), 1, 10**4, 1), "seen": _int(info.get("seen"), 0, 4_000_000_000, 0),
     }
+    days = {}
+    raw = info.get("d")
+    if isinstance(raw, dict):
+        for day, rec in raw.items():
+            if (isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and isinstance(rec, list) and len(rec) == 3
+                    and all(isinstance(x, int) and not isinstance(x, bool) for x in rec)):
+                days[day] = rec
+    if days:
+        entry["d"] = days
+    return entry
 
 
 def _load_registry() -> None:
@@ -787,10 +803,35 @@ def _reg_update(uid, user: dict) -> None:
         log.exception("не удалось обновить запись игрока %s в списке арены", uid)
         return
     old = _REG["players"].get(str(uid))
+    if old and old.get("d"):
+        entry["d"] = old["d"]                                    # очки по дням сохраняем
     _REG["players"][str(uid)] = entry
     if not old or old.get("r") != entry["r"] or old.get("p") != entry["p"] or old.get("pet") != entry["pet"]:
         _mark_dirty()
     _flush_registry()
+
+
+def _days_back(n: int) -> list[str]:
+    """Даты (ГГГГ-ММ-ДД) последних n дней, включая сегодня."""
+    today = datetime.date.today()
+    return [(today - datetime.timedelta(days=i)).isoformat() for i in range(n)]
+
+
+def _reg_record(uid, delta: int, win: bool) -> None:
+    """Записывает результат боя в очки игрока за сегодня (для рейтингов за день, неделю и месяц).
+    Хранится 31 день. Считаем только бои с настоящими игроками."""
+    entry = _REG["players"].get(str(uid))
+    if entry is None:
+        return
+    days = entry.setdefault("d", {})
+    rec = days.setdefault(_today(), [0, 0, 0])
+    rec[0] += int(delta)
+    rec[1] += 1 if win else 0
+    rec[2] += 1
+    keep = set(_days_back(PERIOD_KEEP_DAYS))
+    for day in [d for d in days if d not in keep]:
+        days.pop(day, None)
+    _mark_dirty()
 
 
 def _reg_remove(uid) -> None:
@@ -806,18 +847,8 @@ def _exists(oid: str) -> bool:
     return bool(u) and u.get("pet") in _PETS
 
 
-def rank_of(uid) -> tuple[int, int]:
-    """(место в рейтинге, всего участников)."""
-    players = _REG["players"]
-    mine = players.get(str(uid))
-    if not mine:
-        return len(players) + 1, len(players)
-    better = sum(1 for p in players.values() if p.get("r", 0) > mine["r"])
-    return better + 1, len(players)
-
-
 def top_list(n: int = TOP_SIZE) -> list[tuple[str, dict]]:
-    """Лучшие n участников. Удалённых игроков по пути убираем из списка."""
+    """Лучшие n участников по кубкам. Удалённых игроков по пути убираем из списка."""
     items = sorted(_REG["players"].items(), key=lambda kv: (-kv[1].get("r", 0), -kv[1].get("p", 0)))
     out, gone = [], []
     for oid, info in items:
@@ -832,6 +863,71 @@ def top_list(n: int = TOP_SIZE) -> list[tuple[str, dict]]:
     if gone:
         _mark_dirty()
     return out
+
+
+def rank_of(uid) -> tuple[int, int]:
+    """(место в рейтинге за всё время, всего участников)."""
+    players = _REG["players"]
+    mine = players.get(str(uid))
+    if not mine:
+        return len(players) + 1, len(players)
+    better = sum(1 for p in players.values() if p.get("r", 0) > mine["r"])
+    return better + 1, len(players)
+
+
+def _period_stats(info: dict, period: str) -> tuple[int, int, int]:
+    """(кубки, победы, бои) игрока за период."""
+    days = info.get("d") or {}
+    keys = _days_back(PERIODS[period])
+    delta = wins = fights = 0
+    for day in keys:
+        rec = days.get(day)
+        if rec:
+            delta += rec[0]
+            wins += rec[1]
+            fights += rec[2]
+    return delta, wins, fights
+
+
+def _period_board(period: str) -> list[tuple[str, dict, tuple[int, int, int]]]:
+    """Все игроки, дравшиеся за период, от лучшего к худшему (по кубкам за период, потом по победам)."""
+    board = []
+    for oid, info in _REG["players"].items():
+        stats = _period_stats(info, period)
+        if stats[2] > 0:
+            board.append((oid, info, stats))
+    board.sort(key=lambda x: (-x[2][0], -x[2][1], x[2][2]))
+    return board
+
+
+def top_period(period: str, n: int = TOP_SIZE) -> list[tuple[str, dict, tuple[int, int, int] | None]]:
+    """Топ n за период. Для «за всё время» это общий рейтинг по кубкам. Удалённых игроков убираем."""
+    if period == "all":
+        return [(oid, info, None) for oid, info in top_list(n)]
+    out, gone = [], []
+    for oid, info, stats in _period_board(period):
+        if len(out) >= n:
+            break
+        if _exists(oid):
+            out.append((oid, info, stats))
+        else:
+            gone.append(oid)
+    for oid in gone:
+        _REG["players"].pop(oid, None)
+    if gone:
+        _mark_dirty()
+    return out
+
+
+def rank_in_period(uid, period: str) -> tuple[int | None, int]:
+    """(место игрока, всего участников) в рейтинге за период; None, если за период он не дрался."""
+    if period == "all":
+        return rank_of(uid)[0], rank_of(uid)[1]
+    board = _period_board(period)
+    for n, (oid, _info, _stats) in enumerate(board, start=1):
+        if oid == str(uid):
+            return n, len(board)
+    return None, len(board)
 
 
 # ---------------------------------------------------------------------------
@@ -1289,6 +1385,7 @@ def _apply_result(uid: str, user: dict, st: dict, me: dict, opp: dict, opp_uid, 
         })
         del opp_st["log"][:-HISTORY_KEEP]
         _reg_update(opp_uid, opp_user)
+        _reg_record(opp_uid, opp_delta, not win)
 
     st["log"].append({
         "ts": int(time.time()), "opp": opp["name_plain"], "pet": opp["pet_name"], "win": win,
@@ -1301,6 +1398,8 @@ def _apply_result(uid: str, user: dict, st: dict, me: dict, opp: dict, opp_uid, 
     del st["recent"][:-RECENT_KEEP]
     st["target"] = None
     _reg_update(uid, user)
+    if real:
+        _reg_record(uid, delta, win)
     if finalize:
         _REG["fights"] = _REG.get("fights", 0) + 1
         _save_registry()
@@ -1927,21 +2026,45 @@ def result_kb(info: dict) -> InlineKeyboardMarkup:
     )
 
 
-def top_html(uid, with_image: bool = False) -> str:
+def top_html(uid, with_image: bool = False, period: str = "all") -> str:
+    if period not in PERIODS:
+        period = "all"
     rows = []
-    for n, (oid, info) in enumerate(top_list(), start=1):
+    for n, (oid, info, stats) in enumerate(top_period(period), start=1):
         name = settings.public_name_html_by_id(oid) or "Игрок"
         you = " ◀ ты" if oid == str(uid) else ""
-        pet = _PETS.get(info.get("pet"), {}).get("name", "")
-        rows.append((f"{n}. {name}{you}",
-                     f"{league_name(info.get('r', 0))}, {_num(info.get('r', 0))} · {escape(pet)}"))
-    rank, total = rank_of(uid)
-    body = _sec("Лучшие бойцы сезона", rows) if rows else _p("<i>Пока никого нет. Стань первым!</i>")
+        pet = escape(_PETS.get(info.get("pet"), {}).get("name", ""))
+        if stats is None:
+            value = f"{league_name(info.get('r', 0))}, {_num(info.get('r', 0))} · {pet}"
+        else:
+            delta, wins, fights = stats
+            value = f"{'+' if delta >= 0 else ''}{delta} кубков · побед {wins} из {fights} · {pet}"
+        rows.append((f"{n}. {name}{you}", value))
+    place, total = rank_in_period(uid, period)
+    if period == "all":
+        quote = "Общий рейтинг питомцев по кубкам. Скрытые игроки показаны без имени."
+        title = "Топ-10 за всё время"
+        mine = [("Твоё место", f"{place} из {total}")]
+    else:
+        quote = "Кто набрал больше кубков в боях с настоящими игроками. Скрытые игроки показаны без имени."
+        title = f"Топ-10 {PERIOD_LABEL[period]}"
+        mine = [("Твоё место", f"{place} из {total}" if place else "ты ещё не дрался за этот период")]
+    body = _sec(title, rows) if rows else _p("<i>За этот период пока никто не дрался. Стань первым!</i>")
     return (
         f"{_image(with_image)}<p><b>{_em(E_TOP)} РЕЙТИНГ АРЕНЫ</b></p>"
-        "<blockquote><i>Лучшие питомцы по кубкам. Скрытые игроки показаны без имени.</i></blockquote>"
+        f"<blockquote><i>{quote}</i></blockquote>"
         + body
-        + _tree([("Твоё место", f"{rank} из {total}"), (f"{_em(E_SEASON)} Сезон закончится через", _dur(_season_left()))], "Ты")
+        + _tree(mine + [(f"{_em(E_SEASON)} Сезон закончится через", _dur(_season_left()))], "Ты")
+    )
+
+
+def top_kb(period: str = "all") -> InlineKeyboardMarkup:
+    def b(key: str, text: str, icon: str) -> InlineKeyboardButton:
+        return _btn(text, f"arena:top:{key}", ButtonStyle.SUCCESS if key == period else ButtonStyle.PRIMARY, icon)
+    return _kb(
+        [b("all", "Всё время", E_TOP[0]), b("week", "Неделя", E_SEASON[0])],
+        [b("day", "Сегодня", E_SEASON[0]), b("month", "Месяц", E_SEASON[0])],
+        [_back("arena:main")],
     )
 
 
@@ -2358,12 +2481,12 @@ async def _play_battle(callback, info: dict) -> None:
                 log.debug("кадр боя пропущен: %s", e)
             await asyncio.sleep(FRAME_DELAY)
         await asyncio.sleep(0.6)
-        await _show(wrapper, "arena_battle", result, kb)
+        await _show(wrapper, "arena_result", result, kb)
         return
     except Exception:
         log.warning("не удалось показать бой игроку %s, отправляем итог", callback.from_user.id, exc_info=True)
     try:
-        await _send_rich_card(callback.bot, chat_id, "arena_battle", result, kb)
+        await _send_rich_card(callback.bot, chat_id, "arena_result", result, kb)
     except Exception:
         log.exception("не удалось отправить итог боя игроку %s", callback.from_user.id)
 
@@ -2413,15 +2536,17 @@ async def on_fight(callback: CallbackQuery):
         _FIGHTING.pop(uid, None)
 
 
-@router.callback_query(F.data == "arena:top")
+@router.callback_query(F.data.regexp(r"^arena:top(:(all|day|week|month))?$"))
 @_guard
 async def on_top(callback: CallbackQuery):
     user, st = await _need(callback)
     if user is None:
         return
     uid = callback.from_user.id
+    parts = callback.data.split(":")
+    period = parts[2] if len(parts) > 2 else "all"
     await _ans(callback)
-    await _show(callback, "arena_top", lambda wi: top_html(uid, wi), _kb([_back("arena:main")]))
+    await _show(callback, "arena_top", lambda wi: top_html(uid, wi, period), top_kb(period))
 
 
 @router.callback_query(F.data == "arena:hist")
@@ -2509,6 +2634,7 @@ def send_preview_builders(user: dict, uid) -> dict:
         "arena": lambda wi: main_html(user, uid, wi),
         "arena_find": lambda wi: choose_html(user, wi),
         "arena_battle": lambda wi: f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ</b></p>",
+        "arena_result": lambda wi: f"{_image(wi)}<p><b>{_em(E_TOP)} ИТОГИ БОЯ</b></p>",
         "arena_top": lambda wi: top_html(uid, wi),
         "arena_tasks": lambda wi: tasks_html(user, wi),
         "arena_history": lambda wi: hist_html(user, wi),
