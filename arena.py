@@ -1338,8 +1338,8 @@ def _apply_result(uid: str, user: dict, st: dict, me: dict, opp: dict, opp_uid, 
     """Применяет итог уже проведённого боя к игроку: энергия, кубки, награды, история, задания.
     defender=True: соперник-игрок не участвовал в поиске, и его тоже обновляем (офлайн-защита);
     defender=False: соперник ищет бой сам, ему итог применяется отдельным вызовом.
-    finalize=False: не сохраняем и не считаем бой (это делает вызывающий после обоих игроков)."""
-    battle = simulate(me, opp)
+    finalize=False: не сохраняем и не считаем бой (это делает вызывающий после обоих игроков).
+    Бой здесь НЕ разыгрывается заново: battle и win приходят от вызывающего и описывают один и тот же бой."""
     old_rating = st["rating"]
     win_d, loss_d = rating_deltas(old_rating, opp_rating)
     new_rating = max(0, old_rating + (win_d if win else loss_d))
