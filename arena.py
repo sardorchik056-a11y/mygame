@@ -219,6 +219,16 @@ _LEVEL = ("5431816358675366190", "🆙")
 _SKILL = ("5364265456641258077", "⭐️")
 _MEAT, _FRUIT = "🥩", "🥭"
 ARENA_EMOJI = ("5454014806950429357", "⚔️")      # эмодзи заголовка (как на кнопке «Арена»)
+# Эмодзи кнопок и разделов (id кастомных эмодзи)
+E_FIND = "5028584217378817208"                   # 🏴 кнопка «Поиск противника»
+E_TOP = ("5244590801438138696", "🏆")            # рейтинг (кнопка и раздел в тексте)
+E_HIST = "5404515205784806076"                   # 📃 кнопка «История»
+E_TASKS = "5330363643391393348"                  # ☑ кнопка «Задания»
+E_RULES = "5438605546624132206"                  # 📘 кнопка «Правила»
+E_FIGHTER = ("5231406626228948265", "🥊")        # «Твой боец» в тексте
+E_FIGHTS = ("5454014806950429357", "⚔️")         # «Бои» в тексте
+E_STREAK = ("5424972470023104089", "🔥")         # «Серия побед»
+E_SEASON = ("5344026935087346880", "🕰")         # «До конца сезона»
 _REG_FILE: Path | None = None
 _REG: dict = {"players": {}, "fights": 0}         # общий список участников арены
 _iter_users = None                                # необязательно: () -> итератор (id, user) для первичного заполнения списка
@@ -1533,8 +1543,16 @@ def _kb(*rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows if r])
 
 
-def _btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
+def _btn(text: str, data: str, style: ButtonStyle = ButtonStyle.PRIMARY, icon: str | None = None) -> InlineKeyboardButton:
+    if icon:
+        return InlineKeyboardButton(text=text, callback_data=data, style=style, icon_custom_emoji_id=icon)
     return InlineKeyboardButton(text=text, callback_data=data, style=style)
+
+
+def _power_emoji() -> str:
+    """Эмодзи силы: тот же, что у характеристики урона (атаки)."""
+    pair = _STAT_EMOJI.get("atk")
+    return _em(pair) if pair else "💪"
 
 
 def _back(data: str, text: str = "Назад") -> InlineKeyboardButton:
@@ -1602,37 +1620,37 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
         f"{_image(with_image)}"
         f"<p><b>{_em(ARENA_EMOJI)} АРЕНА</b></p>"
         f"<blockquote><i>{random.choice(ARENA_LINES)}</i></blockquote>"
-        + _sec("🐾 Твой боец", [
+        + _sec(f"{_em(E_FIGHTER)} Твой боец", [
             ("Питомец", f"{escape(pet['name'])} {_elem(pet['element'])}".strip()),
             (f"{_em(_LEVEL)} Уровень", str(user["level"])),
-            ("💪 Сила", _num(power_of(stats))),
+            (f"{_power_emoji()} Сила", _num(power_of(stats))),
         ])
-        + _sec("🏆 Рейтинг", [
+        + _sec(f"{_em(E_TOP)} Рейтинг", [
             ("Лига", league_name(st["rating"])),
             ("Кубки", f"{_num(st['rating'])} (рекорд сезона {_num(st['best'])})"),
             ("Место", f"{rank} из {total}"),
-            ("🔥 Серия побед", f"{st['streak']} (рекорд {st['best_streak']})"),
+            (f"{_em(E_STREAK)} Серия побед", f"{st['streak']} (рекорд {st['best_streak']})"),
         ])
-        + _sec("⚔️ Бои", [
+        + _sec(f"{_em(E_FIGHTS)} Бои", [
             (f"{_em(_WINS)} Победы", _num(st["wins"])),
             (f"{_em(_LOSSES)} Поражения", _num(st["losses"])),
             ("Процент побед", rate),
             ("🛡 Защиты", f"{st['def_w']} отбито, {st['def_l']} проиграно"),
         ])
         + _tree([("⚡ Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Восстановление", energy_tail),
-                 ("⏳ До конца сезона", _dur(_season_left()))], "🔋 Состояние")
+                 (f"{_em(E_SEASON)} До конца сезона", _dur(_season_left()))], "🔋 Состояние")
         + (_p(*extra) if extra else "")
     )
 
 
 def main_kb(user: dict) -> InlineKeyboardMarkup:
     st = _state(user)
-    rows = [[_btn("⚔️ В бой: выбрать соперника", "arena:find", ButtonStyle.SUCCESS)]]
+    rows = [[_btn("Поиск противника", "arena:find", ButtonStyle.SUCCESS, E_FIND)]]
     if st["energy"] < 1 and _refills_left(st):
         rows.insert(0, [_btn(f"⚡ Восстановить энергию · {_num(_refill_price(st))}", "arena:refill", ButtonStyle.DANGER)])
     rows += [
-        [_btn("🏆 Рейтинг", "arena:top", ButtonStyle.PRIMARY), _btn("📜 История", "arena:hist", ButtonStyle.PRIMARY)],
-        [_btn("🎯 Задания", "arena:tasks", ButtonStyle.PRIMARY), _btn("ℹ️ Правила", "arena:rules", ButtonStyle.PRIMARY)],
+        [_btn("Рейтинг", "arena:top", ButtonStyle.PRIMARY, E_TOP[0]), _btn("История", "arena:hist", ButtonStyle.PRIMARY, E_HIST)],
+        [_btn("Задания", "arena:tasks", ButtonStyle.PRIMARY, E_TASKS), _btn("Правила", "arena:rules", ButtonStyle.PRIMARY, E_RULES)],
         [_btn("Закрыть", "arena:close", ButtonStyle.DANGER)],
     ]
     return _kb(*rows)
@@ -1705,7 +1723,7 @@ def matched_html(entry: dict, with_image: bool = False) -> str:
             ("Имя", opp["name_html"]),
             ("Питомец", _pet_line(opp)),
             (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
-            ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+            (f"{_power_emoji()} Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
             ("🏆 Кубки", _num(info["opp_rating"])),
         ], "Противник")
         + _p("<i>Энергия списана, бой начинается!</i>")
@@ -1793,7 +1811,7 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
         ("Имя", opp["name_html"]),
         ("Питомец", _pet_line(opp)),
         (f"{_em(_LEVEL)} Уровень", str(opp["level"])),
-        ("💪 Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
+        (f"{_power_emoji()} Сила", f"{_num(power_of(opp['stats']))} (у тебя {_num(power_of(me['stats']))})"),
         ("Статус", status),
     ]
     return (
@@ -1896,7 +1914,7 @@ def result_html(info: dict, with_image: bool = False) -> str:
     ] + [(label, value) for label, value in info["bonus"]]
     rewards.append(("⚡ Энергия", f"{info['energy']}/{ENERGY_MAX}"))
     if win:
-        rewards.append(("🔥 Серия побед", str(info["streak"])))
+        rewards.append((f"{_em(E_STREAK)} Серия побед", str(info["streak"])))
     extra = []
     if info["league_up"]:
         extra.append(f"<b>🎉 Новая лига: {league_name(info['new_rating'])}!</b>")
@@ -1914,8 +1932,8 @@ def result_html(info: dict, with_image: bool = False) -> str:
 
 def result_kb(info: dict) -> InlineKeyboardMarkup:
     return _kb(
-        [_btn("⚔️ Ещё бой", "arena:find", ButtonStyle.SUCCESS)],
-        [_btn("🏆 Рейтинг", "arena:top", ButtonStyle.PRIMARY), _btn("🎯 Задания", "arena:tasks", ButtonStyle.PRIMARY)],
+        [_btn("Поиск противника", "arena:find", ButtonStyle.SUCCESS, E_FIND)],
+        [_btn("Рейтинг", "arena:top", ButtonStyle.PRIMARY, E_TOP[0]), _btn("Задания", "arena:tasks", ButtonStyle.PRIMARY, E_TASKS)],
         [_back("arena:main", "В арену")],
     )
 
@@ -1932,10 +1950,10 @@ def top_html(uid, with_image: bool = False) -> str:
     rank, total = rank_of(uid)
     body = _sec("Лучшие бойцы сезона", rows) if rows else _p("<i>Пока никого нет. Стань первым!</i>")
     return (
-        f"{_image(with_image)}<p><b>🏆 РЕЙТИНГ АРЕНЫ</b></p>"
+        f"{_image(with_image)}<p><b>{_em(E_TOP)} РЕЙТИНГ АРЕНЫ</b></p>"
         "<blockquote><i>Лучшие питомцы по кубкам. Скрытые игроки показаны без имени.</i></blockquote>"
         + body
-        + _tree([("📍 Твоё место", f"{rank} из {total}"), ("⏳ Сезон закончится через", _dur(_season_left()))], "Ты")
+        + _tree([("📍 Твоё место", f"{rank} из {total}"), (f"{_em(E_SEASON)} Сезон закончится через", _dur(_season_left()))], "Ты")
     )
 
 
