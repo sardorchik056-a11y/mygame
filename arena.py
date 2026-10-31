@@ -187,7 +187,9 @@ SCREEN_RUNS = 20             # пробных боёв на кандидата �
 FAIR_BAND = (0.30, 0.75)     # хороший соперник: шанс победы игрока в этих пределах
 FAIR_TARGET = 0.5            # если подходящих нет, берём ближайшего к этому шансу
 TARGET_TTL = 15 * 60         # выбранный соперник «держится» столько секунд
-REROLL_COST = 100            # монет за повторный поиск (первый бесплатно)
+REROLL_BASE = 50             # монет за смену соперника (первая смена в окне)
+REROLL_GROWTH = 1.5          # каждая следующая смена дороже в столько раз (+50%)
+REROLL_RESET = 2 * 3600      # если столько секунд не менять соперника, цена снова базовая
 SIM_PREVIEW = 80             # сколько пробных боёв для оценки шанса победы
 HISTORY_KEEP = 10
 TOP_SIZE = 10
@@ -536,6 +538,7 @@ def _state(user: dict) -> dict:
     st.setdefault("pairs", {"day": _today(), "n": {}})
     st.setdefault("daily", {"day": _today(), "fights": 0, "wins": 0, "claimed": [], "first_win": False, "refills": 0})
     st.setdefault("defended", {"day": _today(), "n": 0})
+    st.setdefault("reroll", {"n": 0, "ts": 0.0})
     st.setdefault("target", None)
     return st
 
@@ -639,6 +642,12 @@ def _sanitize(user: dict, uid) -> list[str]:
             daily[key] = _int(daily.get(key), 0, 1000, 0)
         daily["first_win"] = bool(daily.get("first_win"))
         daily["claimed"] = [k for k in daily["claimed"] if k in {q[0] for q in QUESTS}]
+    rr = st.get("reroll")
+    if not (isinstance(rr, dict) and isinstance(rr.get("ts"), (int, float)) and not isinstance(rr.get("ts"), bool)):
+        st["reroll"] = {"n": 0, "ts": 0.0}
+        fixes.append("reroll")
+    else:
+        rr["n"] = _int(rr.get("n"), 0, 60, 0)
     dfn = st.get("defended")
     if not (isinstance(dfn, dict) and isinstance(dfn.get("day"), str)):
         st["defended"] = {"day": _today(), "n": 0}
@@ -1251,6 +1260,14 @@ def res_reward(level: int, win: bool, mult: float = 1.0) -> tuple[int, int]:
     if win:
         return max(1, round(meat)), max(1, round(fruit))
     return round(meat * RES_LOSS_SHARE), round(fruit * RES_LOSS_SHARE)
+
+
+def _reroll_price(st: dict) -> int:
+    """Цена смены соперника: REROLL_BASE, каждая следующая +50%, через REROLL_RESET без смен снова базовая."""
+    rr = st["reroll"]
+    if rr["n"] and time.time() - rr["ts"] >= REROLL_RESET:
+        rr["n"] = 0
+    return int(REROLL_BASE * REROLL_GROWTH ** rr["n"] + 0.5)
 
 
 def _refill_price(st: dict) -> int:
@@ -1963,9 +1980,8 @@ def find_html(user: dict, uid, target: dict, with_image: bool = False) -> str:
 
 def find_kb(user: dict, target: dict) -> InlineKeyboardMarkup:
     st = _state(user)
-    free = target.get("rerolls", 0) == 0
     bot = _target_mode(target) == "bot"
-    reroll = ("Другой робот" if bot else "Другой соперник") + ("" if free else f" · {_num(REROLL_COST)}")
+    reroll = ("Другой робот" if bot else "Другой соперник") + f" · {_num(_reroll_price(st))}"
     if st["energy"] < 1 and _refills_left(st):
         first = [_btn(f"Восстановить энергию · {_num(_refill_price(st))}", "arena:refill", ButtonStyle.DANGER)]
     else:
@@ -1975,7 +1991,7 @@ def find_kb(user: dict, target: dict) -> InlineKeyboardMarkup:
 
 
 def _event_line(info: dict, e: dict) -> str:
-    who = "Ты" if e["who"] == 0 else info["opp"]["name_html"]
+    who = info["me"]["name_html"] if e["who"] == 0 else info["opp"]["name_html"]
     hits = e["hits"]
     if all(h["dodge"] for h in hits):
         tail = "промах, увернулись"
@@ -1990,12 +2006,19 @@ def _event_line(info: dict, e: dict) -> str:
     return f"{ult}{icon}<b>{who}</b>: {e['skill']} · {tail}"
 
 
+def _hp_emoji() -> str:
+    """Эмодзи здоровья: тот же, что у характеристики hp."""
+    pair = _STAT_EMOJI.get("hp")
+    return _em(pair) if pair else ""
+
+
 def _vs_block(info: dict, hp: tuple[float, float]) -> str:
     me, opp = info["me"], info["opp"]
     rows = []
-    for f, share, tag in ((me, hp[0], "Ты"), (opp, hp[1], "Соперник")):
+    for f, share in ((me, hp[0]), (opp, hp[1])):
         mx = _fighter_hp(f)
-        rows.append(f"<b>{tag}: {f['name_html']}</b> · {_pet_line(f)}<br>{_bar(share)} {max(0, round(mx * share))}/{mx}")
+        rows.append(f"<b>{f['name_html']}</b> · {_pet_line(f)}<br>"
+                    f"{_bar(share)} {_lab(_hp_emoji(), '')}{max(0, round(mx * share))}/{mx}")
     return "<p>" + "<br>&nbsp;<br>".join(rows) + "</p>"
 
 
@@ -2021,7 +2044,7 @@ def battle_frames(info: dict) -> list:
         title = f"раунд {end} из {total_rounds}"
         frames.append(lambda wi, title=title, hp=hp, last=last: (
             f"{_image(wi)}<p><b>{_em(ARENA_EMOJI)} БОЙ · {title}</b></p>"
-            + _vs_block(info, hp) + _p(*[_event_line(info, e) for e in last])))
+            + _vs_block(info, hp) + "<blockquote>" + "<br>".join(_event_line(info, e) for e in last) + "</blockquote>"))
     return frames
 
 
@@ -2033,7 +2056,7 @@ def result_html(info: dict, with_image: bool = False) -> str:
     head = f"{_em(E_TOP)} ПОБЕДА!" if win else f"{_em(_LOSSES)} ПОРАЖЕНИЕ"
     summary = [
         ("Раундов", str(info["battle"]["rounds"])),
-        ("Твоё здоровье", f"{my_left}/{_fighter_hp(info['me'])} ({round(hp[0] * 100)}%)"),
+        (_lab(_hp_emoji(), "Твоё здоровье"), f"{my_left}/{_fighter_hp(info['me'])} ({round(hp[0] * 100)}%)"),
         ("Лучший удар", f"{_num(c['my_best'])} (у соперника {_num(c['opp_best'])})"),
         ("Критов", f"{c['my_crits']} (у соперника {c['opp_crits']})"),
         ("Уворотов", f"{c['my_dodges']} (у соперника {c['opp_dodges']})"),
@@ -2103,8 +2126,8 @@ def top_kb(period: str = "all") -> InlineKeyboardMarkup:
     def b(key: str, text: str, icon: str) -> InlineKeyboardButton:
         return _btn(text, f"arena:top:{key}", ButtonStyle.SUCCESS if key == period else ButtonStyle.PRIMARY, icon)
     return _kb(
-        [b("all", "Всё время", E_TOP[0]), b("week", "Неделя", E_SEASON[0])],
-        [b("day", "Сегодня", E_SEASON[0]), b("month", "Месяц", E_SEASON[0])],
+        [b("all", "Всё время", E_TOP[0])],
+        [b("day", "Сегодня", E_SEASON[0]), b("week", "Неделя", E_SEASON[0]), b("month", "Месяц", E_SEASON[0])],
         [_back("arena:main")],
     )
 
@@ -2480,9 +2503,9 @@ async def on_reroll(callback: CallbackQuery):
         return
     mode = _target_mode(old)
     rerolls = old.get("rerolls", 0)
-    paid = rerolls >= 1                                   # первый повторный поиск бесплатный
-    if paid and user.get("coins", 0) < REROLL_COST:
-        await _ans(callback, f"Не хватает монет: нужно {_num(REROLL_COST)}", show_alert=True)
+    price = _reroll_price(st)
+    if user.get("coins", 0) < price:
+        await _ans(callback, f"Не хватает монет: нужно {_num(price)}", show_alert=True)
         return
     added = False
     if old.get("uid"):
@@ -2495,9 +2518,10 @@ async def on_reroll(callback: CallbackQuery):
         await _ans(callback, "Других игроков сейчас нет. Попробуй позже или выбери робота", show_alert=True)
         return
     del st["recent"][:-RECENT_KEEP]
-    if paid:
-        user["coins"] -= REROLL_COST
-        _led("arena_reroll", uid=str(uid), cost=REROLL_COST, coins_left=user["coins"])
+    user["coins"] -= price
+    st["reroll"]["n"] += 1
+    st["reroll"]["ts"] = time.time()
+    _led("arena_reroll", uid=str(uid), cost=price, coins_left=user["coins"], streak=st["reroll"]["n"])
     _save_users()
     await _ans(callback, "Ищем другого соперника…")
     await _show_target(callback, user, uid, target)
