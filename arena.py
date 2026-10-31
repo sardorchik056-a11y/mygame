@@ -234,6 +234,13 @@ E_FIGHTER = ("5231406626228948265", "🥊")        # «Твой боец» в т
 E_FIGHTS = ("5454014806950429357", "⚔️")         # «Бои» в тексте
 E_STREAK = ("5424972470023104089", "🔥")         # «Серия побед»
 E_SEASON = ("5344026935087346880", "🕰")
+E_PROGRESS = ("5203993413346680064", "📊")        # «Прогресс» в заданиях
+E_REWARD = ("5203996991054432397", "🎁")          # «Награда» в заданиях
+E_STATE = ("5341363621572128687", "😴")           # «Состояние» на главном экране
+# Рамочки списков (синие ветки как на скриншоте). Пока id не заданы, рисуются обычные ├ и └.
+# Чтобы включить: TREE_MID = ("id эмодзи ├", "├"), TREE_END = ("id эмодзи └", "└")
+TREE_MID = None
+TREE_END = None
 # Цифры 1-10 для нумерованных списков (id кастомных эмодзи)
 NUM_EMOJI = [
     ("5830126888357468979", "1️⃣"), ("5830254543375441108", "2️⃣"), ("5827786453303696733", "3️⃣"),
@@ -1616,11 +1623,19 @@ def _rows(rows: list) -> str:
     return "<br>".join(f"{row[0]}: <b>{row[1]}</b>" if row[1] != "" else str(row[0]) for row in rows)
 
 
+def _branch(last: bool) -> str:
+    """Ветка рамочки: ├ для обычной строки, └ для последней."""
+    pair = TREE_END if last else TREE_MID
+    if pair:
+        return _em(pair)
+    return "└" if last else "├"
+
+
 def _tree(rows: list, title: str = "") -> str:
     lines = []
     for n, row in enumerate(rows):
         label, value = row[0], row[1]
-        mark = "└" if n == len(rows) - 1 else "├"
+        mark = _branch(n == len(rows) - 1)
         lines.append(f"{mark} {label}" + (f": <b>{value}</b>" if value != "" else ""))
     head = f"<b>{title}</b><br>" if title else ""
     return f"<p>{head}{'<br>'.join(lines)}</p>"
@@ -1769,7 +1784,7 @@ def main_html(user: dict, uid, with_image: bool = False, note: str = "") -> str:
             ("Процент побед", rate),
         ])
         + _tree([("Энергия", f"{st['energy']}/{ENERGY_MAX}"), ("Восстановление", energy_tail),
-                 (f"{_em(E_SEASON)} До конца сезона", _dur(_season_left()))], "Состояние")
+                 (f"{_em(E_SEASON)} До конца сезона", _dur(_season_left()))], f"{_em(E_STATE)} Состояние")
         + (_p(*extra) if extra else "")
     )
 
@@ -2062,14 +2077,10 @@ def top_html(uid, with_image: bool = False, period: str = "all") -> str:
     cards = []
     for n, (oid, info, stats) in enumerate(top_period(period), start=1):
         name = settings.public_name_html_by_id(oid) or "Игрок"
-        you = " ◀ ты" if oid == str(uid) else ""
+        you = " ◀" if oid == str(uid) else ""
         pet = escape(_PETS.get(info.get("pet"), {}).get("name", ""))
-        if stats is None:
-            value = f"{league_name(info.get('r', 0))}, {_num(info.get('r', 0))} · {pet}"
-        else:
-            delta, wins, fights = stats
-            value = f"{'+' if delta >= 0 else ''}{delta} кубков · побед {wins} из {fights} · {pet}"
-        cards.append(f"{_num_e(n)} <b>{name}</b>{you}<br>{value}")
+        cups = _num(info.get("r", 0)) if stats is None else f"{'+' if stats[0] >= 0 else ''}{stats[0]}"
+        cards.append(f"{_num_e(n)} <b>{name}</b>{you} · {pet} · <b>{cups}</b> {_em(E_TOP)}")
     place, total = rank_in_period(uid, period)
     if period == "all":
         quote = "Общий рейтинг питомцев по кубкам. Скрытые игроки показаны без имени."
@@ -2135,7 +2146,9 @@ def tasks_html(user: dict, with_image: bool = False) -> str:
     for n, (key, text, kind, goal, reward) in enumerate(QUESTS, start=1):
         val = min(goal, quest_value(st, kind))
         state = "получено" if key in st["daily"]["claimed"] else ("можно забрать" if val >= goal else f"{val} из {goal}")
-        cards.append(f"{_num_e(n)} <b>{text}</b><br>Прогресс: <b>{state}</b><br>Награда: +{_num(reward)} {_coin()}")
+        cards.append(f"{_num_e(n)} <b>{text}</b><br>"
+                     f"{_branch(False)} {_em(E_PROGRESS)} Прогресс: <b>{state}</b><br>"
+                     f"{_branch(True)} {_em(E_REWARD)} Награда: +{_num(reward)} {_coin()}")
     return (
         f"{_image(with_image)}<p><b>{_em(E_TASKS)} ЗАДАНИЯ ДНЯ</b></p>"
         "<blockquote><i>Новые задания каждый день. Награды выдаются за бои на арене.</i></blockquote>"
