@@ -233,7 +233,14 @@ E_RULES = ("5438605546624132206", "📘")            # правила арены
 E_FIGHTER = ("5231406626228948265", "🥊")        # «Твой боец» в тексте
 E_FIGHTS = ("5454014806950429357", "⚔️")         # «Бои» в тексте
 E_STREAK = ("5424972470023104089", "🔥")         # «Серия побед»
-E_SEASON = ("5344026935087346880", "🕰")         # «До конца сезона»
+E_SEASON = ("5344026935087346880", "🕰")
+# Цифры 1-10 для нумерованных списков (id кастомных эмодзи)
+NUM_EMOJI = [
+    ("5830126888357468979", "1️⃣"), ("5830254543375441108", "2️⃣"), ("5827786453303696733", "3️⃣"),
+    ("5830434773088083875", "4️⃣"), ("5827941630472100575", "5️⃣"), ("5830446086031941275", "6️⃣"),
+    ("5830341589477629469", "7️⃣"), ("5829992769413717353", "8️⃣"), ("5830388872772591861", "9️⃣"),
+    ("5827670648100494160", "🔟"),
+]         # «До конца сезона»
 _REG_FILE: Path | None = None
 _REG: dict = {"players": {}, "fights": 0}         # общий список участников арены
 _iter_users = None                                # необязательно: () -> итератор (id, user) для первичного заполнения списка
@@ -1628,6 +1635,29 @@ def _sec(title: str, rows: list) -> str:
     return _tree(rows, title) + _gap()
 
 
+def _num_e(n: int) -> str:
+    """Номер пункта: эмодзи-цифра (1-10), дальше обычное «11.»."""
+    return _em(NUM_EMOJI[n - 1]) if 1 <= n <= len(NUM_EMOJI) else f"{n}."
+
+
+def _cards(items: list[str]) -> str:
+    """Список карточек: каждая в своём абзаце, между ними пустая строка (не слипаются)."""
+    return _gap().join(f"<p>{item}</p>" for item in items)
+
+
+def _ago(ts) -> str:
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    sec = max(0, time.time() - ts)
+    if sec < 60:
+        return "только что"
+    if sec < 3600:
+        return f"{int(sec // 60)} мин назад"
+    if sec < 86400:
+        return f"{int(sec // 3600)} ч назад"
+    return f"{int(sec // 86400)} дн назад"
+
+
 def _p(*lines: str) -> str:
     return "<p>" + "<br>".join(lines) + "</p>"
 
@@ -2029,7 +2059,7 @@ def result_kb(info: dict) -> InlineKeyboardMarkup:
 def top_html(uid, with_image: bool = False, period: str = "all") -> str:
     if period not in PERIODS:
         period = "all"
-    rows = []
+    cards = []
     for n, (oid, info, stats) in enumerate(top_period(period), start=1):
         name = settings.public_name_html_by_id(oid) or "Игрок"
         you = " ◀ ты" if oid == str(uid) else ""
@@ -2039,7 +2069,7 @@ def top_html(uid, with_image: bool = False, period: str = "all") -> str:
         else:
             delta, wins, fights = stats
             value = f"{'+' if delta >= 0 else ''}{delta} кубков · побед {wins} из {fights} · {pet}"
-        rows.append((f"{n}. {name}{you}", value))
+        cards.append(f"{_num_e(n)} <b>{name}</b>{you}<br>{value}")
     place, total = rank_in_period(uid, period)
     if period == "all":
         quote = "Общий рейтинг питомцев по кубкам. Скрытые игроки показаны без имени."
@@ -2049,7 +2079,7 @@ def top_html(uid, with_image: bool = False, period: str = "all") -> str:
         quote = "Кто набрал больше кубков в боях с настоящими игроками. Скрытые игроки показаны без имени."
         title = f"Топ-10 {PERIOD_LABEL[period]}"
         mine = [("Твоё место", f"{place} из {total}" if place else "ты ещё не дрался за этот период")]
-    body = _sec(title, rows) if rows else _p("<i>За этот период пока никто не дрался. Стань первым!</i>")
+    body = (_p(f"<b>{title}</b>") + _gap() + _cards(cards) + _gap()) if cards else _p("<i>За этот период пока никто не дрался. Стань первым!</i>")
     return (
         f"{_image(with_image)}<p><b>{_em(E_TOP)} РЕЙТИНГ АРЕНЫ</b></p>"
         f"<blockquote><i>{quote}</i></blockquote>"
@@ -2070,17 +2100,25 @@ def top_kb(period: str = "all") -> InlineKeyboardMarkup:
 
 def hist_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
-    rows = []
-    for e in reversed(st["log"]):
+    cards = []
+    for n, e in enumerate(reversed(st["log"]), start=1):
         mark = _em(E_TOP) if e["win"] else _em(_LOSSES)
         sign = "+" if e["delta"] >= 0 else ""
-        coins = f" · +{_num(e['coins'])}" if e.get("coins") else ""
-        if e.get("meat") or e.get("fruit"):
-            coins += f" · +{e.get('meat', 0)}{_MEAT} +{e.get('fruit', 0)}{_FRUIT}"
         tag = " (робот)" if e.get("bot") else ""
-        rows.append((f"{mark} {escape(str(e.get('opp', '?')))}{tag}",
-                     f"{escape(str(e.get('pet', '')))} · {sign}{e['delta']}{coins}"))
-    body = _tree(rows, "Последние бои") if rows else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
+        ago = _ago(e.get("ts"))
+        lines = [f"{_num_e(n)} {mark} <b>{escape(str(e.get('opp', '?')))}</b>{tag}",
+                 f"{escape(str(e.get('pet', '')))} · <b>{sign}{e['delta']}</b> кубков" + (f" · {ago}" if ago else "")]
+        loot = []
+        if e.get("coins"):
+            loot.append(f"+{_num(e['coins'])} {_coin()}")
+        if e.get("meat"):
+            loot.append(f"+{e['meat']} {_MEAT}")
+        if e.get("fruit"):
+            loot.append(f"+{e['fruit']} {_FRUIT}")
+        if loot:
+            lines.append(" · ".join(loot))
+        cards.append("<br>".join(lines))
+    body = (_p("<b>Последние бои</b>") + _gap() + _cards(cards)) if cards else _p("<i>Боёв пока нет. Первый бой уже ждёт!</i>")
     return (
         f"{_image(with_image)}<p><b>{_em(E_HIST)} ИСТОРИЯ БОЁВ</b></p>"
         f"<blockquote><i>Победы отмечены кубком {_em(E_TOP)}, поражения значком {_em(_LOSSES)}.</i></blockquote>" + body
@@ -2090,15 +2128,15 @@ def hist_html(user: dict, with_image: bool = False) -> str:
 def tasks_html(user: dict, with_image: bool = False) -> str:
     st = _state(user)
     _rollover_day(st)
-    rows = []
-    for key, text, kind, goal, reward in QUESTS:
+    cards = []
+    for n, (key, text, kind, goal, reward) in enumerate(QUESTS, start=1):
         val = min(goal, quest_value(st, kind))
-        state = "получено" if key in st["daily"]["claimed"] else ("можно забрать" if val >= goal else f"{val}/{goal}")
-        rows.append((f"{text} (+{_num(reward)} {_coin()})", state))
+        state = "получено" if key in st["daily"]["claimed"] else ("можно забрать" if val >= goal else f"{val} из {goal}")
+        cards.append(f"{_num_e(n)} <b>{text}</b><br>Прогресс: <b>{state}</b><br>Награда: +{_num(reward)} {_coin()}")
     return (
         f"{_image(with_image)}<p><b>{_em(E_TASKS)} ЗАДАНИЯ ДНЯ</b></p>"
         "<blockquote><i>Новые задания каждый день. Награды выдаются за бои на арене.</i></blockquote>"
-        + _tree(rows, "Сегодня")
+        + _cards(cards) + _gap()
         + _p("<i>Задания обновляются в полночь.</i>")
     )
 
@@ -2114,24 +2152,24 @@ def tasks_kb(user: dict) -> InlineKeyboardMarkup:
 
 
 def rules_html(with_image: bool = False) -> str:
-    leagues = " → ".join(name for _, name, _icon in LEAGUES)
+    leagues = ", ".join(name for _, name, _icon in LEAGUES)
+    points = [
+        ("Выбор соперника", "Сражайся с настоящим игроком или с тренировочным роботом. Игрок ищется среди тех, кто тоже ищет бой прямо сейчас."),
+        ("Поиск", f"Идёт до {_clock(SEARCH_MAX)}. Со временем окно по кубкам и силе расширяется. Энергия тратится только когда бой начался."),
+        ("Ход боя", "Питомцы атакуют по очереди, быстрый ходит первым. Исход решают навыки, критические удары и увороты."),
+        ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды. Преимущество стихии усиливает урон."),
+        ("Кубки и лиги", f"За победу кубки растут, за поражение падают, и чем сильнее соперник, тем больше изменение. Лиги: {leagues}."),
+        ("Энергия", f"Бой стоит 1 энергии. Максимум {ENERGY_MAX}, каждые {ENERGY_REGEN_SEC // 60} минут возвращается +1. Можно восстановить за монеты."),
+        ("Сезон", f"Длится {SEASON_LENGTH // 86400} дней. В конце выдаётся награда за лучшую лигу, а кубки сбрасываются наполовину."),
+        ("Серия побед", f"Каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%."),
+        ("Награды", f"За бой выдаются монеты, мясо и фрукты. Против робота награда около {round(BOT_REWARD_MULT * 100)}%, и кубки меняются только у тебя."),
+        ("Лимиты", f"С одним и тем же игроком можно драться {PAIR_LIMIT_DAY} раза в сутки."),
+    ]
+    cards = [f"{_num_e(n)} <b>{title}</b><br>{text}" for n, (title, text) in enumerate(points, start=1)]
     return (
         f"{_image(with_image)}<p><b>{_em(E_RULES)} ПРАВИЛА АРЕНЫ</b></p>"
         "<blockquote><i>Здесь сражаются питомцы, а бой идёт автоматически.</i></blockquote>"
-        + _sec("Как проходит бой", [
-            ("Соперник", "настоящий игрок (бой начинается, когда вы оба ищете соперника) или тренировочный робот"),
-            ("Поиск", f"идёт до {_clock(SEARCH_MAX)}, со временем окно по кубкам и силе расширяется, энергия тратится только при начале боя"),
-            ("Бой", "по очереди: быстрый питомец ходит первым, навыки, криты и увороты решают исход"),
-            ("Стихии", "Вода сильнее Огня, Огонь сильнее Земли, Земля сильнее Воды"),
-            ("Кубки", "за победу растут, за поражение падают, и чем сильнее соперник, тем больше награда"),
-            ("Энергия", f"бой стоит 1 энергии, максимум {ENERGY_MAX}, +1 каждые {ENERGY_REGEN_SEC // 60} мин"),
-        ])
-        + _tree([("Лиги", leagues),
-                 ("Сезон", f"длится {SEASON_LENGTH // 86400} дней, в конце награда за лучшую лигу и сброс кубков наполовину"),
-                 ("Серия", f"каждая победа подряд даёт +{round(STREAK_BONUS * 100)}% к монетам, максимум +{round(STREAK_BONUS * STREAK_MAX * 100)}%"),
-                 ("Награда", "монеты, мясо и фрукты за каждый бой (за победу больше, с ростом уровня и лиги тоже)"),
-                 ("Робот", f"даёт около {round(BOT_REWARD_MULT * 100)}% награды, кубки меняются только у тебя"),
-                 ("Защита", f"против одного игрока можно драться {PAIR_LIMIT_DAY} раза в сутки")], "Прогресс")
+        + _cards(cards) + _gap()
         + _p("<i>Усиливай питомца уровнем и артефактами в «Снаряжении», чтобы побеждать чаще.</i>")
     )
 
